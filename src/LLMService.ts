@@ -16,7 +16,7 @@ export class LLMService {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    model: "local-model",
+                    model: "/home/Qwen/Qwen2.5-72B-Instruct-AWQ/",
                     messages: [
                         { role: "system", content: systemPrompt },
                         { role: "user", content: prompt }

@@ -8,9 +8,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     constructor(private readonly extensionUri: vscode.Uri) {}
 
+    private getWebviewContent(webview: vscode.Webview): string {
+        const scriptUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.extensionUri, 'out', 'webview', 'webview.js')
+        );
+        const toolkitUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.extensionUri, 'node_modules', '@vscode', 'webview-ui-toolkit', 'dist', 'toolkit.js')
+        );
+        const cssUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.extensionUri, 'node_modules', '@vscode', 'webview-ui-toolkit', 'dist', 'index.css')
+        );
+
+        return `
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${webview.cspSource}; style-src ${webview.cspSource};">
+                <link rel="stylesheet" href="${cssUri}">
+                <script type="module" src="${toolkitUri}"></script>
+            </head>
+            <body>
+                <div id="root"></div>
+                <script type="module" src="${scriptUri}"></script>
+            </body>
+            </html>
+        `;
+    }
+
     public resolveWebviewView(webviewView: vscode.WebviewView) {
-        webviewView.webview.options = { enableScripts: true };
-        webviewView.webview.html = this.getHtmlContent();
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [this.extensionUri]
+        };
+        webviewView.webview.html = this.getWebviewContent(webviewView.webview);
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
@@ -29,54 +61,5 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                     break;
             }
         });
-    }
-
-    private getHtmlContent(): string {
-        // In a true production app, this HTML string is replaced by a compiled React/Vite bundle.
-        return `
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <style>
-                    body { font-family: var(--vscode-font-family); padding: 10px; }
-                    textarea { width: 100%; height: 80px; margin-bottom: 10px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
-                    button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 8px; cursor: pointer; }
-                    button:hover { background: var(--vscode-button-hoverBackground); }
-                    #chat-log { margin-top: 15px; white-space: pre-wrap; font-family: monospace;}
-                </style>
-            </head>
-            <body>
-                <textarea id="prompt" placeholder="Ask the AI to generate code..."></textarea>
-                <button id="send">Send</button>
-                <button id="stop">Stop</button>
-                <button id="accept">Accept Code</button>
-                <div id="chat-log"></div>
-
-                <script>
-                    const vscode = acquireVsCodeApi();
-                    const log = document.getElementById('chat-log');
-
-                    document.getElementById('send').addEventListener('click', () => {
-                        log.innerText = '';
-                        vscode.postMessage({ type: 'prompt', value: document.getElementById('prompt').value });
-                    });
-
-                    document.getElementById('stop').addEventListener('click', () => {
-                        vscode.postMessage({ type: 'stop' });
-                    });
-
-                    document.getElementById('accept').addEventListener('click', () => {
-                        vscode.postMessage({ type: 'accept' });
-                    });
-
-                    window.addEventListener('message', event => {
-                        if (event.data.type === 'chunk') {
-                            log.innerText += event.data.value;
-                        }
-                    });
-                </script>
-            </body>
-            </html>
-        `;
     }
 }
