@@ -52,9 +52,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     }
                     break;
                 }
-                // Inside your switch (data.type) block in src/SidebarProvider.ts
-
-                // Inside your switch (data.type) cases in src/SidebarProvider.ts
 
                 case "executeTask": { // Apply this exact same logic inside your executeAllTasks loop too!
                     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -69,14 +66,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // 1. Try to read the file first (if it exists) to get its current content
                             let currentContent = "";
                             let fileUri: vscode.Uri;
-
-                            // We have to ask Qwen to map the task to a file BEFORE we know the content,
-                            // so we do a quick dry-run or pass the structure. 
-                            // Actually, the best way is to let Qwen pick the file, THEN we read it, 
-                            // but our current architecture asks Qwen for the code and file at the same time.
-
-                            // For now, let's keep the architecture simple: we pass the whole structure,
-                            // ask Qwen to give us the whole file back.
                             const result = await askQwenForCode(data.task, data.availableFiles || [], "");
                             fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, result.filepath);
 
@@ -95,13 +84,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // ** NEW REPLACEMENT LOGIC **
                             // Read what is currently in the file now that we know which file it is
                             currentContent = document.getText();
+                            const status = await this._tracker.applyAndRequestApproval(editor, result.code, data.task);
 
                             // If the file already had stuff in it, we need to ask Qwen ONE MORE TIME 
                             // to update it properly with context, otherwise it overwrites blindly.
                             let finalCode = result.code;
                             if (currentContent.trim() !== "") {
                                 progress.report({ message: `Updating existing file context for ${result.filepath}...` });
-                                const updatedResult = await askQwenForCode(data.task, data.availableFiles || [], currentContent,data.codingStyle);
+                                const updatedResult = await askQwenForCode(data.task, data.availableFiles || [], currentContent, data.codingStyle);
                                 finalCode = updatedResult.code;
                             }
 
@@ -117,8 +107,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             });
 
                             // 5. Track the provenance (now highlights the whole block)
-                            this._tracker?.markLLMEdit(editor, finalCode);
-                            webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task });
+                            this._tracker?.applyAndRequestApproval(editor, finalCode);
+                            webviewView.webview.postMessage({
+                                type: 'taskCompleted',
+                                task: data.task,
+                                status: status // 'approved' or 'rejected'
+                            });
 
                         } catch (error) {
                             console.error("Execution error:", error);
@@ -176,16 +170,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 const editor = await vscode.window.showTextDocument(document, { preview: false });
 
                                 // 3. Insert the code at the bottom of the file
-                                await editor.edit(editBuilder => {
-                                    const lastLine = document.lineAt(document.lineCount - 1);
-                                    editBuilder.insert(lastLine.range.end, "\n" + result.code + "\n");
-                                });
-
-                                // 4. Highlight the code as LLM-generated!
-                                this._tracker?.markLLMEdit(editor, result.code);
+                                const status = await this._tracker.applyAndRequestApproval(editor, result.code, data.task);
 
                                 // Notify React UI that this specific task is done
-                                webviewView.webview.postMessage({ type: 'taskCompleted', task: task });
+                                webviewView.webview.postMessage({
+                                    type: 'taskCompleted',
+                                    task: data.task,
+                                    status: status
+                                });
 
                             } catch (error) {
                                 console.error(`Error executing task: ${task}`, error);

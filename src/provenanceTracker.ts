@@ -1,41 +1,57 @@
 import * as vscode from 'vscode';
 
 export class ProvenanceTracker {
-    // Faint green highlight with a left border for LLM code
-    private llmDecorationType = vscode.window.createTextEditorDecorationType({
-        backgroundColor: 'rgba(0, 255, 0, 0.08)',
+    // 1. Decoration for code currently under review
+    private pendingDecoration = vscode.window.createTextEditorDecorationType({
+        backgroundColor: 'rgba(139, 92, 246, 0.2)', // Noticeable purple background
         isWholeLine: true,
-        borderWidth: '0 0 0 3px',
-        borderColor: 'rgba(0, 255, 0, 0.5)',
-        borderStyle: 'solid'
+        border: '1px dashed rgba(139, 92, 246, 0.8)'
     });
 
-    private fileState: Map<string, vscode.Range[]> = new Map();
+    // 2. Decoration for approved AI code
+    private approvedDecoration = vscode.window.createTextEditorDecorationType({
+        backgroundColor: 'rgba(139, 92, 246, 0.04)', // Very faint purple
+        isWholeLine: true,
+        gutterIconPath: vscode.Uri.parse('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%238B5CF6" d="M8 1l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>'),
+        gutterIconSize: 'contain'
+    });
 
-    public markLLMEdit(editor: vscode.TextEditor, code: string) {
-        const docUri = editor.document.uri.toString();
-        const ranges = this.fileState.get(docUri) || [];
+    public async applyAndRequestApproval(editor: vscode.TextEditor, newCode: string, taskName: string): Promise<string> {
+        const document = editor.document;
         
-        // Calculate the range of the newly inserted code
-        const startLine = editor.selection.active.line;
-        const lineCount = code.split('\n').length;
-        const newRange = new vscode.Range(startLine, 0, startLine + lineCount - 1, 0);
-        
-        ranges.push(newRange);
-        this.fileState.set(docUri, ranges);
-        
-        editor.setDecorations(this.llmDecorationType, ranges);
-    }
+        // 1. Apply the code replacement
+        await editor.edit(editBuilder => {
+            const fullRange = new vscode.Range(
+                document.positionAt(0),
+                document.positionAt(document.getText().length)
+            );
+            editBuilder.replace(fullRange, newCode);
+        });
 
-    public handleDocumentChange(event: vscode.TextDocumentChangeEvent) {
-        // If a human types, we need to intercept.
-        // NOTE: In a full production app, you need complex logic here to shift 
-        // the tracked LLM ranges up or down if the user presses "Enter" or deletes lines.
-        // This is the foundation to hook into.
-        
-        const isHuman = event.reason === undefined; // Usually undefined means manual typing
-        if (isHuman) {
-            // Logic to update `this.fileState` and remove/shift LLM ranges goes here.
+        // 2. Highlight the document as "Pending Review"
+        const reviewRange = new vscode.Range(0, 0, document.lineCount, 0);
+        editor.setDecorations(this.pendingDecoration, [reviewRange]);
+
+        // 3. Pause and ask the human for approval
+        const choice = await vscode.window.showInformationMessage(
+            `Qwen completed: "${taskName}". Do you approve these changes?`,
+            { modal: false },
+            "Accept", "Reject"
+        );
+
+        // 4. Handle the human's decision
+        editor.setDecorations(this.pendingDecoration, []); // Remove pending highlight
+
+        if (choice === "Accept") {
+            // Keep a faint marker that this was AI-generated
+            editor.setDecorations(this.approvedDecoration, [reviewRange]);
+            vscode.window.showInformationMessage("Changes accepted.");
+            return "approved";
+        } else {
+            // Undo the code insertion natively
+            await vscode.commands.executeCommand('undo');
+            vscode.window.showWarningMessage("Changes rejected and reverted.");
+            return "rejected";
         }
     }
 }
