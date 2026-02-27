@@ -1,0 +1,84 @@
+Gemini 說了
+This is exactly the mindset you need for building a production-grade coding assistant! If you want your agent to seamlessly integrate into a massive, well-written codebase without breaking things, you have to move beyond just writing full files and start treating the code like a surgeon.
+
+Here are 10 highly practical, coding-focused features you can build into your extension right now, grounded in actual VS Code APIs.
+
+🧠 1. Surgical Code Injection (AST-Based Insertion)
+The Concept: Instead of replacing the entire file or just appending to the bottom, the AI understands the file's structure and injects code precisely where it belongs (e.g., adding a new method specifically inside the UserService class).
+How to build it: Use a library like tree-sitter or TypeScript's compiler API to generate an Abstract Syntax Tree (AST). You instruct Qwen to output the target class or function name, and your extension uses vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider') to find the exact line numbers of that class and inject the code securely.
+
+🐛 2. Real-Time Syntax & Logic Healer (LSP integration)
+The Concept: Catch bugs before the terminal even runs. As soon as Qwen writes code, if a red squiggly line appears, the AI fixes it instantly.
+How to build it: Listen to vscode.languages.onDidChangeDiagnostics. When your extension applies an edit, check if vscode.languages.getDiagnostics(document.uri) returns any errors. If it does, scrape the error text (e.g., "Type 'string' is not assignable to type 'number'") and silently prompt Qwen for a fix.
+
+👻 3. Inline "Ghost Text" Autocomplete
+The Concept: Like GitHub Copilot, provide real-time code suggestions as the user types, shown as faded text that they can accept with the Tab key.
+How to build it: Implement the vscode.InlineCompletionItemProvider. Send the code above and below the user's cursor to Qwen, ask for the exact next few lines, and render it using InlineCompletionList.
+
+🧪 4. Autonomous Test-Driven Development (TDD) Solver
+The Concept: The user writes a failing test case (or just the function signature and an assertion), and the AI works backward to write the implementation code until the test turns green.
+How to build it: Create a command nexuscode.solveTest. The extension reads the test file, runs it, gets the failure output, writes the source code, and loops until the TerminalManager reports success.
+
+🔍 5. Auto-Instrumentation (Smart console.log Debugging)
+The Concept: When a complex bug is hard to track, the user highlights a variable and clicks "Trace Variable." The AI intelligently scatters print/log statements across the call stack to track how that variable mutates.
+How to build it: Prompt Qwen with the function tree. Have it generate an array of WorkspaceEdit insertions that place console.log(var) or logging.debug(var) at the start, middle, and end of the relevant logic flows.
+
+♻️ 6. Context-Aware Scope Refactoring
+The Concept: The user highlights a massive, 200-line function, right-clicks, and selects "Extract to Helper Functions." The AI breaks it down without touching the rest of the file.
+How to build it: Use vscode.window.activeTextEditor.selection. Send only the selected block to Qwen with instructions to modularize it. Replace only that specific vscode.Range with the new code, leaving the surrounding file untouched.
+
+🛡️ 7. Automated Security & Linting Reviewer
+The Concept: Before allowing the user to commit code, the AI acts as a senior developer reviewing a Pull Request, checking for SQL injections, hardcoded secrets, or anti-patterns.
+How to build it: Add a command that grabs the output of git diff. Feed the diff to Qwen with a strict "Security & Best Practices" system prompt. Have it output inline comments using vscode.DiagnosticCollection so the feedback shows up as warnings directly in the editor window.
+
+📚 8. Bulk Docstring & JSDoc Generation
+The Concept: Developers hate writing documentation. The AI traverses a legacy codebase and adds standardized, highly accurate documentation headers to every single undocumented function.
+How to build it: Read the workspace files, use regex or an AST to find function definitions lacking comments, and send just the function signatures and bodies to Qwen. Use WorkspaceEdit to inject the generated JSDoc blocks directly above the declarations.
+
+🏗️ 9. API / Framework Migration Assistant
+The Concept: Say you have a project written in React 16 and want to upgrade to React 18, or Python 2 to Python 3. The AI handles the syntax conversion automatically.
+How to build it: Feed Qwen a specific migration guide rule set in the system prompt. Loop through the files in vscode.workspace.findFiles(), sending them to Qwen chunk by chunk, applying the modern syntax updates.
+
+🧹 10. Dead Code Elimination
+The Concept: Over time, codebases fill up with unused helper functions, deprecated endpoints, and dead imports. The AI safely prunes them.
+How to build it: Trigger a background task that runs a tool like tsc --noEmit or eslint. When the tool reports "variable declared but never used," the AI maps that to the exact line number and issues a WorkspaceEdit.delete() to clean up the file autonomously.
+
+
+1. Project-Wide Context Indexing (RAG)
+
+The Problem: Right now, Qwen only knows about the file you are actively looking at. If you ask it to "Add a new user endpoint," it doesn't know what your User database model looks like unless you manually feed it the file. The Solution: Implement a lightweight Retrieval-Augmented Generation (RAG) system.
+
+How it works: Scan the workspace, chunk the code, and create local vector embeddings (using something like ChromaDB or a simple local cosine-similarity script).
+
+The Result: When you ask a question, the extension automatically searches your entire codebase, grabs the relevant 3-4 files, and invisibly injects them into Qwen's prompt.
+
+2. LSP Diagnostic Auto-Healing (The "Red Squiggly" Catcher)
+
+The Problem: Your current Auto-Healer relies on terminal commands (like pytest or tsc) failing. This is relatively slow. The Solution: Hook directly into VS Code's Language Server Protocol (LSP) diagnostics.
+
+How it works: VS Code constantly scans files for syntax errors and type mismatches (the red squiggly lines). You can access these via vscode.languages.getDiagnostics(document.uri).
+
+The Result: The moment Qwen inserts code, your extension checks the diagnostics. If there is a red squiggly line, it instantly scrapes the error message and asks Qwen to fix it before the user even hits save or runs a terminal command.
+
+3. Streaming Responses (Token-by-Token UX)
+
+The Problem: Currently, the UI shows a "Thinking..." spinner while waiting for Qwen to generate the entire file. For a 300-line file, this can take 20-40 seconds, making the app feel frozen. The Solution: Use Server-Sent Events (SSE) or streaming chunks with the fetch API.
+
+How it works: Instead of waiting for the full JSON response, you stream the tokens as Qwen outputs them and update the React UI state in real-time.
+
+The Result: The user sees the code typing out live on their screen. This drastically reduces the perceived latency and allows the user to click a "Cancel" button early if they see Qwen going down the wrong path.
+
+4. Terminal Execution Safeguards (Security)
+
+The Problem: Your TerminalManager currently executes whatever command Qwen tells it to via child_process.exec. If Qwen hallucinates and outputs rm -rf src/ or git reset --hard, your extension will blindly destroy the user's project. The Solution: An interception UI.
+
+How it works: If Qwen proposes a terminal command, the extension halts and shows a prompt in the React UI: "Agent wants to run: npm install express. [Approve] [Deny]"
+
+The Result: You maintain autonomous capabilities but introduce a critical "Human-in-the-Loop" safety net for system-level operations.
+
+5. Git Context Integration
+
+The Problem: Qwen doesn't know what you were working on yesterday. The Solution: Read the git status and git diff.
+
+How it works: If the user asks, "What should I do next?" or "Write a commit message," the extension grabs the current uncommitted changes via git diff and feeds them to Qwen.
+

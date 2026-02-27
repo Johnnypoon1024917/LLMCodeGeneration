@@ -1,57 +1,163 @@
+// src/provenanceTracker.ts
 import * as vscode from 'vscode';
+import { AILensProvider } from './AILensProvider';
 
 export class ProvenanceTracker {
-    // 1. Decoration for code currently under review
+    private _view?: vscode.WebviewView;
+
+    // FIX 1: Store BOTH states for a perfect diff
+    private pendingCodeMap: Map<string, { original: string, proposed: string }> = new Map();
+    private taskIdToNameMap: Map<string, string> = new Map();
+    constructor(private lensProvider: AILensProvider) { }
+    public setView(view: vscode.WebviewView) { this._view = view; }
+
+    public trackStreamedReview(
+        editor: vscode.TextEditor,
+        originalContent: string,
+        taskName: string,
+        startLine: number,
+        endLine: number
+    ): string {
+        const document = editor.document;
+        const proposedContent = document.getText(); 
+
+        // 1. Create a full, valid range that covers the actual code block
+        const reviewRange = new vscode.Range(startLine, 0, endLine, 0);
+        
+        // Draw the purple background
+        editor.setDecorations(this.pendingDecoration, [reviewRange]);
+
+        const taskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+        
+        this.pendingCodeMap.set(taskId, { original: originalContent, proposed: proposedContent });
+        this.taskIdToNameMap.set(taskId, taskName);
+
+        // 2. 🔥 THE FIX: Pass the FULL reviewRange to the LensProvider, not a 0-length anchor!
+        this.lensProvider.addPendingEdit(document.uri, reviewRange, taskId);
+        
+        // 3. Give VS Code a fraction of a second to finish rendering the text stream
+        setTimeout(() => {
+            this.lensProvider.refresh();
+        }, 250);
+
+        return "reviewing";
+    }
+    
     private pendingDecoration = vscode.window.createTextEditorDecorationType({
-        backgroundColor: 'rgba(139, 92, 246, 0.2)', // Noticeable purple background
+        backgroundColor: 'rgba(139, 92, 246, 0.2)',
         isWholeLine: true,
         border: '1px dashed rgba(139, 92, 246, 0.8)'
     });
 
-    // 2. Decoration for approved AI code
-    private approvedDecoration = vscode.window.createTextEditorDecorationType({
-        backgroundColor: 'rgba(139, 92, 246, 0.04)', // Very faint purple
-        isWholeLine: true,
-        gutterIconPath: vscode.Uri.parse('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="%238B5CF6" d="M8 1l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>'),
-        gutterIconSize: 'contain'
-    });
+    public getPendingCode(taskId: string): { original: string, proposed: string } | undefined {
+        return this.pendingCodeMap.get(taskId);
+    }
 
-    public async applyAndRequestApproval(editor: vscode.TextEditor, newCode: string, taskName: string): Promise<string> {
+    public async applySectionalApproval(
+        editor: vscode.TextEditor,
+        newSnippet: string,
+        taskName: string,
+        action: 'replace' | 'append'
+    ): Promise<string> {
         const document = editor.document;
-        
-        // 1. Apply the code replacement
-        await editor.edit(editBuilder => {
-            const fullRange = new vscode.Range(
-                document.positionAt(0),
-                document.positionAt(document.getText().length)
-            );
-            editBuilder.replace(fullRange, newCode);
-        });
+        const originalContent = document.getText();
 
-        // 2. Highlight the document as "Pending Review"
-        const reviewRange = new vscode.Range(0, 0, document.lineCount, 0);
+        // FIX 1: Track the exact line where the new content starts
+        let startLine = 0;
+        const lineCountBefore = document.lineCount;
+
+        await editor.edit(editBuilder => {
+            if (action === 'replace') {
+                startLine = 0;
+                const fullRange = new vscode.Range(0, 0, document.lineCount, 0);
+                editBuilder.replace(fullRange, newSnippet);
+            } else {
+                // For append, we start AFTER the last line of the existing content
+                startLine = lineCountBefore;
+                // Ensure there is a newline before the snippet
+                const insertionPoint = new vscode.Position(startLine, 0);
+                editBuilder.insert(insertionPoint, (startLine > 0 ? "\n" : "") + newSnippet);
+            }
+        }, { undoStopBefore: true, undoStopAfter: true });
+
+        // FIX 2: Calculate the exact end line based on the snippet's actual line count
+        const snippetLineCount = newSnippet.split('\n').length;
+        const endLine = startLine + snippetLineCount;
+
+        // FIX 3: Create a precise range for the decoration
+        // We subtract 1 from startLine for append to account for the \n we added
+        const highlightStart = action === 'append' && startLine > 0 ? startLine : startLine;
+        const reviewRange = new vscode.Range(highlightStart, 0, endLine, 0);
+
+        // Apply visual highlight only to the NEW code
         editor.setDecorations(this.pendingDecoration, [reviewRange]);
 
-        // 3. Pause and ask the human for approval
-        const choice = await vscode.window.showInformationMessage(
-            `Qwen completed: "${taskName}". Do you approve these changes?`,
-            { modal: false },
-            "Accept", "Reject"
-        );
+        editor.revealRange(reviewRange, vscode.TextEditorRevealType.InCenter);
 
-        // 4. Handle the human's decision
-        editor.setDecorations(this.pendingDecoration, []); // Remove pending highlight
+        const taskId = `task-${Date.now()}`;
+        this.pendingCodeMap.set(taskId, { original: originalContent, proposed: editor.document.getText() });
+        this.taskIdToNameMap.set(taskId, taskName);
 
-        if (choice === "Accept") {
-            // Keep a faint marker that this was AI-generated
-            editor.setDecorations(this.approvedDecoration, [reviewRange]);
-            vscode.window.showInformationMessage("Changes accepted.");
-            return "approved";
+        // Position the AI Lens (Approve/Reject buttons) exactly at the start of the change
+        this.lensProvider.addPendingEdit(document.uri, reviewRange, taskId);
+        this.lensProvider.refresh();
+
+        return "reviewing";
+    }
+
+    public handleAccept(taskId: string, uri: vscode.Uri) {
+        this.lensProvider.clearEdit(taskId);
+        vscode.window.activeTextEditor?.setDecorations(this.pendingDecoration, []);
+        const originalTaskName = this.taskIdToNameMap.get(taskId) || taskId;
+
+        this._view?.webview.postMessage({ type: 'taskCompleted', task: originalTaskName, status: 'approved' });
+
+        this.pendingCodeMap.delete(taskId);
+        this.taskIdToNameMap.delete(taskId);
+    }
+
+    public async handleReject(taskId: string, uri: vscode.Uri) {
+        this.lensProvider.clearEdit(taskId);
+        vscode.window.activeTextEditor?.setDecorations(this.pendingDecoration, []); // Clear highlight
+        await vscode.commands.executeCommand('undo'); // Revert changes natively
+
+        const originalTaskName = this.taskIdToNameMap.get(taskId) || taskId;
+        this._view?.webview.postMessage({ type: 'taskCompleted', task: originalTaskName, status: 'rejected' });
+
+        this.pendingCodeMap.delete(taskId);
+        this.taskIdToNameMap.delete(taskId);
+    }
+
+    // FIX 3: Open two virtual documents to force a perfect Git-style Diff
+    public async showDiff(originalContent: string, proposedContent: string, taskName: string) {
+        const safeTaskName = taskName.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
+
+        const originalUri = vscode.Uri.parse(`untitled:Original_${safeTaskName}.ts`);
+        const proposedUri = vscode.Uri.parse(`untitled:Proposed_${safeTaskName}.ts`);
+
+        const edit = new vscode.WorkspaceEdit();
+        edit.insert(originalUri, new vscode.Position(0, 0), originalContent);
+        edit.insert(proposedUri, new vscode.Position(0, 0), proposedContent);
+        await vscode.workspace.applyEdit(edit);
+
+        await vscode.commands.executeCommand('vscode.diff', originalUri, proposedUri, `Diff: ${taskName}`);
+    }
+
+    public restoreDecorations(editor: vscode.TextEditor) {
+        const docUriString = editor.document.uri.toString().toLowerCase();
+
+        // Find all pending edits that belong to the file we just switched to
+        const activeEdits = this.lensProvider.pendingEdits.filter(edit => {
+            return edit.uri.toString().toLowerCase() === docUriString ||
+                edit.uri.fsPath.toLowerCase() === editor.document.uri.fsPath.toLowerCase();
+        });
+
+        // Re-apply the purple highlight to this new editor instance
+        if (activeEdits.length > 0) {
+            const allRanges = activeEdits.map(e => e.range);
+            editor.setDecorations(this.pendingDecoration, allRanges);
         } else {
-            // Undo the code insertion natively
-            await vscode.commands.executeCommand('undo');
-            vscode.window.showWarningMessage("Changes rejected and reverted.");
-            return "rejected";
+            editor.setDecorations(this.pendingDecoration, []);
         }
     }
 }

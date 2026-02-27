@@ -12,6 +12,31 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "NexusCode Agent",
+      "properties": {
+        "nexuscode.apiEndpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:1234/v1/chat/completions",
+          "description": "The URL of your LLM provider (e.g., LM Studio, vLLM, OpenAI, or your custom API Gateway)."
+        },
+        "nexuscode.model": {
+          "type": "string",
+          "default": "qwen-72b",
+          "description": "The name or path of the model to use."
+        },
+        "nexuscode.apiKey": {
+          "type": "string",
+          "default": "lm-studio",
+          "description": "Your API Key (if using a cloud provider or authenticated gateway)."
+        },
+        "nexuscode.enableTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable agent tools (sends tool_choice: 'auto'). Keep this unchecked if your local server (like vLLM) does not have tool-call parsing enabled."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -30,9 +55,23 @@
           "icon": "media/icon.svg"
         }
       ]
-    }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "nexuscode.optimizeSelection",
+          "group": "navigation",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "nexuscode.optimizeSelection",
+        "title": "Qwen: Optimize Selection"
+      }
+    ]
   },
-  
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
@@ -42,13 +81,13 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.109.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "22.x",
-    "typescript-eslint": "^8.54.0",
+    "@types/node": "^22.19.12",
+    "@types/vscode": "^1.109.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.2",
     "typescript": "^5.9.3",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "typescript-eslint": "^8.54.0"
   }
 }
