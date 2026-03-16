@@ -11,7 +11,8 @@ import {
     askQwenForAtomicEdits, 
     AtomicEdit, 
     streamQwenForCode, 
-    runAgenticExploration 
+    runAgenticExploration,
+    getAvailableModels // 🔥 ADD THIS HERE
 } from "./llmService";
 
 // Context Managers
@@ -43,12 +44,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     constructor(private readonly _extensionUri: vscode.Uri) { }
 
-    // --- Dependency Injection Setters ---
     public setTerminalManager(manager: TerminalManager) { this._terminalManager = manager; }
     public setProvenanceTracker(tracker: ProvenanceTracker) { this._tracker = tracker; }
     public setMetaManager(manager: MetaContextManager) { this._metaManager = manager; }
 
-    // --- State Management ---
     public toggleMetaMode() {
         this._isMetaMode = !this._isMetaMode;
         const mode = this._isMetaMode ? "⚠️ SELF-EVOLUTION MODE" : "User Project Mode";
@@ -79,7 +78,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    // --- Post-Approval Lifecycle ---
     public async handlePostApproval(uri: vscode.Uri) {
         if (!this._isMetaMode) return;
 
@@ -112,7 +110,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
     }
 
-    // --- Main Webview Resolver & Message Listener ---
     public resolveWebviewView(webviewView: vscode.WebviewView) {
         this._view = webviewView;
         this._tracker?.setView(webviewView);
@@ -121,46 +118,50 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
-                
-                // =======================================================================
-                // 1. GENERATE PROJECT STRUCTURE
-                // =======================================================================
                 case "generateStructure": {
-                    this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Searching Hybrid Vector Server..." });
-                    
-                    await indexWorkspace((msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg }));
-                    const fileTree = await getProjectContext(await this.getTargetContext());
-                    const ragContext = await retrieveContext(data.value); 
-                    
-                    this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Architecting plan..." });
-                    const structure = await askQwenForStructure(data.value, `${fileTree}\n\n${ragContext}`);
+                    // 🔥 Wrap in try/catch to prevent unhandled promise rejections
+                    try {
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Searching Hybrid Vector Server..." });
+                        
+                        await indexWorkspace((msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg }));
+                        const fileTree = await getProjectContext(await this.getTargetContext());
+                        const ragContext = await retrieveContext(data.value); 
+                        
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Architecting plan..." });
+                        const structure = await askQwenForStructure(data.value, `${fileTree}\n\n${ragContext}`);
 
-                    const rootSearchPath = this._isMetaMode ? this._extensionUri.fsPath : undefined;
-                    const { finalPaths, renamingMap } = await resolveCanonicalPaths(structure.folderStructure, rootSearchPath);
-                    structure.folderStructure = finalPaths;
+                        const rootSearchPath = this._isMetaMode ? this._extensionUri.fsPath : undefined;
+                        const { finalPaths, renamingMap } = await resolveCanonicalPaths(structure.folderStructure, rootSearchPath);
+                        structure.folderStructure = finalPaths;
 
-                    structure.implementationTasks = structure.implementationTasks.map(task => {
-                        let updatedTask = task;
-                        renamingMap.forEach((realPath, plannedPath) => {
-                            const plannedName = path.basename(plannedPath);
-                            if (updatedTask.includes(plannedPath)) updatedTask = updatedTask.replace(plannedPath, realPath);
-                            else if (updatedTask.includes(plannedName)) updatedTask = updatedTask.replace(plannedName, `${plannedName} (found at ${realPath})`);
+                        structure.implementationTasks = structure.implementationTasks.map(task => {
+                            let updatedTask = task;
+                            renamingMap.forEach((realPath, plannedPath) => {
+                                const plannedName = path.basename(plannedPath);
+                                if (updatedTask.includes(plannedPath)) updatedTask = updatedTask.replace(plannedPath, realPath);
+                                else if (updatedTask.includes(plannedName)) updatedTask = updatedTask.replace(plannedName, `${plannedName} (found at ${realPath})`);
+                            });
+                            return updatedTask;
                         });
-                        return updatedTask;
-                    });
 
-                    if (structure.folderStructure.length > 0) {
-                        await createWorkspaceStructure(structure.folderStructure);
+                        if (structure.folderStructure.length > 0) {
+                            await createWorkspaceStructure(structure.folderStructure);
+                        }
+
+                        webviewView.webview.postMessage({ type: "structureResponse", value: structure });
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                    } catch (error) {
+                        // 🔥 Catch the error and notify the UI
+                        console.error("Structure generation error:", error);
+                        vscode.window.showErrorMessage(`NexusCode Error: ${error instanceof Error ? error.message : "Failed to generate structure. Is the LLM running?"}`);
+                        
+                        // Tell the UI to stop spinning
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                        this._view?.webview.postMessage({ type: 'taskCompleted', status: 'error' });
                     }
-
-                    webviewView.webview.postMessage({ type: "structureResponse", value: structure });
-                    this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                     break;
                 }
 
-                // =======================================================================
-                // 2. EXECUTE SINGLE TASK (Streaming + AST)
-                // =======================================================================
                 case "executeTask": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) return;
@@ -183,7 +184,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             const [lspContext, styleGuide, ragContext] = await Promise.all([
                                 getLspContext(data.task),
                                 getProjectStyleGuides(),
-                                retrieveContext(data.task) // 🔥 Uses your new Hybrid Search endpoint!
+                                retrieveContext(data.task)
                             ]);
 
                             const smartContext = await runAgenticExploration(
@@ -348,9 +349,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-                // =======================================================================
-                // 3. BATCH EDITING (Drafting)
-                // =======================================================================
                 case "executeAllTasks": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) return;
@@ -396,9 +394,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-                // =======================================================================
-                // 4. COMMIT BATCH
-                // =======================================================================
                 case "commitAtomicEdits": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders || !data.edits) return;
@@ -434,9 +429,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-                // =======================================================================
-                // 5. TEST GENERATION & AUTO-HEALING
-                // =======================================================================
                 case "generateAndRunTests": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     const activeEditor = vscode.window.activeTextEditor;
@@ -454,13 +446,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             const testPlan = await askQwenForTests(relativeFileName, activeEditor.document.getText());
                             if (activeEditor.document.isDirty) await activeEditor.document.save();
 
-                            // 1. 🛡️ Secure Dependency Installation
                             if (testPlan.installCommand) {
                                 const installResult = await this.confirmAndRunCommand(testPlan.installCommand, workspacePath, 'Installing dependencies...');
                                 if (!installResult) return; 
                             }
 
-                            // 2. Create the Test File
                             let safePath = testPlan.filepath.replace(/^[\\\/]+/, '');
                             if (safePath.toLowerCase().includes(workspacePath.toLowerCase())) {
                                 safePath = safePath.substring(safePath.toLowerCase().indexOf(workspacePath.toLowerCase()) + workspacePath.length);
@@ -475,14 +465,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             await vscode.window.showTextDocument(doc);
                             await doc.save();
 
-                            // 3. 🛡️ Secure Test Execution
                             const result = await this.confirmAndRunCommand(testPlan.testCommand, workspacePath, 'Running tests...');
                             if (!result) {
                                 webviewView.webview.postMessage({ type: 'statusUpdate', message: '' });
                                 return;
                             }
 
-                            // 4. Auto-Healing Loop
                             if (!result.success) {
                                 webviewView.webview.postMessage({ type: 'statusUpdate', message: 'Tests failed. Auto-healing...' });
 
@@ -520,15 +508,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-                // =======================================================================
-                // 6. TOGGLE META MODE & DYNAMIC MODELS
-                // =======================================================================
                 case "toggleMetaMode": {
                     this.toggleMetaMode();
                     break;
                 }
                 case "requestModels": {
-                    const { getAvailableModels } = await import('./llmService');
                     const models = await getAvailableModels();
                     const currentModel = vscode.workspace.getConfiguration('nexuscode').get<string>('model');
                     

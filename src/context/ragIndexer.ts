@@ -41,7 +41,7 @@ export async function retrieveContext(query: string): Promise<string> {
         
         // Map over the top 4 results
         for (const chunk of resultsArray.slice(0, 4)) {
-            // NOTE: Change 'filepath' and 'content' below to match your server's exact JSON keys
+            // Adjust 'filepath' and 'content' below to match your server's exact JSON keys
             const filepath = chunk.filepath || chunk.file || chunk.metadata?.filepath || "Unknown File";
             const content = chunk.content || chunk.text || chunk.snippet || JSON.stringify(chunk);
             

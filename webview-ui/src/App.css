@@ -1,218 +1,288 @@
+/* webview-ui/src/App.css */
 :root {
-    --bg: var(--vscode-editor-background, #1e1e1e);
-    --text: var(--vscode-foreground, #d4d4d4);
-    --subtext: var(--vscode-descriptionForeground, #808080);
-    --border: var(--vscode-panel-border, #444);
-    --purple: #8b5cf6;
-    /* Grok-like accent */
-    --purple-hover: #7c3aed;
-    --input-bg: #2d2d2d;
+  --nexus-border: var(--vscode-focusBorder, #007fd4);
+  --nexus-bg: var(--vscode-sideBar-background, #252526);
+  --nexus-text: var(--vscode-foreground, #cccccc);
+  --nexus-subtext: var(--vscode-descriptionForeground, #8a8a8a);
+  --nexus-card-bg: var(--vscode-editorWidget-background, #2d2d2d);
+  --nexus-card-border: var(--vscode-editorWidget-border, #454545);
+  --nexus-input-bg: var(--vscode-input-background, #3c3c3c);
+  --nexus-success: var(--vscode-testing-iconPassed, #73c991);
+  --nexus-warning: var(--vscode-testing-iconQueued, #cca700);
+  --nexus-error: var(--vscode-testing-iconFailed, #f14c4c);
 }
 
-html,
-body,
-#root,
+body, html, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  font-family: var(--vscode-font-family), sans-serif;
+  background-color: var(--nexus-bg);
+  color: var(--nexus-text);
+  overflow: hidden;
+}
+
 .app-wrapper {
-    height: 100%;
-    margin: 0;
-    padding: 0;
-    overflow: hidden;
-    background: var(--bg);
-    display: flex;
-    flex-direction: column;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
 }
 
-/* Tiny header (optional – comment out for purest Grok feel) */
+/* HEADER */
 .tiny-header {
-    flex: 0 0 auto;
-    padding: 8px 16px;
-    background: var(--bg);
-    border-bottom: 1px solid var(--border);
-    font-size: 13px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    color: var(--subtext);
+  padding: 10px 16px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--nexus-subtext);
+  border-bottom: 1px solid var(--nexus-card-border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--nexus-bg);
+  z-index: 10;
 }
 
-.version {
-    font-size: 11px;
-}
-
-/* Main chat area – takes ALL available space */
-/* Chat takes ALL remaining space + scrolls internally */
+/* CHAT CONTAINER */
 .chat-container {
-    flex: 1 1 auto;
-    /* ← this is the key line */
-    overflow-y: auto;
-    overflow-x: hidden;
-    min-height: 0;
-    /* prevents flex child collapse issues */
-    padding: 24px 32px;
-    display: flex;
-    flex-direction: column;
-    gap: 32px;
-    -webkit-overflow-scrolling: touch;
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
-/* Center welcome text like Grok's starting prompt area */
-.empty-state {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-    color: var(--subtext);
-    gap: 12px;
-}
-
-.empty-state h2 {
-    font-size: 24px;
-    color: var(--text);
-    margin: 0;
-}
-
-/* Message styling – Grok uses simple aligned bubbles */
+/* MESSAGES (FLUSH LAYOUT) */
 .message {
-    max-width: 85%;
-    /* prevents ultra-wide lines */
-    align-self: flex-start;
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.message.user {
-    align-self: flex-end;
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 12px;
 }
 
-.user-bubble {
-    background: var(--purple);
-    color: white;
-    padding: 12px 16px;
-    border-radius: 18px 18px 4px 18px;
-    /* softer, rounded like many modern UIs */
-    display: inline-block;
-    white-space: pre-wrap; 
-    word-break: break-word;
+.message-header.user { color: var(--nexus-text); }
+.message-header.assistant { color: var(--nexus-border); }
+
+.message-content {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--nexus-text);
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
 
-.message.assistant>div {
-    background: rgba(255, 255, 255, 0.04);
-    padding: 16px;
-    border-radius: 12px;
-    border: 1px solid var(--border);
-}
-
-/* Plan card – keep but soften */
+/* IMPLEMENTATION PLAN CARD */
 .plan-card {
-    background: rgba(139, 92, 246, 0.08);
-    /* subtle purple tint */
-    border: 1px solid var(--purple);
-    border-radius: 12px;
-    padding: 10px;
-    width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--nexus-card-border);
+  background: var(--nexus-card-bg);
+  border-radius: 6px;
+  overflow: hidden;
 }
 
-/* Fixed bottom input – signature Grok style */
-.input-container {
-    position: sticky;
-    bottom: 0;
-    z-index: 10;
-    background: var(--bg);
-    /* important – prevents transparency bleed */
-    padding: 16px 24px;
-    border-top: 1px solid var(--border);
-    /* no need for left/right/width if parent is full-width */
+.plan-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(0,0,0,0.1);
+  border-bottom: 1px solid var(--nexus-card-border);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.input-box {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    background: var(--input-bg);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    /* pill shape – very Grok-like */
-    padding: 8px 16px;
+.btn-execute-all {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.btn-execute-all:hover { background: var(--vscode-button-hoverBackground); }
+
+.task-list {
+  display: flex;
+  flex-direction: column;
 }
 
-textarea {
-    flex: 1;
-    background: transparent;
-    border: none;
-    color: var(--text);
-    font-size: 15px;
-    resize: none;
-    outline: none;
-    min-height: 24px;
-    max-height: 140px;
-    line-height: 1.4;
+.task-item {
+  display: flex;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--nexus-card-border);
+  font-size: 12px;
+  gap: 10px;
+}
+.task-item:last-child { border-bottom: none; }
+
+.task-desc { flex: 1; line-height: 1.4; }
+.task-summary { font-size: 11px; color: var(--nexus-subtext); margin-top: 4px; font-style: italic; }
+
+.task-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.status-pending { color: var(--nexus-warning); }
+.status-approved { color: var(--nexus-success); }
+.status-error { color: var(--nexus-error); }
+
+/* REVIEW DOCK (BOTTOM SHEET) */
+.review-dock {
+  border-top: 1px solid var(--nexus-card-border);
+  background: var(--nexus-card-bg);
+  padding: 12px 16px;
+  box-shadow: 0 -4px 12px rgba(0,0,0,0.2);
+  z-index: 20;
 }
 
-textarea::placeholder {
-    color: var(--subtext);
+.review-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.submit-btn {
-    background: var(--purple);
-    color: white;
-    border: none;
-    border-radius: 50%;
-    width: 36px;
-    height: 36px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    font-size: 16px;
-    flex-shrink: 0;
+.review-file {
+  font-size: 11px;
+  color: var(--nexus-text);
+  padding: 4px 0;
+  display: flex;
+  justify-content: space-between;
 }
 
-.submit-btn:hover:not(:disabled) {
-    background: var(--purple-hover);
+.review-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.btn-primary, .btn-secondary {
+  flex: 1;
+  padding: 6px 0;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  border: none;
+  font-weight: 600;
+}
+.btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+.btn-secondary { background: transparent; border: 1px solid var(--nexus-card-border); color: var(--nexus-text); }
+
+/* INPUT AREA & TOOLBAR */
+.bottom-area {
+  padding: 12px 16px;
+  background: var(--nexus-bg);
+  border-top: 1px solid var(--nexus-card-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 10;
 }
 
-.submit-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+.input-wrapper {
+  position: relative;
+  background: var(--nexus-input-bg);
+  border: 1px solid var(--nexus-card-border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+}
+.input-wrapper:focus-within { border-color: var(--nexus-border); }
+
+.input-wrapper textarea {
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--nexus-text);
+  padding: 10px 40px 10px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: none;
+  outline: none;
+  box-sizing: border-box;
+  max-height: 150px;
 }
 
-.input-hint {
-    text-align: center;
-    font-size: 12px;
-    color: var(--subtext);
-    margin-top: 8px;
+.send-btn {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 24px;
+  height: 24px;
+  background: var(--nexus-text);
+  color: var(--nexus-bg);
+  border: none;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* MICRO TOOLBAR */
+.micro-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 
-/* Scrollbar styling – clean & subtle */
-.chat-container::-webkit-scrollbar {
-    width: 8px;
+.toolbar-group {
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 
-.chat-container::-webkit-scrollbar-track {
-    background: transparent;
+.micro-select, .micro-btn {
+  background: transparent;
+  color: var(--nexus-subtext);
+  border: 1px solid transparent;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  outline: none;
+}
+.micro-select:hover, .micro-btn:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: var(--nexus-card-border);
+  color: var(--nexus-text);
 }
 
-.chat-container::-webkit-scrollbar-thumb {
-    background: #555;
-    border-radius: 4px;
-}
+.meta-active { border-color: var(--nexus-error) !important; color: var(--nexus-error) !important; }
 
-.chat-container::-webkit-scrollbar-thumb:hover {
-    background: #777;
+/* STATUS SPINNER */
+.agent-status {
+  font-size: 11px;
+  color: var(--nexus-subtext);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
 }
-
-@keyframes pulse {
-    0% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.6; transform: scale(0.98); }
-    100% { opacity: 1; transform: scale(1); }
-}
-
-.status-reviewing {
-    animation: pulse 2s infinite ease-in-out;
-    display: inline-flex;
-    align-items: center;
-    background: rgba(255, 176, 0, 0.1);
-    padding: 2px 6px;
-    border-radius: 4px;
-    border: 1px solid rgba(255, 176, 0, 0.3);
-}
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { 100% { transform: rotate(360deg); } }

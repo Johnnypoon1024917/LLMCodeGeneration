@@ -17,12 +17,12 @@
       "properties": {
         "nexuscode.apiEndpoint": {
           "type": "string",
-          "default": "http://127.0.0.1:1234/v1/chat/completions",
+          "default": "http://192.168.192.125:8001/v1/chat/completions",
           "description": "The URL of your LLM provider (e.g., LM Studio, vLLM, OpenAI, or your custom API Gateway)."
         },
         "nexuscode.model": {
           "type": "string",
-          "default": "qwen-72b",
+          "default": "qwen2.5-coder",
           "description": "The name or path of the model to use."
         },
         "nexuscode.apiKey": {

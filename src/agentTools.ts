@@ -7,10 +7,12 @@ export const agentToolDefinitions = [
         type: "function",
         function: {
             name: "read_file",
-            description: "Read the contents of a specific file.",
+            description: "Read the contents of a specific file in the codebase. Use this to understand existing code, interfaces, or logic.",
             parameters: {
                 type: "object",
-                properties: { filepath: { type: "string" } },
+                properties: {
+                    filepath: { type: "string", description: "The relative path to the file (e.g., 'src/utils/api.ts')" }
+                },
                 required: ["filepath"]
             }
         }
@@ -19,15 +21,16 @@ export const agentToolDefinitions = [
         type: "function",
         function: {
             name: "list_directory",
-            description: "List all files and folders inside a specific directory.",
+            description: "List all files and folders inside a specific directory. Use this to find out what files exist in a folder.",
             parameters: {
                 type: "object",
-                properties: { dirpath: { type: "string" } },
+                properties: {
+                    dirpath: { type: "string", description: "The relative path to the directory (e.g., 'src/components')" }
+                },
                 required: ["dirpath"]
             }
         }
     },
-    // 🔥 NEW TOOL: Codebase Search
     {
         type: "function",
         function: {
@@ -51,19 +54,45 @@ export async function executeAgentTool(toolCall: any, workspaceRoot: string): Pr
     try {
         if (toolName === "read_file") {
             const targetUri = vscode.Uri.file(path.join(workspaceRoot, args.filepath));
+            
+            // 🛡️ Guardrail: Check if path exists and is actually a file
+            try {
+                const stat = await vscode.workspace.fs.stat(targetUri);
+                if (stat.type === vscode.FileType.Directory) {
+                    return `Error: '${args.filepath}' is a directory, not a file. Use 'list_directory' instead.`;
+                }
+            } catch (err) {
+                return `Error: File '${args.filepath}' does not exist yet.`;
+            }
+
             const fileData = await vscode.workspace.fs.readFile(targetUri);
             return new TextDecoder().decode(fileData);
         } 
+        
         else if (toolName === "list_directory") {
             const targetUri = vscode.Uri.file(path.join(workspaceRoot, args.dirpath));
+            
+            // 🛡️ Guardrail: Check if path exists and is actually a directory
+            try {
+                const stat = await vscode.workspace.fs.stat(targetUri);
+                if (stat.type !== vscode.FileType.Directory && stat.type !== (vscode.FileType.Directory | vscode.FileType.SymbolicLink)) {
+                    return `Error: '${args.dirpath}' is a file, not a directory. Use 'read_file' instead.`;
+                }
+            } catch (err) {
+                return `Error: Directory '${args.dirpath}' does not exist yet.`;
+            }
+
             const entries = await vscode.workspace.fs.readDirectory(targetUri);
-            return entries.map(([name, type]) => type === vscode.FileType.Directory ? `[DIR] ${name}` : `[FILE] ${name}`).join('\n');
+            if (entries.length === 0) return `Directory '${args.dirpath}' is empty.`;
+            
+            return entries.map(([name, type]) => {
+                return type === vscode.FileType.Directory ? `[DIR] ${name}` : `[FILE] ${name}`;
+            }).join('\n');
         }
-        // 🔥 NEW TOOL LOGIC: Execute a Workspace-wide search
+
         else if (toolName === "search_codebase") {
             const query = args.keyword;
-            // Use VS Code's ultra-fast internal findFiles
-            const uris = await vscode.workspace.findFiles('**/*.{ts,tsx,js,jsx,py,go,rs,css}', '**/node_modules/**', 20);
+            const uris = await vscode.workspace.findFiles('**/*.{ts,tsx,js,jsx,py,go,rs,css,html}', '**/node_modules/**', 20);
             
             let results = [];
             for (const uri of uris) {
@@ -74,10 +103,9 @@ export async function executeAgentTool(toolCall: any, workspaceRoot: string): Pr
                 for (let i = 0; i < lines.length; i++) {
                     if (lines[i].includes(query)) {
                         const relativePath = vscode.workspace.asRelativePath(uri);
-                        // Grab 2 lines of context above and below the match
                         const snippet = lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 3)).join('\n');
                         results.push(`File: ${relativePath} (Line ${i+1})\nSnippet:\n${snippet}\n---`);
-                        break; // Only grab the first match per file to save tokens
+                        break; 
                     }
                 }
             }
@@ -85,6 +113,7 @@ export async function executeAgentTool(toolCall: any, workspaceRoot: string): Pr
         }
 
         return `Error: Tool ${toolName} not found.`;
+
     } catch (error) {
         return `Error executing ${toolName}: ${error instanceof Error ? error.message : String(error)}`;
     }
