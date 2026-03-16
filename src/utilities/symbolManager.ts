@@ -1,45 +1,82 @@
 // src/utilities/symbolManager.ts
 import * as vscode from 'vscode';
+import Parser from 'web-tree-sitter';
 
-export async function injectCodeIntoSymbol(
-    editor: vscode.TextEditor,
-    symbolName: string,
-    newCode: string
-): Promise<boolean> {
-    const document = editor.document;
-    const text = document.getText();
-    
-    // 1. Find the symbol definition (e.g., "class MyClass" or "function myFunction")
-    const symbolRegex = new RegExp(`(class|function|const|let|async)\\s+${symbolName}\\b`, 'g');
-    const match = symbolRegex.exec(text);
+let parser: Parser;
 
-    if (!match) {
-        console.error(`Symbol ${symbolName} not found for injection.`);
-        return false;
+/**
+ * Initializes the parser and loads the language-specific WASM grammar.
+ */
+async function initParser(extensionUri: vscode.Uri, languageId: string) {
+    if (!parser) {
+        await Parser.init();
+        parser = new Parser();
     }
 
-    // 2. Find the starting brace of this symbol
-    let openBraceIndex = text.indexOf('{', match.index);
-    if (openBraceIndex === -1) return false;
+    const wasmMapping: Record<string, string> = {
+        'typescript': 'tree-sitter-typescript.wasm',
+        'typescriptreact': 'tree-sitter-tsx.wasm',
+        'html': 'tree-sitter-html.wasm',
+        'python': 'tree-sitter-python.wasm',
+        'javascript': 'tree-sitter-javascript.wasm'
+    };
 
-    // 3. Brace Counting Logic: Find the matching closing brace
-    let braceCount = 1;
-    let i = openBraceIndex + 1;
-    while (braceCount > 0 && i < text.length) {
-        if (text[i] === '{') braceCount++;
-        else if (text[i] === '}') braceCount--;
-        i++;
+    const wasmFile = wasmMapping[languageId] || 'tree-sitter-typescript.wasm';
+    const wasmPath = vscode.Uri.joinPath(extensionUri, 'parsers', wasmFile).fsPath;
+
+    try {
+        const lang = await Parser.Language.load(wasmPath);
+        parser.setLanguage(lang);
+    } catch (e) {
+        console.error(`[AST] Failed to load WASM for ${languageId}:`, e);
     }
+}
 
-    // 4. Perform the Injection
-    const closingBraceIndex = i - 1;
-    const insertPosition = document.positionAt(closingBraceIndex);
+/**
+ * Parses the document AST and returns the exact coordinate to stream injected code.
+ */
+export async function getInjectionPosition(
+    extensionUri: vscode.Uri,
+    document: vscode.TextDocument,
+    symbolName: string
+): Promise<vscode.Position | null> {
+    try {
+        await initParser(extensionUri, document.languageId);
+        const tree = parser.parse(document.getText());
 
-    // Prepare the snippet with proper indentation
-    const formattedCode = `\n    ${newCode.split('\n').join('\n    ')}\n`;
+        // AST Query to find the symbol name regardless of class or function type
+        const query = parser.getLanguage().query(`
+            [
+                (class_declaration name: (type_identifier) @name)
+                (function_declaration name: (identifier) @name)
+                (method_definition name: (property_identifier) @name)
+                (variable_declarator name: (identifier) @name value: (arrow_function))
+            ] @match
+        `);
 
-    return await editor.edit(editBuilder => {
-        // We insert just BEFORE the final closing brace of the class/function
-        editBuilder.insert(insertPosition, formattedCode);
-    });
+        const captures = query.captures(tree.rootNode);
+        const target = captures.find(c => c.node.text === symbolName);
+
+        if (!target) {
+            console.warn(`[AST] Target symbol '${symbolName}' not found in file.`);
+            return null;
+        }
+
+        // Find the block/body child of the matched node (where the actual code goes)
+        const bodyNode = target.node.parent?.children.find(n => 
+            n.type === 'class_body' || n.type === 'statement_block' || n.type === 'block'
+        );
+
+        if (!bodyNode || !bodyNode.lastChild) return null;
+
+        // The last child of a block is typically the closing '}'
+        const closingBrace = bodyNode.lastChild;
+        
+        // Return the position immediately BEFORE the closing brace
+        return document.positionAt(closingBrace.startIndex);
+
+    } catch (error) {
+        console.error("[AST Error] Failed to calculate injection position:", error);
+        return null;
+    }
 }

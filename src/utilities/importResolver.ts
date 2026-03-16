@@ -2,6 +2,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 
+/**
+ * Scans the active document for relative imports and automatically fixes:
+ * 1. Missing file extensions (e.g., './App' -> './App.tsx')
+ * 2. Directory imports missing index files (e.g., './components' -> './components/index.tsx')
+ */
 export async function resolveMissingImports(editor: vscode.TextEditor): Promise<void> {
     const document = editor.document;
     const text = document.getText();
@@ -9,9 +14,11 @@ export async function resolveMissingImports(editor: vscode.TextEditor): Promise<
 
     if (!workspaceFolders) return;
 
-    // Find all relative import paths (e.g., import { X } from '../types')
+    // Regex to find relative import paths (e.g., import { X } from '../types')
     const importRegex = /import\s+.*?\s+from\s+['"]([^'"]+)['"]/g;
     let match;
+    const workspaceEdit = new vscode.WorkspaceEdit();
+    let hasFixes = false;
 
     while ((match = importRegex.exec(text)) !== null) {
         const importPath = match[1];
@@ -20,72 +27,67 @@ export async function resolveMissingImports(editor: vscode.TextEditor): Promise<
         if (!importPath.startsWith('.')) continue;
 
         const currentDir = path.dirname(document.uri.fsPath);
-        let targetPath = path.resolve(currentDir, importPath);
-        let targetUri = vscode.Uri.file(targetPath);
+        let absoluteTargetPath = path.resolve(currentDir, importPath);
+        let targetUri = vscode.Uri.file(absoluteTargetPath);
+
+        // Calculate the range of the path string within the document for replacement
+        const startOffset = match.index + match[0].indexOf(importPath);
+        const endOffset = startOffset + importPath.length;
+        const pathRange = new vscode.Range(
+            document.positionAt(startOffset),
+            document.positionAt(endOffset)
+        );
 
         try {
-            // 1. Check if the path exists on disk
-            let stat = await vscode.workspace.fs.stat(targetUri);
+            // 1. Check if the path exists exactly as written
+            const stat = await vscode.workspace.fs.stat(targetUri);
 
-            // 2. 🔥 THE FIX: If it's a directory (e.g., '../types'), find the index file!
+            // 2. If it's a directory, check for an index file
             if ((stat.type & vscode.FileType.Directory) === vscode.FileType.Directory) {
-                console.log(`[Import Resolver] Directory detected at '${importPath}'. Searching for index file...`);
-                
                 const indexExtensions = ['index.ts', 'index.tsx', 'index.js', 'index.jsx'];
-                let foundIndex = false;
-
+                
                 for (const ext of indexExtensions) {
-                    const indexUri = vscode.Uri.file(path.join(targetPath, ext));
+                    const indexUri = vscode.Uri.file(path.join(absoluteTargetPath, ext));
                     try {
                         await vscode.workspace.fs.stat(indexUri);
-                        targetUri = indexUri; // We found the real file!
-                        foundIndex = true;
-                        break; // Stop looking once we find it
+                        // Found a valid index file inside the directory
+                        const newPath = `${importPath}/${ext.replace(/\.tsx?$/, '')}`; // Standardize path
+                        workspaceEdit.replace(document.uri, pathRange, newPath);
+                        hasFixes = true;
+                        break; 
                     } catch {
-                        // Index file with this extension doesn't exist, try the next one
+                        // Extension not found, try next
                     }
                 }
-
-                if (!foundIndex) {
-                    console.warn(`[Import Resolver] No index file found inside directory: ${targetPath}`);
-                    continue; // Skip safely
-                }
             }
-
-            // 3. Safe to read the file! (If you need to parse its exports in the future)
-            // const fileData = await vscode.workspace.fs.readFile(targetUri);
-            // const fileContent = new TextDecoder().decode(fileData);
-            
-            console.log(`[Import Resolver] Successfully verified import: ${targetUri.fsPath}`);
-
         } catch (err) {
-            // 4. If fs.stat failed, it usually means the import omitted the file extension (e.g., './App')
-            // Let's test standard React/TS extensions before giving up.
+            // 3. If stat failed, the path is likely missing an extension (e.g., './App')
             const extensions = ['.ts', '.tsx', '.js', '.jsx'];
-            let foundExtension = false;
             
             for (const ext of extensions) {
-                const extUri = vscode.Uri.file(targetPath + ext);
+                const extUri = vscode.Uri.file(absoluteTargetPath + ext);
                 try {
                     const extStat = await vscode.workspace.fs.stat(extUri);
                     if ((extStat.type & vscode.FileType.File) === vscode.FileType.File) {
-                        foundExtension = true;
-                        targetUri = extUri;
+                        // Found the file with the missing extension
+                        const newPath = importPath + ext;
+                        workspaceEdit.replace(document.uri, pathRange, newPath);
+                        hasFixes = true;
+                        console.log(`[Import Resolver] Auto-fixed: ${importPath} -> ${newPath}`);
                         break;
                     }
                 } catch {
-                    // Extension didn't match
+                    // Try next extension
                 }
-            }
-
-            if (!foundExtension) {
-                console.warn(`[Import Resolver] Broken or missing import path: ${importPath}`);
-            } else {
-                console.log(`[Import Resolver] Successfully resolved extension for: ${targetUri.fsPath}`);
             }
         }
     }
-    
-    // NOTE: This function currently just verifies the paths exist without crashing.
-    // If you want it to actively rewrite broken imports in the editor, you would build a vscode.WorkspaceEdit here!
-}
+
+    // 4. Apply all identified fixes in a single atomic transaction
+    if (hasFixes) {
+        const success = await vscode.workspace.applyEdit(workspaceEdit);
+        if (success) {
+            vscode.window.setStatusBarMessage("✨ NexusCode: Imports resolved.", 3000);
+        }
+    }
+}   

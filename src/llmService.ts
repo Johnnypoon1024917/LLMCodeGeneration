@@ -30,19 +30,24 @@ function getLLMConfig() {
 
 function safeParseJSON<T>(jsonString: string): T {
     try {
-        // 1. Remove single-line comments // ...
-        const noSingleLineComments = jsonString.replace(/\/\/.*$/gm, '');
-
-        // 2. Remove multi-line comments /* ... */
-        const noComments = noSingleLineComments.replace(/\/\*[\s\S]*?\*\//g, '');
-
-        // 3. Remove trailing commas (e.g. {"a":1,} -> {"a":1}) which breaks JSON.parse
-        const cleanJSON = noComments.replace(/,\s*([\]}])/g, '$1');
-
-        return JSON.parse(cleanJSON);
-    } catch (e) {
-        console.error("JSON Parse Failed. Raw content:", jsonString);
-        throw new Error("Failed to parse LLM JSON response: " + (e instanceof Error ? e.message : String(e)));
+        // Find the start and end of the JSON object
+        const start = jsonString.indexOf('{');
+        const end = jsonString.lastIndexOf('}');
+        if (start === -1 || end === -1) throw new Error("No JSON object found");
+        
+        const extract = jsonString.substring(start, end + 1)
+            .replace(/\/\/.*$/gm, '') // Remove comments
+            .replace(/,\s*([\]}])/g, '$1'); // Remove trailing commas
+            
+        return JSON.parse(extract);
+    } catch (e: unknown) {
+        let msg = "Unknown error";
+        if (e instanceof Error) {
+            msg = e.message;
+        } else if (typeof e === "string") {
+            msg = e;
+        }
+        throw new Error("Failed to extract JSON: " + msg);
     }
 }
 

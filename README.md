@@ -1,71 +1,39 @@
-# nexuscode README
+# NexusCode: Autonomous AI Coding Assistant
 
-This is the README for your extension "nexuscode". After writing up a brief description, we recommend including the following sections.
+NexusCode is a powerful, autonomous AI programming assistant for Visual Studio Code. It acts as a pair programmer capable of understanding your entire project context, executing surgical code injections, and even evolving its own codebase.
 
-## Features
+## 🚀 Features
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+- **Surgical AST Code Injection:** Powered by Tree-Sitter, NexusCode doesn't just append text; it mathematically analyzes your code's Abstract Syntax Tree to inject methods and properties exactly where they belong without breaking syntax.
+- **Atomic File Edits:** AI-generated implementation plans are broken down into single-file, atomic steps. Review, accept, or reject changes on a per-file basis using the native CodeLens UI.
+- **Context-Aware Generation:** NexusCode automatically scans your workspace and reads your `.eslintrc` and `tsconfig.json` to ensure generated code matches your project's strict styling rules.
+- **Auto-Healing Tests:** If generated tests fail, the AI automatically reads the terminal error output and attempts to fix the logic before you even have to look at it.
+- **Meta-Mode (Self-Evolution):** NexusCode is capable of reading and modifying its own extension source code, allowing it to build new features for itself.
 
-For example if there is an image subfolder under your extension project workspace:
+## ⚙️ Configuration
 
-\!\[feature X\]\(images/feature-x.png\)
+NexusCode can be connected to any OpenAI-compatible API endpoint (including local LLMs via LM Studio or vLLM). 
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+Access these settings in VS Code via `Preferences: Open Settings (UI)` -> search for `NexusCode`:
 
-## Requirements
+* `nexuscode.apiEndpoint`: The URL of your LLM provider (Default: `http://127.0.0.1:1234/v1/chat/completions`).
+* `nexuscode.model`: The name or path of the model to use (Default: `qwen-72b`).
+* `nexuscode.apiKey`: Your API Key (if using a cloud provider or authenticated gateway).
+* `nexuscode.enableTools`: Enable agent tools for autonomous repository exploration.
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+## 🛠️ Usage
 
-## Extension Settings
+1. Open the **NexusCode** sidebar from the Activity Bar.
+2. Type a natural language request (e.g., *"Create a new AuthGuard component and write tests for it"*).
+3. Review the AI's generated implementation plan.
+4. Click **Execute All** or run tasks individually.
+5. Review the purple highlighted code changes in your editor and click **Accept** or **Reject** from the floating lens above the code.
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+## 📝 Requirements
 
-For example:
+* Visual Studio Code v1.80.0 or higher.
+* Node.js and NPM (for workspace command execution and auto-healing).
 
-This extension contributes the following settings:
+## 🔒 Security & Privacy
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+NexusCode is designed to work with local, privacy-first LLMs. When using endpoints like LM Studio or Ollama, your codebase never leaves your local machine.
