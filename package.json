@@ -79,9 +79,10 @@
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test"
-  },"dependencies": {
-    "web-tree-sitter": "^0.22.2"
-},
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.26.7"
+  },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.19.12",

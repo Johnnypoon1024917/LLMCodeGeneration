@@ -221,16 +221,26 @@ export async function askQwenForAtomicEdits(tasks: string[], projectContext: str
     return safeParseJSON<AtomicEdit[]>(content);
 }
 
+// Replace ONLY the streamQwenForCode function in src/llmService.ts
+
 export async function streamQwenForCode(
     taskDescription: string, availableFiles: string[] = [], currentFileContent: string = "", codingStyle: string = "precise", chatHistory: any[] = [],
-    callbacks: { onSetup: (action: string, filepath: string, target?: string) => Promise<void>, onToken: (token: string) => Promise<void> }
+    callbacks: { 
+        onReasoning?: (token: string) => Promise<void>, // 🔥 NEW CALLBACK
+        onSetup: (action: string, filepath: string, target?: string) => Promise<void>, 
+        onToken: (token: string) => Promise<void> 
+    }
 ): Promise<void> {
     const { endpoint, model, apiKey } = getLLMConfig(); 
 
     const systemPrompt = `You are an expert coding agent.
     CRITICAL RULE: SINGLE-FILE MODE. Output ONE <filepath>, ONE <action>, and ONE <code> block. 
     <action> rules: append, replace, or inject (requires <target> tag).
+    
     🔥 XML FORMAT STRICT ORDER 🔥
+    <reasoning>
+    Explain your step-by-step thinking, edge cases, and cross-file consistency BEFORE writing code.
+    </reasoning>
     <filepath>path/to/file.ext</filepath>
     <action>append | replace | inject</action>
     <target>ClassName (Only if inject)</target>
@@ -249,10 +259,10 @@ export async function streamQwenForCode(
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
-    let metadataBuffer = ""; 
-    let codeBuffer = ""; 
-    let isCodeBlockOpen = false;
-    let setupComplete = false;
+    
+    // 🔥 NEW: 4-Stage State Machine for intercepting the Reasoning Stream
+    let state: "SEARCHING_REASONING" | "STREAMING_REASONING" | "SEARCHING_SETUP" | "STREAMING_CODE" = "SEARCHING_REASONING";
+    let buffer = ""; 
 
     while (true) {
         const { done, value } = await reader.read();
@@ -266,78 +276,84 @@ export async function streamQwenForCode(
                 try {
                     const data = JSON.parse(line.substring(6));
                     const token = data.choices[0]?.delta?.content || "";
-                    
-                    // UNCOMMENT THIS LINE TO DEBUG RAW OUTPUT IN YOUR VS CODE CONSOLE:
-                    // process.stdout.write(token); 
-                    
-                    // PHASE 1: Collect metadata until we hit <code> OR ```
-                    if (!setupComplete) {
-                        metadataBuffer += token;
-                        
-                        const hasCodeTag = metadataBuffer.includes('<code>');
-                        const hasMarkdownTag = metadataBuffer.includes('```');
+                    buffer += token;
 
-                        // Be forgiving: accept either XML tags OR Markdown codeblocks
-                        if (hasCodeTag || hasMarkdownTag) {
-                            let filepath = metadataBuffer.match(/<filepath>(.*?)<\/filepath>/s)?.[1]?.trim() || "unknown";
-                            let action = metadataBuffer.match(/<action>(.*?)<\/action>/s)?.[1]?.trim().toLowerCase() || 'replace';
-                            let target = metadataBuffer.match(/<target>(.*?)<\/target>/s)?.[1]?.trim();
+                    // STAGE 1: Wait for <reasoning>
+                    if (state === "SEARCHING_REASONING") {
+                        const rStart = buffer.indexOf('<reasoning>');
+                        if (rStart !== -1) {
+                            state = "STREAMING_REASONING";
+                            buffer = buffer.substring(rStart + 11);
+                        } else if (buffer.includes('<filepath>') || buffer.includes('```') || buffer.includes('<code>')) {
+                            state = "SEARCHING_SETUP"; // AI skipped reasoning, proceed to code
+                        }
+                    }
+
+                    // STAGE 2: Stream Reasoning to UI
+                    if (state === "STREAMING_REASONING") {
+                        const rEnd = buffer.indexOf('</reasoning>');
+                        if (rEnd !== -1) {
+                            const chunk = buffer.substring(0, rEnd);
+                            if (chunk && callbacks.onReasoning) await callbacks.onReasoning(chunk);
+                            state = "SEARCHING_SETUP";
+                            buffer = buffer.substring(rEnd + 12);
+                        } else {
+                            if (buffer.length > 15) { // 15 char lookahead to prevent emitting closing tag
+                                const chunk = buffer.substring(0, buffer.length - 15);
+                                if (callbacks.onReasoning) await callbacks.onReasoning(chunk);
+                                buffer = buffer.substring(buffer.length - 15);
+                            }
+                        }
+                    }
+
+                    // STAGE 3: Extract Metadata (Filepath & Action)
+                    if (state === "SEARCHING_SETUP") {
+                        const codeTag = buffer.indexOf('<code>');
+                        const mdTag = buffer.indexOf('```');
+
+                        if (codeTag !== -1 || mdTag !== -1) {
+                            let filepath = buffer.match(/<filepath>(.*?)<\/filepath>/s)?.[1]?.trim() || "unknown";
+                            let action = buffer.match(/<action>(.*?)<\/action>/s)?.[1]?.trim().toLowerCase() || 'replace';
+                            let target = buffer.match(/<target>(.*?)<\/target>/s)?.[1]?.trim();
 
                             await callbacks.onSetup(action, filepath, target);
-                            setupComplete = true;
-                            isCodeBlockOpen = true;
-                            
-                            // Figure out where the actual code starts to prevent leaking tags
-                            let codeStart = -1;
-                            if (hasCodeTag) {
-                                codeStart = metadataBuffer.indexOf('<code>') + 6;
-                            } else if (hasMarkdownTag) {
-                                codeStart = metadataBuffer.indexOf('```');
-                                // Advance past the language identifier (e.g., ```html\n)
-                                const newlineAfterTicks = metadataBuffer.indexOf('\n', codeStart);
-                                codeStart = newlineAfterTicks !== -1 ? newlineAfterTicks + 1 : codeStart + 3;
-                            }
+                            state = "STREAMING_CODE";
 
-                            if (codeStart !== -1) {
-                                const leakedCode = metadataBuffer.substring(codeStart);
-                                if (leakedCode) codeBuffer += leakedCode;
+                            let codeStart = codeTag !== -1 ? codeTag + 6 : mdTag;
+                            if (mdTag !== -1 && codeTag === -1) {
+                                const nl = buffer.indexOf('\n', mdTag);
+                                codeStart = nl !== -1 ? nl + 1 : mdTag + 3;
                             }
+                            buffer = buffer.substring(codeStart);
                         }
-                    } 
-                    // PHASE 2: Safely stream code into the buffer
-                    else if (isCodeBlockOpen && token) {
-                        codeBuffer += token;
                     }
 
-                    // PHASE 3: The Lookahead for Closing Tags
-                    if (isCodeBlockOpen && codeBuffer.length > 0) {
-                        // Watch for either </code or the closing ``` markdown tag
-                        const closingCodeTag = codeBuffer.indexOf('</code');
-                        const closingMarkdownTag = codeBuffer.indexOf('```');
-                        
-                        const closingTagIndex = closingCodeTag !== -1 ? closingCodeTag : closingMarkdownTag;
-                        
-                        if (closingTagIndex !== -1) {
-                            // The AI started closing the block! Emit everything before it and stop.
-                            const safeToEmit = codeBuffer.substring(0, closingTagIndex);
-                            if (safeToEmit) await callbacks.onToken(safeToEmit);
-                            isCodeBlockOpen = false;
-                            break; 
+                    // STAGE 4: Stream Code to VS Code Editor
+                    if (state === "STREAMING_CODE") {
+                        const endCode = buffer.indexOf('</code');
+                        const endMd = buffer.indexOf('```');
+                        const endIndex = endCode !== -1 ? endCode : endMd;
+
+                        if (endIndex !== -1) {
+                            const chunk = buffer.substring(0, endIndex);
+                            if (chunk) await callbacks.onToken(chunk);
+                            break; // Stream finished perfectly
                         } else {
-                            // Hold the last 7 characters back just in case they are building up to `</code`
-                            if (codeBuffer.length > 7) {
-                                const safeToEmit = codeBuffer.substring(0, codeBuffer.length - 7);
-                                await callbacks.onToken(safeToEmit);
-                                codeBuffer = codeBuffer.substring(codeBuffer.length - 7);
+                            if (buffer.length > 7) {
+                                const chunk = buffer.substring(0, buffer.length - 7);
+                                await callbacks.onToken(chunk);
+                                buffer = buffer.substring(buffer.length - 7);
                             }
                         }
                     }
-                } catch (e) { /* Ignore incomplete JSON chunks */ }
+                } catch (e) { }
             }
         }
-        if (!isCodeBlockOpen && setupComplete) break; 
+        if (state === "STREAMING_CODE" && buffer.includes('</code')) break; 
     }
-    if (isCodeBlockOpen && codeBuffer.length > 0) await callbacks.onToken(codeBuffer);
+    
+    // Flush remaining code buffer if stream broke unexpectedly
+    if (state === "STREAMING_CODE" && buffer.length > 0) await callbacks.onToken(buffer);
 }
 
 /**
@@ -345,24 +361,9 @@ export async function streamQwenForCode(
  */
 export async function getAvailableModels(): Promise<string[]> {
     const config = vscode.workspace.getConfiguration('nexuscode');
-    const baseEndpoint = config.get<string>('apiEndpoint') || 'http://127.0.0.1:1234/v1/chat/completions';
     
-    try {
-        const url = new URL(baseEndpoint);
-        const modelsEndpoint = `${url.protocol}//${url.host}/api/v0/models`; 
-
-        const response = await fetch(modelsEndpoint, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-        const data = await response.json() as any;
-        if (data.data && Array.isArray(data.data)) {
-            return data.data.map((model: any) => model.id);
-        }
-        return [];
-    } catch (e) {
-        console.error("[LLM Service] Failed to fetch models from /api/v0/models:", e);
-        // 🔥 Fallback to fixed model
-        const fallbackModel = config.get<string>('model') || 'qwen2.5-coder';
-        return [fallbackModel]; 
-    }
+    // Check if the user manually overrode it in settings, otherwise enforce the fixed model
+    const fixedModel = config.get<string>('model') || 'qwen2.5-coder';
+    
+    return [fixedModel];
 }

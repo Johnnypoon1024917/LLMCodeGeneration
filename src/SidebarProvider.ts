@@ -179,8 +179,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         cancellable: false
                     }, async (progress) => {
                         try {
-                            progress.report({ message: "Gathering Intelligence..." });
-                            
                             const [lspContext, styleGuide, ragContext] = await Promise.all([
                                 getLspContext(data.task),
                                 getProjectStyleGuides(),
@@ -266,6 +264,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             await streamQwenForCode(
                                 data.task, [], promptContext, data.codingStyle, [],
                                 {
+                                    onReasoning: async (token: string) => {
+                                        this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: token });
+                                    },
                                     onSetup: async (action: string, filepath: string, target?: string) => {
                                         streamAction = !fileExists ? 'replace' : action;
                                         

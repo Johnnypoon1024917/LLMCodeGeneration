@@ -1,16 +1,27 @@
 // src/utilities/symbolManager.ts
 import * as vscode from 'vscode';
-import Parser from 'web-tree-sitter';
 
-let parser: Parser;
+/**
+ * FIX: Provide a global definition for EmscriptenModule which is missing 
+ * in the latest web-tree-sitter type definitions.
+ */
+declare global {
+    interface EmscriptenModule {}
+}
+
+import * as Parser from 'web-tree-sitter';
+
+// FIX: Use 'any' type for the instance variable to avoid namespace-as-type errors
+let parser: any;
 
 /**
  * Initializes the parser and loads the language-specific WASM grammar.
  */
 async function initParser(extensionUri: vscode.Uri, languageId: string) {
     if (!parser) {
-        await Parser.init();
-        parser = new Parser();
+        // FIX: Cast to 'any' to access .init() and the constructor safely
+        await (Parser as any).init();
+        parser = new (Parser as any)();
     }
 
     const wasmMapping: Record<string, string> = {
@@ -25,7 +36,7 @@ async function initParser(extensionUri: vscode.Uri, languageId: string) {
     const wasmPath = vscode.Uri.joinPath(extensionUri, 'parsers', wasmFile).fsPath;
 
     try {
-        const lang = await Parser.Language.load(wasmPath);
+        const lang = await (Parser as any).Language.load(wasmPath);
         parser.setLanguage(lang);
     } catch (e) {
         console.error(`[AST] Failed to load WASM for ${languageId}:`, e);
@@ -55,7 +66,9 @@ export async function getInjectionPosition(
         `);
 
         const captures = query.captures(tree.rootNode);
-        const target = captures.find(c => c.node.text === symbolName);
+        
+        // FIX: Explicitly type 'c' as 'any' to prevent implicit-any errors
+        const target = captures.find((c: any) => c.node.text === symbolName);
 
         if (!target) {
             console.warn(`[AST] Target symbol '${symbolName}' not found in file.`);
@@ -63,7 +76,8 @@ export async function getInjectionPosition(
         }
 
         // Find the block/body child of the matched node (where the actual code goes)
-        const bodyNode = target.node.parent?.children.find(n => 
+        // FIX: Explicitly type 'n' as 'any'
+        const bodyNode = (target.node.parent?.children || []).find((n: any) => 
             n.type === 'class_body' || n.type === 'statement_block' || n.type === 'block'
         );
 
