@@ -33,64 +33,59 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.globalContext = void 0;
 exports.activate = activate;
 const vscode = __importStar(require("vscode"));
 const SidebarProvider_1 = require("./SidebarProvider");
 const provenanceTracker_1 = require("./provenanceTracker");
-const AILensProvider_1 = require("./AILensProvider"); // Import new provider
+const AILensProvider_1 = require("./AILensProvider");
 const terminalManager_1 = require("./terminalManager");
 function activate(context) {
+    exports.globalContext = context;
+    // 1. Initialize core services
     const terminalManager = new terminalManager_1.TerminalManager();
     const lensProvider = new AILensProvider_1.AILensProvider();
-    // Register the floating toolbar provider
-    const selector = [
-        { language: '*', scheme: '*' }
-    ];
-    context.subscriptions.push(vscode.languages.registerCodeLensProvider(selector, lensProvider));
     const provenanceTracker = new provenanceTracker_1.ProvenanceTracker(lensProvider);
     const sidebarProvider = new SidebarProvider_1.SidebarProvider(context.extensionUri);
-    // We pass the tracker to the sidebar so it can flag LLM edits when applying code
+    // 2. Wire them together
     sidebarProvider.setProvenanceTracker(provenanceTracker);
     sidebarProvider.setTerminalManager(terminalManager);
-    context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor((editor) => {
+    const selector = [{ language: '*', scheme: '*' }];
+    // 🔥 ENTERPRISE UPGRADE: Group all registrations into a single, clean push block
+    context.subscriptions.push(
+    // --- PROVIDERS ---
+    vscode.languages.registerCodeLensProvider(selector, lensProvider), vscode.window.registerWebviewViewProvider("qwen-sidebar", sidebarProvider, {
+        webviewOptions: { retainContextWhenHidden: true }
+    }), 
+    // --- EVENT LISTENERS ---
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
         if (editor) {
-            // 1. Force the CodeLens provider to wake up and redraw the buttons
             lensProvider.refresh();
-            // 2. Re-apply the purple highlight to the new editor instance
             provenanceTracker.restoreDecorations(editor);
         }
-    }));
-    context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((doc) => {
-        // Optional: clear edits for this specific URI to keep the memory clean
+    }), vscode.workspace.onDidCloseTextDocument((doc) => {
         const tasksToClear = lensProvider.pendingEdits
             .filter(e => e.uri.toString() === doc.uri.toString())
             .map(e => e.taskId);
         tasksToClear.forEach(id => lensProvider.clearEdit(id));
-    }));
-    // Register the Webview UI
-    context.subscriptions.push(vscode.window.registerWebviewViewProvider("qwen-sidebar", sidebarProvider, {
-        webviewOptions: {
-            retainContextWhenHidden: true // <--- THIS IS THE MAGIC LINE
-        }
-    }));
-    // Register the Accept/Reject commands triggered by the floating toolbar
-    context.subscriptions.push(vscode.commands.registerCommand('nexuscode.acceptEdit', async (taskId, uri) => {
-        // 1. Tell the tracker to clear the UI and mark as approved
+    }), 
+    // --- INLINE CODELENS COMMANDS ---
+    vscode.commands.registerCommand('nexuscode.acceptEdit', async (taskId, uri) => {
         provenanceTracker.handleAccept(taskId, uri);
-        // 2. 🔥 NEW: Save the file and run the correct build command
         await sidebarProvider.handlePostApproval(uri);
-    }));
-    context.subscriptions.push(vscode.commands.registerCommand('nexuscode.rejectEdit', async (taskId, uri) => {
+    }), vscode.commands.registerCommand('nexuscode.rejectEdit', async (taskId, uri) => {
         await provenanceTracker.handleReject(taskId, uri);
-    }));
-    // src/extension.ts (inside your viewDiff command)
-    context.subscriptions.push(vscode.commands.registerCommand('nexuscode.viewDiff', async (taskId, uri) => {
+    }), vscode.commands.registerCommand('nexuscode.refreshLens', () => {
+        lensProvider.refresh();
+        vscode.window.showInformationMessage("NexusCode: CodeLens manually refreshed!");
+    }), vscode.commands.registerCommand('nexuscode.viewDiff', async (taskId, uri) => {
         const snapshots = provenanceTracker.getPendingCode(taskId);
         if (snapshots) {
             await provenanceTracker.showDiff(snapshots.original, snapshots.proposed, taskId);
         }
-    }));
-    context.subscriptions.push(vscode.commands.registerCommand('nexuscode.reviewCode', async () => {
+    }), 
+    // --- HIGHLIGHT / REVIEW COMMANDS ---
+    vscode.commands.registerCommand('nexuscode.reviewCode', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor)
             return;
@@ -99,26 +94,55 @@ function activate(context) {
             vscode.window.showWarningMessage("Please highlight some code to review.");
             return;
         }
-        // Send the code to the Webview
-        sidebarProvider._view?.webview.postMessage({
-            type: 'requestReview',
-            code: selectedText
-        });
-        // Focus the sidebar so the user sees the result
+        sidebarProvider._view?.webview.postMessage({ type: 'requestReview', code: selectedText });
         await vscode.commands.executeCommand('qwen-sidebar.focus');
-    }));
-    vscode.commands.registerCommand('nexuscode.optimizeSelection', async () => {
+    }), vscode.commands.registerCommand('nexuscode.optimizeSelection', async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor)
             return;
         const selection = editor.document.getText(editor.selection);
-        // Notify the Webview
-        sidebarProvider._view?.webview.postMessage({
-            type: 'requestReview',
-            code: selection
-        });
-        // Focus the sidebar automatically
+        sidebarProvider._view?.webview.postMessage({ type: 'requestReview', code: selection });
         await vscode.commands.executeCommand('qwen-sidebar.focus');
-    });
+    }), 
+    // --- RIGHT-CLICK CONTEXT MENU COMMANDS ---
+    vscode.commands.registerCommand('nexuscode.addSelection', () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && !editor.selection.isEmpty) {
+            const selection = editor.document.getText(editor.selection);
+            const filename = vscode.workspace.asRelativePath(editor.document.uri);
+            // 🔥 ENTERPRISE UPGRADE: Send structured context instead of raw text
+            sidebarProvider.sendMessageToWebview({
+                type: 'addContext',
+                file: filename,
+                code: selection,
+                language: editor.document.languageId
+            });
+            vscode.commands.executeCommand('qwen-sidebar.focus');
+        }
+    }), vscode.commands.registerCommand('nexuscode.explainSelection', () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && !editor.selection.isEmpty) {
+            const selection = editor.document.getText(editor.selection);
+            const filename = vscode.workspace.asRelativePath(editor.document.uri);
+            // 🔥 Attach the context silently, then trigger an explain prompt
+            const contextStr = `\n\`\`\`${editor.document.languageId} title="${filename}"\n${selection}\n\`\`\`\n`;
+            sidebarProvider.sendMessageToWebview({
+                type: 'addUserMessageAndSubmit',
+                text: `Please explain this selected code from \`${filename}\`.`,
+                context: contextStr
+            });
+            vscode.commands.executeCommand('qwen-sidebar.focus');
+        }
+    }), vscode.commands.registerCommand('nexuscode.modifySelection', () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && !editor.selection.isEmpty) {
+            const selection = editor.document.getText(editor.selection);
+            const filename = vscode.workspace.asRelativePath(editor.document.uri);
+            // 🔥 Attach the context silently, then pre-fill a modification request
+            sidebarProvider.sendMessageToWebview({ type: 'addContext', file: filename, code: selection, language: editor.document.languageId });
+            sidebarProvider.sendMessageToWebview({ type: 'insertText', text: `I want to modify the selected code. Please change it to: ` });
+            vscode.commands.executeCommand('qwen-sidebar.focus');
+        }
+    }));
 }
 //# sourceMappingURL=extension.js.map

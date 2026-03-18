@@ -1,18 +1,21 @@
 // src/SidebarProvider.ts
 import * as vscode from "vscode";
 import * as path from 'path';
+import { globalContext } from './extension';
 
 // AI Services & Tools
-import { 
-    askQwenForStructure, 
-    askQwenToFixError, 
-    askQwenForTests, 
-    askQwenForTargetFile, 
-    askQwenForAtomicEdits, 
-    AtomicEdit, 
-    streamQwenForCode, 
+import {
+    askQwenForStructure,
+    askQwenToFixError,
+    askQwenForTests,
+    askQwenForTargetFile,
+    askQwenForAtomicEdits,
+    AtomicEdit,
+    streamQwenForCode,
     runAgenticExploration,
-    getAvailableModels // 🔥 ADD THIS HERE
+    getAvailableModels,
+    determineIntent,
+    streamQwenChat
 } from "./llmService";
 
 // Context Managers
@@ -38,7 +41,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _tracker?: ProvenanceTracker;
     private _terminalManager?: TerminalManager;
     private _metaManager?: MetaContextManager;
-    
+    private _activeTaskController?: AbortController;
+
     private _lastActiveFile?: string;
     private _isMetaMode: boolean = false;
 
@@ -47,6 +51,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     public setTerminalManager(manager: TerminalManager) { this._terminalManager = manager; }
     public setProvenanceTracker(tracker: ProvenanceTracker) { this._tracker = tracker; }
     public setMetaManager(manager: MetaContextManager) { this._metaManager = manager; }
+
+    public sendMessageToWebview(message: any) {
+        if (this._view) {
+            this._view.webview.postMessage(message);
+        } else {
+            vscode.window.showInformationMessage("Please open the NexusCode sidebar first.");
+        }
+    }
 
     public toggleMetaMode() {
         this._isMetaMode = !this._isMetaMode;
@@ -61,11 +73,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     // --- 🛡️ ENTERPRISE GUARDRAIL: Human-in-the-Loop Command Execution ---
-    private async confirmAndRunCommand(command: string, workspacePath: string, progressMessage: string): Promise<{success: boolean, output: string} | undefined> {
+    private async confirmAndRunCommand(command: string, workspacePath: string, progressMessage: string): Promise<{ success: boolean, output: string } | undefined> {
         const userChoice = await vscode.window.showWarningMessage(
             `🤖 NexusCode wants to execute a terminal command:\n\n\`${command}\``,
             { modal: true },
-            "Run Command", 
+            "Run Command",
             "Deny"
         );
 
@@ -74,7 +86,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return await this._terminalManager?.runCommandWithCapture(command, workspacePath);
         } else {
             vscode.window.showInformationMessage("Command execution cancelled by user.");
-            return undefined; 
+            return undefined;
         }
     }
 
@@ -110,74 +122,190 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
     }
 
-    public resolveWebviewView(webviewView: vscode.WebviewView) {
+    public async resolveWebviewView(webviewView: vscode.WebviewView) {
         this._view = webviewView;
         this._tracker?.setView(webviewView);
         webviewView.webview.options = { enableScripts: true };
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
+        // 🔥 ENTERPRISE UPGRADE: Load Session and Auth State
+        const chatHistory = globalContext.globalState.get<any[]>('nexus_chat_history') || [];
+        const taskStatuses = globalContext.globalState.get<any>('nexus_task_statuses') || {};
+        const taskSummaries = globalContext.globalState.get<any>('nexus_task_summaries') || {};
+        const hasApiKey = !!(await globalContext.secrets.get('nexuscode_apikey'));
+        
+        // Send initial state to React
+        webviewView.webview.postMessage({ 
+            type: 'initState', 
+            messages: chatHistory, 
+            taskStatuses: taskStatuses,
+            taskSummaries: taskSummaries,
+            hasKey: hasApiKey 
+        });
+
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
-                case "generateStructure": {
-                    // 🔥 Wrap in try/catch to prevent unhandled promise rejections
+                
+                case "syncHistory":
+                    await globalContext.globalState.update('nexus_chat_history', data.messages);
+                    await globalContext.globalState.update('nexus_task_statuses', data.taskStatuses);
+                    await globalContext.globalState.update('nexus_task_summaries', data.taskSummaries);
+                    break;
+
+                case "clearHistory":
+                    await globalContext.globalState.update('nexus_chat_history', []);
+                    await globalContext.globalState.update('nexus_task_statuses', {});
+                    await globalContext.globalState.update('nexus_task_summaries', {});
+                    break;
+
+                case "saveApiKey":
+                    await globalContext.secrets.store('nexuscode_apikey', data.value);
+                    vscode.window.showInformationMessage("NexusCode: API Key Saved Securely!");
+                    webviewView.webview.postMessage({ type: 'initState', messages: chatHistory, hasKey: true });
+                    break;
+
+                case "processUserMessage": {
+                    console.log("[DEBUG] 📥 Received message from UI:", data.text);
+                    this._activeTaskController = new AbortController();
                     try {
-                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Searching Hybrid Vector Server..." });
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing intent..." });
                         
-                        await indexWorkspace((msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg }));
-                        const fileTree = await getProjectContext(await this.getTargetContext());
-                        const ragContext = await retrieveContext(data.value); 
-                        
-                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Architecting plan..." });
-                        const structure = await askQwenForStructure(data.value, `${fileTree}\n\n${ragContext}`);
+                        console.log("[DEBUG] 🧠 Determining intent...");
+                        const intent = await determineIntent(data.text);
+                        console.log(`[DEBUG] 🎯 Intent determined as: [${intent.toUpperCase()}]`);
 
-                        const rootSearchPath = this._isMetaMode ? this._extensionUri.fsPath : undefined;
-                        const { finalPaths, renamingMap } = await resolveCanonicalPaths(structure.folderStructure, rootSearchPath);
-                        structure.folderStructure = finalPaths;
+                        // Combine text and context for the LLM
+                        const fullPrompt = data.context 
+                            ? `--- ATTACHED CONTEXT ---\n${data.context}\n\n--- USER QUERY ---\n${data.text}` 
+                            : data.text;
 
-                        structure.implementationTasks = structure.implementationTasks.map(task => {
-                            let updatedTask = task;
-                            renamingMap.forEach((realPath, plannedPath) => {
-                                const plannedName = path.basename(plannedPath);
-                                if (updatedTask.includes(plannedPath)) updatedTask = updatedTask.replace(plannedPath, realPath);
-                                else if (updatedTask.includes(plannedName)) updatedTask = updatedTask.replace(plannedName, `${plannedName} (found at ${realPath})`);
+                        if (intent === 'build') {
+                            console.log("[DEBUG] 🛠️ Entering BUILD pipeline");
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Architecting plan..." });
+                            
+                            // 🔥 Initialize chat bubble for the pre-explanation
+                            this._view?.webview.postMessage({ type: 'startChatStream' });
+
+                            await indexWorkspace((msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg }));
+                            const fileTree = await getProjectContext(await this.getTargetContext());
+                            const ragContext = await retrieveContext(data.text); 
+                            
+                            const result = await askQwenForStructure(fullPrompt, `${fileTree}\n\n${ragContext}`);
+
+                            // Stream the explanation to the UI
+                            this._view?.webview.postMessage({ type: 'chatToken', token: result.explanation + "\n\n" });
+
+                            const rootSearchPath = this._isMetaMode ? this._extensionUri.fsPath : undefined;
+                            const { finalPaths, renamingMap } = await resolveCanonicalPaths(result.plan.folderStructure, rootSearchPath);
+                            result.plan.folderStructure = finalPaths;
+
+                            result.plan.implementationTasks = result.plan.implementationTasks.map(task => {
+                                let updatedTask = task;
+                                renamingMap.forEach((realPath, plannedPath) => {
+                                    const plannedName = path.basename(plannedPath);
+                                    if (updatedTask.includes(plannedPath)) updatedTask = updatedTask.replace(plannedPath, realPath);
+                                    else if (updatedTask.includes(plannedName)) updatedTask = updatedTask.replace(plannedName, `${plannedName} (found at ${realPath})`);
+                                });
+                                return updatedTask;
                             });
-                            return updatedTask;
-                        });
 
-                        if (structure.folderStructure.length > 0) {
-                            await createWorkspaceStructure(structure.folderStructure);
+                            if (result.plan.folderStructure.length > 0) await createWorkspaceStructure(result.plan.folderStructure);
+                            
+                            this._view?.webview.postMessage({ type: "structureResponse", value: result.plan });
+                            console.log("[DEBUG] ✅ Build plan successfully sent to UI.");
+
+                        } else {
+                            // --- CHAT & EXPLAIN PIPELINE ---
+                            console.log("[DEBUG] 💬 Entering CHAT/EXPLAIN pipeline");
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Gathering context..." });
+                            
+                            const workspacePath = await this.getTargetContext();
+                            const ragContext = await retrieveContext(data.text);
+                            
+                            let openFilesContext = "";
+                            vscode.workspace.textDocuments.forEach(doc => {
+                                if (doc.uri.scheme === 'file' && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
+                                    openFilesContext += `\n📍 OPEN FILE: ${vscode.workspace.asRelativePath(doc.uri)}\n\`\`\`\n${doc.getText().substring(0, 3000)}\n\`\`\`\n`;
+                                }
+                            });
+
+                            let fullContext = "";
+                            if (intent === 'explain') {
+                                const projectStructure = await getProjectContext(workspacePath);
+                                const truncatedStructure = projectStructure.length > 15000 ? projectStructure.substring(0, 15000) + "\n...[TRUNCATED TO SAVE TOKENS]" : projectStructure;
+                                fullContext = `Directory Tree:\n${truncatedStructure}\n\nCurrently Open Files:\n${openFilesContext}\n\nVector Search Context:\n${ragContext}`;
+                            } else {
+                                fullContext = `Currently Open Files:\n${openFilesContext}\n\nVector Search Context:\n${ragContext}`;
+                            }
+
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Thinking..." });
+                            this._view?.webview.postMessage({ type: 'startChatStream' });
+
+                            await streamQwenChat(
+                                fullPrompt, fullContext,
+                                (token) => { this._view?.webview.postMessage({ type: 'chatToken', token: token }); },
+                                this._activeTaskController.signal
+                            );
+                            console.log("[DEBUG] ✅ Chat stream completed naturally.");
                         }
 
-                        webviewView.webview.postMessage({ type: "structureResponse", value: structure });
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
-                    } catch (error) {
-                        // 🔥 Catch the error and notify the UI
-                        console.error("Structure generation error:", error);
-                        vscode.window.showErrorMessage(`NexusCode Error: ${error instanceof Error ? error.message : "Failed to generate structure. Is the LLM running?"}`);
-                        
-                        // Tell the UI to stop spinning
-                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
-                        this._view?.webview.postMessage({ type: 'taskCompleted', status: 'error' });
+                    } catch (error: any) {
+                        if (error.name === 'AbortError') {
+                            console.log("[DEBUG] 🛑 Generation aborted by user.");
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "⚠️ Generation stopped." });
+                            setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 3000);
+                        } else {
+                            console.error("[DEBUG] 💥 ERROR IN processUserMessage PIPELINE:", error);
+                            vscode.window.showErrorMessage(`NexusCode Error: ${error.message}`);
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                            this._view?.webview.postMessage({ type: 'taskCompleted', status: 'error' });
+                        }
+                    } finally {
+                        this._activeTaskController = undefined;
                     }
                     break;
                 }
 
+                
+
+                case "cancelTask": {
+                    if (this._activeTaskController) {
+                        this._activeTaskController.abort();
+                        this._activeTaskController = undefined;
+                        
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "⚠️ Task cancelled by user." });
+                        
+                        // 🔥 AUTO-CLEAR STATUS AFTER 3 SECONDS
+                        setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 3000);
+                        
+                        vscode.window.showWarningMessage("NexusCode: Generation Stopped.");
+                    }
+                    break;
+                }
                 case "executeTask": {
+                    console.log(`\n\n[DEBUG-EXEC] 🚀 STARTING EXECUTION FOR TASK: "${data.task}"`);
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) return;
-                    
+
                     const contextRoot = this._isMetaMode ? this._extensionUri.fsPath : undefined;
                     const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
                     const projectStructure = await getProjectContext(contextRoot);
 
                     const lowerTask = data.task.toLowerCase();
                     const isReadOnly = (lowerTask.startsWith("open") || lowerTask.startsWith("locate")) && !lowerTask.includes("fix");
+                    this._activeTaskController = new AbortController();
 
                     vscode.window.withProgress({
                         location: vscode.ProgressLocation.Notification,
                         title: this._isMetaMode ? "⚠️ NexusCode Self-Evolving..." : "NexusCode is working...",
-                        cancellable: false
-                    }, async (progress) => {
+                        cancellable: true 
+                    }, async (progress, token) => {
+                        token.onCancellationRequested(() => {
+                            console.log("[DEBUG-EXEC] 🛑 User cancelled task.");
+                            this._activeTaskController?.abort();
+                        });
+
                         try {
                             const [lspContext, styleGuide, ragContext] = await Promise.all([
                                 getLspContext(data.task),
@@ -186,8 +314,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             ]);
 
                             const smartContext = await runAgenticExploration(
-                                data.task, rootUri.fsPath, 
-                                (msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg })
+                                data.task, rootUri.fsPath,
+                                (stepType, description, details) => {
+                                    webviewView.webview.postMessage({ 
+                                        type: 'agentStep', 
+                                        task: data.task, 
+                                        stepType, 
+                                        description, 
+                                        details 
+                                    });
+                                }
                             );
 
                             progress.report({ message: "Locating target file..." });
@@ -211,7 +347,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 const document = await vscode.workspace.openTextDocument(fileUri);
                                 await vscode.window.showTextDocument(document, { preview: false });
                                 webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'approved', summary: `📂 Opened ${realFilepath}` });
-                                return; 
+                                return;
                             }
 
                             let currentFileContent = "";
@@ -222,8 +358,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 fileExists = true;
                             } catch { }
 
-                            const contextPayload = currentFileContent.length > 20000 
-                                ? `[LARGE FILE - HEADERS ONLY]\n${currentFileContent.substring(0, 2000)}...` 
+                            const contextPayload = currentFileContent.length > 20000
+                                ? `[LARGE FILE - HEADERS ONLY]\n${currentFileContent.substring(0, 2000)}...`
                                 : currentFileContent;
 
                             const promptContext = `
@@ -245,7 +381,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 try {
                                     const parentDir = vscode.Uri.joinPath(rootUri, path.dirname(realFilepath));
                                     await vscode.workspace.fs.createDirectory(parentDir);
-                                } catch (e) {}
+                                } catch (e) { }
                                 await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
                                 summary = `✨ Created ${realFilepath}`;
                             }
@@ -257,9 +393,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             let currentPosition = new vscode.Position(0, 0);
                             let streamStartLine = 0;
                             let fullGeneratedCode = "";
-                            let generatedCommand = ""; 
+                            let generatedCommand = "";
 
                             const originalContentForDiff = currentFileContent;
+
+                            console.log("[DEBUG-EXEC] 🌊 Starting streamQwenForCode...");
 
                             await streamQwenForCode(
                                 data.task, [], promptContext, data.codingStyle, [],
@@ -269,16 +407,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     },
                                     onSetup: async (action: string, filepath: string, target?: string) => {
                                         streamAction = !fileExists ? 'replace' : action;
-                                        
+
+                                        // 🔥 FIX: Strictly clamp to 0-indexed bounds to prevent VS Code crashes!
+                                        const lastSafeLine = Math.max(0, document.lineCount - 1);
+                                        const lastSafeChar = document.lineCount > 0 ? document.lineAt(lastSafeLine).text.length : 0;
+
                                         if (streamAction === 'replace') {
-                                            await editor.edit(b => b.delete(new vscode.Range(0, 0, document.lineCount, 0)));
+                                            await editor.edit(b => b.delete(new vscode.Range(0, 0, lastSafeLine, lastSafeChar)));
                                             currentPosition = new vscode.Position(0, 0);
-                                            streamStartLine = 0; 
+                                            streamStartLine = 0;
                                         } else if (streamAction === 'append') {
-                                            currentPosition = new vscode.Position(document.lineCount, 0);
+                                            currentPosition = new vscode.Position(lastSafeLine, lastSafeChar);
                                             await editor.edit(b => b.insert(currentPosition, "\n\n"));
-                                            currentPosition = new vscode.Position(document.lineCount, 0);
-                                            streamStartLine = document.lineCount - 1; 
+                                            currentPosition = new vscode.Position(lastSafeLine + 2, 0);
+                                            streamStartLine = lastSafeLine + 2;
                                         } else if (streamAction === 'inject' && target) {
                                             const injectionPos = await getInjectionPosition(this._extensionUri, document, target);
                                             if (injectionPos) {
@@ -288,10 +430,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                                 streamStartLine = currentPosition.line;
                                             } else {
                                                 streamAction = 'append';
-                                                currentPosition = new vscode.Position(document.lineCount, 0);
+                                                currentPosition = new vscode.Position(lastSafeLine, lastSafeChar);
                                                 await editor.edit(b => b.insert(currentPosition, "\n\n"));
-                                                currentPosition = new vscode.Position(document.lineCount, 0);
-                                                streamStartLine = document.lineCount - 1;
+                                                currentPosition = new vscode.Position(lastSafeLine + 2, 0);
+                                                streamStartLine = lastSafeLine + 2;
                                             }
                                         }
                                     },
@@ -304,8 +446,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         const cleanToken = token.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').replace(/<\/code>/g, '').replace(/<\/code/g, '');
                                         fullGeneratedCode += cleanToken;
 
-                                        await editor.edit(b => b.insert(currentPosition, cleanToken), { undoStopBefore: false, undoStopAfter: false }); 
-                                        
+                                        await editor.edit(b => b.insert(currentPosition, cleanToken), { undoStopBefore: false, undoStopAfter: false });
+
                                         const lines = cleanToken.split('\n');
                                         if (lines.length > 1) {
                                             currentPosition = new vscode.Position(currentPosition.line + lines.length - 1, lines[lines.length - 1].length);
@@ -313,40 +455,55 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                             currentPosition = new vscode.Position(currentPosition.line, currentPosition.character + cleanToken.length);
                                         }
                                         editor.revealRange(new vscode.Range(currentPosition, currentPosition), vscode.TextEditorRevealType.Default);
+                                        // 🔥 FIX: Removed experimental streamCode here
                                     }
-                                }
+                                },
+                                this._activeTaskController?.signal
                             );
 
+                            console.log("[DEBUG-EXEC] ✅ streamQwenForCode finished.");
+                            // 🔥 FIX: Removed experimental finishTrackingTask here
+
                             let status = "reviewing";
+                            const finalSafeLine = Math.max(0, editor.document.lineCount - 1); // 🔥 FIX: 0-indexed limit
+
                             if (streamAction === 'replace') {
                                 const mergedHeader = getAIHeader(realFilepath, data.task, originalContentForDiff);
                                 await editor.edit(b => b.insert(new vscode.Position(0, 0), mergedHeader + "\n"));
-                                status = this._tracker?.trackStreamedReview(editor, originalContentForDiff, data.task, 0, editor.document.lineCount) || "reviewing";
+                                status = this._tracker?.trackStreamedReview(editor, originalContentForDiff, data.task, 0, finalSafeLine) || "reviewing";
                             } else {
                                 const aiHeader = getAIHeader(realFilepath, data.task);
                                 await editor.edit(b => b.insert(new vscode.Position(streamStartLine, 0), aiHeader));
-                                status = this._tracker?.trackStreamedReview(editor, originalContentForDiff, data.task, streamStartLine, editor.document.lineCount) || "reviewing";
+                                status = this._tracker?.trackStreamedReview(editor, originalContentForDiff, data.task, streamStartLine, finalSafeLine) || "reviewing";
                             }
 
                             try { await resolveMissingImports(editor); } catch (e) { }
 
-                            // 🛡️ Trigger Human-in-the-Loop guardrail if a command was generated
                             if (generatedCommand) {
                                 await this.confirmAndRunCommand(generatedCommand, rootUri.fsPath, `Running command...`);
                             }
 
                             webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status, summary });
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                            console.log("[DEBUG-EXEC] 🏁 Task execution complete.");
 
-                        } catch (error) {
-                            console.error("Execution error:", error);
+                        } catch (error: any) {
+                            console.error("[DEBUG-EXEC] 💥 ERROR:", error);
+                            if (error.name === 'AbortError') {
+                                webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: `🛑 Cancelled by user` });
+                            } else {
+                                webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: `⚠️ Error: ${error.message}` });
+                            }
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
-                            webviewView.webview.postMessage({
-                                type: 'taskCompleted', task: data.task, status: 'error',
-                                summary: `⚠️ Error: ${error instanceof Error ? error.message : "Unknown error"}`
-                            });
+                        } finally {
+                            this._activeTaskController = undefined;
                         }
                     });
+                    break;
+                }
+
+                case "refreshCodeLens": {
+                    vscode.commands.executeCommand('nexuscode.refreshLens');
                     break;
                 }
 
@@ -384,7 +541,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Compiling Final Review..." });
                             this._view?.webview.postMessage({ type: 'reviewEdits', edits: allEdits, tasks: data.tasks });
-                            
+
                             vscode.window.showInformationMessage(`Draft complete. Generated code for ${allEdits.length} files.`);
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                         } catch (error) {
@@ -412,7 +569,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             const aiHeader = getAIHeader(edit.filepath, "Atomic Implementation");
                             const finalCode = aiHeader + edit.code;
 
-                            try { await vscode.workspace.fs.stat(fileUri); } 
+                            try { await vscode.workspace.fs.stat(fileUri); }
                             catch { await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0)); }
 
                             const document = await vscode.workspace.openTextDocument(fileUri);
@@ -434,7 +591,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     const activeEditor = vscode.window.activeTextEditor;
                     if (!workspaceFolders || !activeEditor) return;
-                    
+
                     const workspacePath = workspaceFolders[0].uri.fsPath;
 
                     vscode.window.withProgress({
@@ -449,14 +606,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             if (testPlan.installCommand) {
                                 const installResult = await this.confirmAndRunCommand(testPlan.installCommand, workspacePath, 'Installing dependencies...');
-                                if (!installResult) return; 
+                                if (!installResult) return;
                             }
 
                             let safePath = testPlan.filepath.replace(/^[\\\/]+/, '');
                             if (safePath.toLowerCase().includes(workspacePath.toLowerCase())) {
                                 safePath = safePath.substring(safePath.toLowerCase().indexOf(workspacePath.toLowerCase()) + workspacePath.length);
                             }
-                            
+
                             const testFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, safePath);
                             const edit = new vscode.WorkspaceEdit();
                             edit.createFile(testFileUri, { ignoreIfExists: true });
@@ -484,7 +641,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     const fixEdit = new vscode.WorkspaceEdit();
                                     const docToFix = await vscode.workspace.openTextDocument(fileToFixUri);
                                     fixEdit.replace(fileToFixUri, new vscode.Range(0, 0, docToFix.lineCount, 0), fixResult.code);
-                                    
+
                                     await vscode.workspace.applyEdit(fixEdit);
                                     await docToFix.save();
 
@@ -493,7 +650,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                                     if (retryResult?.success) vscode.window.showInformationMessage(`Auto-Heal successful! Fixed ${fixResult.filepath}`);
                                     else vscode.window.showErrorMessage("Auto-Heal attempted, but tests still failing.");
-                                    
+
                                 } catch (e) {
                                     vscode.window.showErrorMessage("Auto-heal failed to parse LLM output.");
                                 }
@@ -516,11 +673,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "requestModels": {
                     const models = await getAvailableModels();
                     const currentModel = vscode.workspace.getConfiguration('nexuscode').get<string>('model');
-                    
-                    webviewView.webview.postMessage({ 
-                        type: 'updateModelsList', 
+
+                    webviewView.webview.postMessage({
+                        type: 'updateModelsList',
                         models: models,
-                        currentModel: currentModel 
+                        currentModel: currentModel
                     });
                     break;
                 }
