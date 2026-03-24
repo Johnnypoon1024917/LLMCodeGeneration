@@ -4,6 +4,13 @@ import './App.css';
 import ReactMarkdown from 'react-markdown';
 
 const vscode = (window as any).acquireVsCodeApi();
+let chatTokenBuffer = "";
+let lastChatUpdate = Date.now();
+let reasoningTokenBuffer = "";
+let lastReasoningUpdate = Date.now();
+
+let chatTokenTimer: any = null;
+let reasoningTokenTimer: any = null;
 
 interface Message {
     role: 'user' | 'assistant';
@@ -39,6 +46,7 @@ export default function App() {
     const [codingStyle, setCodingStyle] = useState('precise');
     const [taskStatuses, setTaskStatuses] = useState<Record<string, string>>({});
     const [taskSummaries, setTaskSummaries] = useState<Record<string, string>>({});
+    const [taskFiles, setTaskFiles] = useState<Record<string, string>>({});
     const [taskReasoning, setTaskReasoning] = useState<Record<string, string>>({});
     const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [selectedModel, setSelectedModel] = useState<string>('');
@@ -46,6 +54,9 @@ export default function App() {
     const [metaMode, setMetaMode] = useState(false);
     const [attachedContexts, setAttachedContexts] = useState<AttachedContext[]>([]);
     const [isLoaded, setIsLoaded] = useState(false);
+    const [mentionQuery, setMentionQuery] = useState('');
+    const [mentionResults, setMentionResults] = useState<string[]>([]);
+    const [showMentionMenu, setShowMentionMenu] = useState(false);
 
     const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -55,11 +66,43 @@ export default function App() {
     useEffect(() => {
         const messageHandler = (event: MessageEvent) => {
             const data = event.data;
+
+            if (data.type === 'startRevision') {
+                const { task, feedback } = data;
+                // 1. Reset the UI states for a fresh run
+                setTaskStatuses(prev => ({ ...prev, [task]: 'reviewing' }));
+                setTaskSummaries(prev => ({ ...prev, [task]: 'Revising based on feedback...' }));
+                setTaskSteps(prev => ({ ...prev, [task]: [] }));
+                setTaskReasoning(prev => ({ ...prev, [task]: '' }));
+
+                // 2. Trigger the execution pipeline AND pass the feedback!
+                vscode.postMessage({ type: 'executeTask', task: task, codingStyle, feedback: feedback });
+            }
+
+            if (data.type === 'injectTerminalTask') {
+                const terminalTask = data.task;
+                
+                // 1. Add the prompt to our chat history so the user sees it
+                setMessages(prev => [...prev, 
+                    { role: 'user', content: terminalTask },
+                    { role: 'assistant', content: "I am analyzing your terminal crash right now. Hang tight..." }
+                ]);
+                
+                // 2. Add it to our task execution state
+                setTaskStatuses(prev => ({ ...prev, [terminalTask]: 'reviewing' }));
+                
+                // 3. Fire the backend execution pipeline!
+                vscode.postMessage({ type: 'executeTask', task: terminalTask, codingStyle: codingStyle });
+            }
+
             if (data.type === 'agentStep') {
                 setTaskSteps(prev => ({
                     ...prev,
                     [data.task]: [...(prev[data.task] || []), { type: data.stepType, description: data.description, details: data.details }]
                 }));
+            }
+            if (data.type === 'searchResults') {
+                setMentionResults(data.results);
             }
             if (data.type === 'addContext') {
                 setAttachedContexts(prev => {
@@ -98,6 +141,7 @@ export default function App() {
                 // 🔥 NEW: Load saved task statuses
                 if (data.taskStatuses) setTaskStatuses(data.taskStatuses);
                 if (data.taskSummaries) setTaskSummaries(data.taskSummaries);
+                if (data.taskFiles) setTaskFiles(data.taskFiles);
                 setIsLoaded(true);
             }
             if (data.type === 'updateModelsList') {
@@ -116,13 +160,21 @@ export default function App() {
             if (data.type === 'taskCompleted' || data.type === 'taskStatusUpdate') {
                 setTaskStatuses(prev => ({ ...prev, [data.task]: data.status }));
                 if (data.summary) setTaskSummaries(prev => ({ ...prev, [data.task]: data.summary }));
+                if (data.filepath) setTaskFiles(prev => ({ ...prev, [data.task]: data.filepath })); // 🔥 Save the filepath
                 if (data.status === 'error') setLoading(false);
             }
             if (data.type === 'streamReasoning') {
-                setTaskReasoning(prev => ({
-                    ...prev,
-                    [data.task]: (prev[data.task] || '') + data.token
-                }));
+                reasoningTokenBuffer += data.token;
+                if (!reasoningTokenTimer) {
+                    reasoningTokenTimer = setTimeout(() => {
+                        const flush = reasoningTokenBuffer;
+                        reasoningTokenBuffer = "";
+                        reasoningTokenTimer = null;
+                        setTaskReasoning(prev => ({
+                            ...prev, [data.task]: (prev[data.task] || '') + flush
+                        }));
+                    }, 50);
+                }
             }
 
             if (data.type === 'startChatStream') {
@@ -130,14 +182,22 @@ export default function App() {
                 setLoading(false);
             }
             if (data.type === 'chatToken') {
-                setMessages(prev => {
-                    const newMessages = [...prev];
-                    const lastIdx = newMessages.length - 1;
-                    if (newMessages[lastIdx] && newMessages[lastIdx].role === 'assistant') {
-                        newMessages[lastIdx].content += data.token;
-                    }
-                    return newMessages;
-                });
+                chatTokenBuffer += data.token;
+                if (!chatTokenTimer) {
+                    chatTokenTimer = setTimeout(() => {
+                        const flush = chatTokenBuffer;
+                        chatTokenBuffer = "";
+                        chatTokenTimer = null;
+                        setMessages(prev => {
+                            const newMessages = [...prev];
+                            const lastIdx = newMessages.length - 1;
+                            if (newMessages[lastIdx] && newMessages[lastIdx].role === 'assistant') {
+                                newMessages[lastIdx].content += flush;
+                            }
+                            return newMessages;
+                        });
+                    }, 50);
+                }
             }
 
             if (data.type === 'metaModeChanged') setMetaMode(data.value);
@@ -148,15 +208,16 @@ export default function App() {
     }, []);
 
     useEffect(() => {
-        if (hasKey && isLoaded) { 
-            vscode.postMessage({ 
-                type: 'syncHistory', 
+        if (hasKey && isLoaded) {
+            vscode.postMessage({
+                type: 'syncHistory',
                 messages: messages,
                 taskStatuses: taskStatuses,
-                taskSummaries: taskSummaries
+                taskSummaries: taskSummaries,
+                taskFiles: taskFiles // 🔥 Keep diff buttons alive after reload!
             });
         }
-    }, [messages, taskStatuses, taskSummaries, hasKey, isLoaded]);
+    }, [messages, taskStatuses, taskSummaries, taskFiles, hasKey, isLoaded]);
 
     if (!hasKey) {
         return (
@@ -178,7 +239,7 @@ export default function App() {
 
     const handleSubmit = (overrideText?: string) => {
         const text = overrideText || input;
-        if (!text.trim() || loading) return;
+        if ((!text.trim() && attachedContexts.length === 0) || loading) return;
 
         let finalQuery = text.trim() || "Please review the attached code.";
         let displayContent = finalQuery;
@@ -206,9 +267,25 @@ export default function App() {
     };
 
     const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-        setInput(e.target.value);
+        const val = e.target.value;
+        setInput(val);
         e.target.style.height = 'auto';
         e.target.style.height = `${Math.min(e.target.scrollHeight, 150)}px`;
+
+        // 🔥 ENTERPRISE FEATURE: Detect @-mentions
+        const cursorPosition = e.target.selectionStart;
+        const textBeforeCursor = val.substring(0, cursorPosition);
+        const words = textBeforeCursor.split(/\s/);
+        const lastWord = words[words.length - 1];
+
+        if (lastWord.startsWith('@')) {
+            setShowMentionMenu(true);
+            const query = lastWord.substring(1);
+            setMentionQuery(query);
+            vscode.postMessage({ type: 'searchFiles', query });
+        } else {
+            setShowMentionMenu(false);
+        }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -278,14 +355,53 @@ export default function App() {
                                                     <div className="task-status">
                                                         {status === 'reviewing' && <span className="status-pending">⏳ Reviewing</span>}
                                                         {status === 'approved' && <span className="status-approved">✅ Approved</span>}
-                                                        {status === 'rejected' && <span className="status-error">❌ Rejected</span>}
-                                                        {status === 'error' && <span className="status-error">⚠️ Error</span>}
+                                                        {status === 'rejected' && (
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                <span className="status-error">❌ Rejected</span>
+                                                                <button className="micro-btn" style={{ border: '1px solid var(--nexus-border)', padding: '2px 6px' }}
+                                                                    title="Provide feedback and regenerate"
+                                                                    onClick={() => vscode.postMessage({ type: 'requestRevision', task: task, codingStyle })}>
+                                                                    💬 Revise
+                                                                </button>
+                                                            </div>
+                                                        )}
+                                                        {status === 'error' && (
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                <span className="status-error">⚠️ Error</span>
+                                                                <button className="micro-btn" style={{ border: '1px solid var(--nexus-error)', color: 'var(--nexus-error)', padding: '2px 6px' }}
+                                                                    title="Retry this task"
+                                                                    onClick={() => {
+                                                                        // 1. Reset the UI states
+                                                                        setTaskStatuses(prev => ({ ...prev, [task]: 'reviewing' }));
+                                                                        setTaskSummaries(prev => ({ ...prev, [task]: 'Retrying task...' }));
+
+                                                                        // 2. Wipe the old failed logs so the UI is clean for the fresh run
+                                                                        setTaskSteps(prev => ({ ...prev, [task]: [] }));
+                                                                        setTaskReasoning(prev => ({ ...prev, [task]: '' }));
+
+                                                                        // 3. Trigger the backend pipeline again!
+                                                                        vscode.postMessage({ type: 'executeTask', task: task, codingStyle });
+                                                                    }}>
+                                                                    🔄 Retry
+                                                                </button>
+                                                            </div>
+                                                        )}
+
+                                                        {/* 🔥 On-Demand Diff Button */}
+                                                        {(status === 'reviewing' || status === 'approved') && taskFiles[task] && (
+                                                            <button className="micro-btn" style={{ marginLeft: '8px', padding: '2px 6px', border: '1px solid var(--nexus-border)' }}
+                                                                onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[task] })}>
+                                                                🔍 View Diff
+                                                            </button>
+                                                        )}
+
                                                         {!status && (
                                                             <button style={{ background: 'transparent', border: 'none', color: 'var(--nexus-subtext)', cursor: 'pointer' }}
                                                                 onClick={() => { setTaskStatuses(prev => ({ ...prev, [task]: 'reviewing' })); vscode.postMessage({ type: 'executeTask', task: task, codingStyle }); }}>
                                                                 {Icons.Play}
                                                             </button>
                                                         )}
+
                                                     </div>
                                                 </div>
 
@@ -300,6 +416,8 @@ export default function App() {
                                                                         {step.type === 'read' && '👁️'}
                                                                         {step.type === 'analyze' && '</>'}
                                                                         {step.type === 'error' && '⚠️'}
+                                                                        {step.type === 'heal' && '🏥'}
+                                                                        {step.type === 'success' && '✅'}
                                                                     </span>
                                                                     <span className="step-desc">{step.description}</span>
                                                                 </div>
@@ -397,6 +515,26 @@ export default function App() {
                         </div>
                     )}
 
+                    {showMentionMenu && mentionResults.length > 0 && (
+                        <div className="mention-menu">
+                            <div className="mention-header">Attach File Context</div>
+                            {mentionResults.map(res => (
+                                <div key={res} className="mention-item" onClick={() => {
+                                    vscode.postMessage({ type: 'readFileContext', file: res });
+                                    setShowMentionMenu(false);
+
+                                    // Strip the "@query" from the text box
+                                    const words = input.split(' ');
+                                    words.pop();
+                                    setInput(words.join(' ') + (words.length > 0 ? ' ' : ''));
+                                    document.getElementById('chat-input')?.focus();
+                                }}>
+                                    📄 {res}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
                     <textarea
                         id="chat-input" value={input} onChange={handleInput} onKeyDown={handleKeyDown}
                         placeholder={metaMode ? "Modify source code..." : "Ask a question or request a build..."}
@@ -406,7 +544,7 @@ export default function App() {
                     {loading ? (
                         <button className="send-btn stop-btn" onClick={() => { setLoading(false); vscode.postMessage({ type: 'cancelTask' }); }} title="Stop Generation">■</button>
                     ) : (
-                        <button className="send-btn" onClick={() => handleSubmit()} disabled={!input.trim()}>{Icons.UpArrow}</button>
+                        <button className="send-btn" onClick={() => handleSubmit()} disabled={!input.trim() && attachedContexts.length === 0}>{Icons.UpArrow}</button>
                     )}
                 </div>
 
@@ -422,6 +560,7 @@ export default function App() {
                             setMessages([]);
                             setTaskStatuses({});
                             setTaskSummaries({});
+                            setTaskFiles({}); // 🔥 Wipe paths
                             setTaskReasoning({});
                             vscode.postMessage({ type: 'clearHistory' });
                         }} title="Clear Chat History">🗑️ Clear</button>

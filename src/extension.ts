@@ -3,17 +3,36 @@ import { SidebarProvider } from './SidebarProvider';
 import { ProvenanceTracker } from './provenanceTracker';
 import { AILensProvider } from './AILensProvider';
 import { TerminalManager } from './terminalManager';
+import { invalidateProjectContext } from './projectContext';
+import { originalContentProvider } from './diffProvider';
+import { initTreeSitter, buildWorkspaceASTGraph } from './context/codeGraph';
+import { activateTerminalInterceptor } from './terminalInterceptor';
 
 export let globalContext: vscode.ExtensionContext;
 
 export function activate(context: vscode.ExtensionContext) {
     globalContext = context;
 
+    initTreeSitter(context.extensionUri).then(() => {
+        buildWorkspaceASTGraph();
+    });
+
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*');
+    context.subscriptions.push(
+        watcher.onDidCreate(() => invalidateProjectContext()),
+        watcher.onDidDelete(() => invalidateProjectContext()),
+        // Note: We don't track onDidChange because changing a file's contents doesn't change the Directory Tree structure.
+        watcher
+    );
+
     // 1. Initialize core services
     const terminalManager = new TerminalManager();
     const lensProvider = new AILensProvider();
     const provenanceTracker = new ProvenanceTracker(lensProvider);
     const sidebarProvider = new SidebarProvider(context.extensionUri);
+    
+    // 🔥 Boot the Terminal Auto-Debugger
+    activateTerminalInterceptor(sidebarProvider, context);
 
     // 2. Wire them together
     sidebarProvider.setProvenanceTracker(provenanceTracker);
@@ -23,7 +42,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 🔥 ENTERPRISE UPGRADE: Group all registrations into a single, clean push block
     context.subscriptions.push(
-        
+        vscode.workspace.registerTextDocumentContentProvider('nexus-original', originalContentProvider),
         // --- PROVIDERS ---
         vscode.languages.registerCodeLensProvider(selector, lensProvider),
         vscode.window.registerWebviewViewProvider("qwen-sidebar", sidebarProvider, {
@@ -51,6 +70,30 @@ export function activate(context: vscode.ExtensionContext) {
         }),
         vscode.commands.registerCommand('nexuscode.rejectEdit', async (taskId, uri) => {
             await provenanceTracker.handleReject(taskId, uri);
+        }),
+        vscode.commands.registerCommand('nexuscode.inlineEdit', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) return;
+
+            const selection = editor.document.getText(editor.selection);
+            const filename = vscode.workspace.asRelativePath(editor.document.uri);
+            
+            const userInput = await vscode.window.showInputBox({
+                prompt: "🤖 NexusCode: What do you want to generate or modify?",
+                placeHolder: "e.g., Extract this logic into a separate React component..."
+            });
+
+            if (!userInput) return;
+
+            const contextStr = selection ? `\n\`\`\`${editor.document.languageId} title="${filename}"\n${selection}\n\`\`\`\n` : "";
+
+            sidebarProvider.sendMessageToWebview({ 
+                type: 'addUserMessageAndSubmit', 
+                text: userInput,
+                context: contextStr
+            });
+            
+            vscode.commands.executeCommand('qwen-sidebar.focus');
         }),
         vscode.commands.registerCommand('nexuscode.refreshLens', () => {
             lensProvider.refresh();

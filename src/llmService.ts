@@ -278,12 +278,15 @@ export async function askQwenForTargetFile(taskDescription: string, projectConte
 }
 
 // 🔥 ENTERPRISE UPGRADE: Structured Agent Telemetry
-export async function runAgenticExploration(
-    taskDescription: string, 
-    workspaceRoot: string, 
-    onStep: (stepType: string, description: string, details?: string) => void
-): Promise<string> {
-    const { endpoint, model, apiKey } = await getLLMConfig();
+export async function runAgenticExploration(taskDescription: string, workspaceRoot: string, statusCallback: (stepType: string, desc: string, details?: string) => void): Promise<string> {
+    const { endpoint, model, apiKey, enableTools } = await getLLMConfig();
+    
+    // 🔥 FIX 1: If tools are disabled (local LLMs), bypass instantly! No more 2-minute hangs!
+    if (!enableTools) {
+        statusCallback('analyze', 'Skipped Agentic Search', 'Tools disabled in settings. Relying on RAG.');
+        return "";
+    }
+
     let messages: any[] = [
         { 
             role: "system", 
@@ -295,48 +298,49 @@ Once you have enough context, reply with the exact word: "READY_TO_CODE" and not
     ];
 
     let gatheredContext = "";
-    
-    // Notify UI that analysis is starting
-    onStep('analyze', 'Analyzed task', taskDescription);
+    statusCallback('analyze', 'Analyzed task', taskDescription);
 
-    for (let step = 0; step < 5; step++) {
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-            body: JSON.stringify({ model: model, messages: messages, tools: agentToolDefinitions, tool_choice: "auto", temperature: 0.1 })
-        });
+    for (let step = 0; step < 3; step++) { // Reduced to 3 steps to save time
+        try {
+            // 🔥 FIX 2: Added a strict 15-second AbortController so it NEVER hangs forever
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-        const data = await response.json() as any;
-        if (data.error) {
-            onStep('error', 'Agent API Error', 'Tools might not be supported.');
-            break;
-        }
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+                body: JSON.stringify({ model: model, messages: messages, tools: agentToolDefinitions, tool_choice: "auto", temperature: 0.1 }),
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
 
-        const aiMessage = data.choices[0].message;
-        messages.push(aiMessage);
+            const data = await response.json() as any;
+            if (data.error) throw new Error(data.error.message);
 
-        if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) {
-            for (const toolCall of aiMessage.tool_calls) {
-                const funcName = toolCall.function.name;
-                const funcArgs = JSON.parse(toolCall.function.arguments);
-                
-                // 🔥 Route specific tools to beautiful UI Step Types
-                if (funcName === 'search_codebase') {
-                    onStep('search', 'Searched workspace', `Keyword: ${funcArgs.keyword}`);
-                } else if (funcName === 'read_file') {
-                    onStep('read', 'Read file(s)', funcArgs.filepath);
-                } else if (funcName === 'list_directory') {
-                    onStep('analyze', 'Analyzed directory', funcArgs.dirpath);
+            const aiMessage = data.choices[0].message;
+            messages.push(aiMessage);
+
+            if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) {
+                for (const toolCall of aiMessage.tool_calls) {
+                    const funcName = toolCall.function.name;
+                    const funcArgs = JSON.parse(toolCall.function.arguments);
+                    
+                    if (funcName === 'search_codebase') statusCallback('search', 'Searched workspace', `Keyword: ${funcArgs.keyword}`);
+                    else if (funcName === 'read_file') statusCallback('read', 'Read file(s)', funcArgs.filepath);
+                    else if (funcName === 'list_directory') statusCallback('analyze', 'Analyzed directory', funcArgs.dirpath);
+                    
+                    const toolResult = await executeAgentTool(toolCall, workspaceRoot);
+                    gatheredContext += `\n--- Tool Result: ${funcName}(${JSON.stringify(funcArgs)}) ---\n${toolResult}\n`;
+                    messages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
                 }
-                
-                const toolResult = await executeAgentTool(toolCall, workspaceRoot);
-                gatheredContext += `\n--- Tool Result: ${funcName}(${JSON.stringify(funcArgs)}) ---\n${toolResult}\n`;
-                messages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
+            } else {
+                if (aiMessage.content && aiMessage.content.includes("READY_TO_CODE")) break;
+                else break;
             }
-        } else {
-            if (aiMessage.content && aiMessage.content.includes("READY_TO_CODE")) {
-                break;
-            } else break;
+        } catch (e) {
+            console.warn("[DEBUG] Agentic loop failed/timed out, bypassing safely.", e);
+            statusCallback('error', 'Agent API Error', 'Failed to use tools. Falling back to standard context.');
+            break; // Break cleanly instead of crashing the whole pipeline
         }
     }
     return gatheredContext;
@@ -404,41 +408,49 @@ export async function streamQwenForCode(
     callbacks: { 
         onReasoning?: (token: string) => Promise<void>, 
         onSetup: (action: string, filepath: string, target?: string) => Promise<void>, 
-        onToken: (token: string) => Promise<void> 
+        onToken: (token: string) => Promise<void>,
+        onFileComplete?: () => Promise<void> // 🔥 NEW: Support Multi-file splits
     },
-    abortSignal?: AbortSignal // 🔥 NEW: Enterprise Cancellation Support
+    abortSignal?: AbortSignal
 ): Promise<void> {
     const { endpoint, model, apiKey } = await getLLMConfig(); 
 
-    const systemPrompt = `You are an expert coding agent.
-    CRITICAL RULE: SINGLE-FILE MODE. Output ONE <filepath>, ONE <action>, and ONE <code> block. 
-    <action> rules: append, replace, or inject (requires <target> tag).
+    // 🔥 ENTERPRISE UPGRADE: Multi-file Prompt
+    const systemPrompt = `You are an elite autonomous Enterprise coding agent.
+    CRITICAL RULE: MULTI-FILE MODE. You may create or modify multiple files in a single response.
+    
+    <action> rules: 
+    - 'replace': Overwrites the entire file (default).
+    - 'append': Adds code to the end of the file.
+    - 'inject': Inserts code into a specific Class or Function (requires <target> tag).
     
     🔥 XML FORMAT STRICT ORDER 🔥
-    <reasoning>
-    Explain your step-by-step thinking, edge cases, and cross-file consistency BEFORE writing code.
-    </reasoning>
+    For EVERY file you need to modify, you MUST output this EXACT sequence:
+    
+    <reasoning>Explain your step-by-step thinking for this file.</reasoning>
     <filepath>path/to/file.ext</filepath>
-    <action>append | replace | inject</action>
-    <target>ClassName (Only if inject)</target>
-    <code>... code here ...</code>`;
+    <action>replace | append | inject</action>
+    <target>ClassNameOrFunctionName</target> \`\`\`
+    ... code here ...
+    \`\`\`
+    <command>npm install package-name</command> You can repeat this entire sequence as many times as needed to complete the multi-file feature.`;
 
-    const userPrompt = currentFileContent.trim() ? `Task: ${taskDescription}\n\nEXISTING FILE:\n\`\`\`\n${currentFileContent}\n\`\`\`` : `Task: ${taskDescription}\n\n(File is empty, action must be 'replace')`;
+    const userPrompt = currentFileContent.trim() ? `Task: ${taskDescription}\n\nEXISTING FILE:\n\`\`\`\n${currentFileContent}\n\`\`\`` : `Task: ${taskDescription}`;
 
     const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1, stream: true }),
-        signal: abortSignal // Wire up the abort signal
+        signal: abortSignal
     });
 
     if (!response.body) throw new Error("No readable stream available.");
-
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
     
-    let state: "SEARCHING_REASONING" | "STREAMING_REASONING" | "SEARCHING_SETUP" | "STREAMING_CODE" = "SEARCHING_REASONING";
-    let buffer = ""; 
+    // 🔥 ENTERPRISE UPGRADE: Robust sliding-window AST parser
+    let buffer = "";
+    let isStreamingCode = false;
 
     while (true) {
         const { done, value } = await reader.read();
@@ -454,87 +466,63 @@ export async function streamQwenForCode(
                     const token = data.choices[0]?.delta?.content || "";
                     buffer += token;
 
-                    // STAGE 1: Wait for <reasoning>
-                    if (state === "SEARCHING_REASONING") {
-                        const rStart = buffer.indexOf('<reasoning>');
-                        if (rStart !== -1) {
-                            state = "STREAMING_REASONING";
-                            buffer = buffer.substring(rStart + 11);
-                        } else if (buffer.includes('<filepath>') || buffer.includes('```') || buffer.includes('<code>')) {
-                            state = "SEARCHING_SETUP"; 
-                        }
-                    }
+                    if (!isStreamingCode) {
+                        // Forward reasoning if present
+                        const rMatch = buffer.match(/<reasoning>(.*?)<\/reasoning>/s);
+                        if (rMatch && callbacks.onReasoning) await callbacks.onReasoning(token);
 
-                    // STAGE 2: Stream Reasoning
-                    if (state === "STREAMING_REASONING") {
-                        const rEnd = buffer.indexOf('</reasoning>');
-                        if (rEnd !== -1) {
-                            const chunk = buffer.substring(0, rEnd);
-                            if (chunk && callbacks.onReasoning) await callbacks.onReasoning(chunk);
-                            state = "SEARCHING_SETUP";
-                            buffer = buffer.substring(rEnd + 12);
-                        } else {
-                            if (buffer.length > 15) { 
-                                const chunk = buffer.substring(0, buffer.length - 15);
-                                if (callbacks.onReasoning) await callbacks.onReasoning(chunk);
-                                buffer = buffer.substring(buffer.length - 15);
-                            }
-                        }
-                    }
+                        // Look for robust triggers indicating code is about to start
+                        const fpMatch = buffer.match(/<filepath>(.*?)<\/filepath>/s);
+                        const acMatch = buffer.match(/<action>(.*?)<\/action>/s);
+                        const targetMatch = buffer.match(/<target>(.*?)<\/target>/s);
+                        
+                        // Tolerate ANY code block trigger (```, ```javascript, <code>)
+                        const codeStartIdx = Math.max(buffer.lastIndexOf('```'), buffer.lastIndexOf('<code>'));
 
-                    // STAGE 3: 🔥 BULLETPROOF METADATA EXTRACTION
-                    if (state === "SEARCHING_SETUP") {
-                        const codeTag = buffer.indexOf('<code>');
-                        const mdTag = buffer.indexOf('```');
-
-                        let codeStart = -1;
-
-                        if (codeTag !== -1) {
-                            codeStart = codeTag + 6;
-                        } else if (mdTag !== -1) {
-                            const nl = buffer.indexOf('\n', mdTag);
-                            if (nl !== -1) {
-                                codeStart = nl + 1; // Safe! We waited for the newline.
-                            }
-                        }
-
-                        if (codeStart !== -1) {
-                            let filepath = buffer.match(/<filepath>(.*?)<\/filepath>/s)?.[1]?.trim() || "unknown";
-                            let action = buffer.match(/<action>(.*?)<\/action>/s)?.[1]?.trim().toLowerCase() || 'replace';
-                            let target = buffer.match(/<target>(.*?)<\/target>/s)?.[1]?.trim();
+                        if (fpMatch && acMatch && codeStartIdx !== -1) {
+                            const filepath = fpMatch[1].trim();
+                            const action = acMatch[1].trim().toLowerCase();
+                            const target = targetMatch ? targetMatch[1].trim() : undefined;
 
                             await callbacks.onSetup(action, filepath, target);
-                            state = "STREAMING_CODE";
-                            buffer = buffer.substring(codeStart);
+                            
+                            // Slice off everything before the code block
+                            const newLineAfterCodeStart = buffer.indexOf('\n', codeStartIdx);
+                            buffer = newLineAfterCodeStart !== -1 ? buffer.substring(newLineAfterCodeStart + 1) : "";
+                            isStreamingCode = true;
                         }
-                    }
-
-                    // STAGE 4: Stream Code
-                    if (state === "STREAMING_CODE") {
-                        const endCode = buffer.indexOf('</code');
-                        const endMd = buffer.indexOf('```');
-                        const endIndex = endCode !== -1 ? endCode : endMd;
-
-                        if (endIndex !== -1) {
-                            const chunk = buffer.substring(0, endIndex);
-                            if (chunk) await callbacks.onToken(chunk);
-                            state = "SEARCHING_REASONING"; // Done!
-                            break; 
+                    } else {
+                        // Streaming actual code
+                        const codeEndIdx = Math.max(buffer.lastIndexOf('```'), buffer.lastIndexOf('</code'));
+                        if (codeEndIdx !== -1) {
+                            // Code block finished
+                            const finalCodeChunk = buffer.substring(0, codeEndIdx);
+                            if (finalCodeChunk) await callbacks.onToken(finalCodeChunk);
+                            if (callbacks.onFileComplete) await callbacks.onFileComplete();
+                            
+                            // Reset state to catch the NEXT file in the stream!
+                            isStreamingCode = false;
+                            buffer = buffer.substring(codeEndIdx + 3); 
                         } else {
-                            if (buffer.length > 7) {
-                                const chunk = buffer.substring(0, buffer.length - 7);
-                                await callbacks.onToken(chunk);
-                                buffer = buffer.substring(buffer.length - 7);
+                            // Safe emission window (prevent splitting closing tags)
+                            if (buffer.length > 10) {
+                                const emitChunk = buffer.substring(0, buffer.length - 10);
+                                await callbacks.onToken(emitChunk);
+                                buffer = buffer.substring(buffer.length - 10);
                             }
                         }
                     }
-                } catch (e) { } // Ignore incomplete JSON chunks
+                } catch (e) { } // Ignore JSON cuts
             }
         }
-        if (state === "STREAMING_CODE" && (buffer.includes('</code') || buffer.includes('```'))) break; 
     }
     
-    if (state === "STREAMING_CODE" && buffer.length > 0) await callbacks.onToken(buffer);
+    // Flush remaining code buffer
+    if (isStreamingCode && buffer.length > 0) {
+        const cleanEnd = buffer.replace(/```$/, '').replace(/<\/code>$/, '');
+        await callbacks.onToken(cleanEnd);
+        if (callbacks.onFileComplete) await callbacks.onFileComplete();
+    }
 }
 
 /**

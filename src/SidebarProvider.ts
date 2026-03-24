@@ -2,6 +2,8 @@
 import * as vscode from "vscode";
 import * as path from 'path';
 import { globalContext } from './extension';
+import { originalContentProvider } from './diffProvider';
+import { getSmartASTContext } from './context/codeGraph';
 
 // AI Services & Tools
 import {
@@ -23,6 +25,7 @@ import { getProjectContext } from "./projectContext";
 import { getLspContext } from './context/lspContext';
 import { getProjectStyleGuides } from './context/styleContext';
 import { indexWorkspace, retrieveContext } from './context/ragIndexer';
+import { retrieveHybridContext } from './context/hybridSearch';
 
 // Utilities
 import { resolveMissingImports } from './utilities/importResolver';
@@ -35,6 +38,53 @@ import { ProvenanceTracker } from "./provenanceTracker";
 import { createWorkspaceStructure } from "./workspaceManager";
 import { TerminalManager } from './terminalManager';
 import { MetaContextManager } from "./metaContextManager";
+
+function injectCodeIntoContent(originalContent: string, target: string, newCode: string, action: string): string {
+    if (action === 'replace') return newCode;
+    if (action === 'append') return originalContent + "\n\n" + newCode;
+
+    // For 'inject', we must find the target and surgically replace it
+    if (!target) return originalContent + "\n\n" + newCode; // Fallback
+
+    const lines = originalContent.split('\n');
+    let startIdx = -1;
+
+    // 1. Find the target line
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(target)) {
+            startIdx = i;
+            break;
+        }
+    }
+
+    if (startIdx === -1) {
+        console.warn(`[DEBUG-INJECT] Target "${target}" not found. Falling back to append.`);
+        return originalContent + "\n\n" + newCode;
+    }
+
+    // 2. Count braces to find the exact end of the function/class
+    let endIdx = startIdx;
+    let braces = 0;
+    let foundBrace = false;
+
+    for (let i = startIdx; i < lines.length; i++) {
+        const line = lines[i];
+        for (let char of line) {
+            if (char === '{') { braces++; foundBrace = true; }
+            if (char === '}') { braces--; }
+        }
+        if (foundBrace && braces === 0) {
+            endIdx = i;
+            break;
+        }
+    }
+
+    // 3. Splice the new code flawlessly into the original file
+    const before = lines.slice(0, startIdx).join('\n');
+    const after = lines.slice(endIdx + 1).join('\n');
+
+    return before + "\n" + newCode + "\n" + after;
+}
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public _view?: vscode.WebviewView;
@@ -59,6 +109,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             vscode.window.showInformationMessage("Please open the NexusCode sidebar first.");
         }
     }
+    
+    public injectTerminalTask(prompt: string) {
+        if (this._view) {
+            this._view.webview.postMessage({ 
+                type: 'injectTerminalTask', 
+                task: prompt 
+            });
+        }
+    }
+
 
     public toggleMetaMode() {
         this._isMetaMode = !this._isMetaMode;
@@ -133,19 +193,35 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const taskStatuses = globalContext.globalState.get<any>('nexus_task_statuses') || {};
         const taskSummaries = globalContext.globalState.get<any>('nexus_task_summaries') || {};
         const hasApiKey = !!(await globalContext.secrets.get('nexuscode_apikey'));
-        
+
         // Send initial state to React
-        webviewView.webview.postMessage({ 
-            type: 'initState', 
-            messages: chatHistory, 
+        webviewView.webview.postMessage({
+            type: 'initState',
+            messages: chatHistory,
             taskStatuses: taskStatuses,
             taskSummaries: taskSummaries,
-            hasKey: hasApiKey 
+            hasKey: hasApiKey
         });
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
-                
+                case "requestRevision": {
+                    const feedback = await vscode.window.showInputBox({
+                        prompt: `Why was the code for "${data.task}" rejected?`,
+                        placeHolder: "e.g., 'Use axios instead of fetch', or 'Fix the null pointer error'"
+                    });
+
+                    if (feedback === undefined) return; // User pressed Esc to cancel
+
+                    // Tell React to reset the UI and restart the task with the new feedback
+                    this._view?.webview.postMessage({
+                        type: 'startRevision',
+                        task: data.task,
+                        feedback: feedback || "The previous attempt was rejected. Try a different approach and ensure the code is completely bug-free."
+                    });
+                    break;
+                }
+
                 case "syncHistory":
                     await globalContext.globalState.update('nexus_chat_history', data.messages);
                     await globalContext.globalState.update('nexus_task_statuses', data.taskStatuses);
@@ -169,28 +245,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._activeTaskController = new AbortController();
                     try {
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing intent..." });
-                        
+
                         console.log("[DEBUG] 🧠 Determining intent...");
                         const intent = await determineIntent(data.text);
                         console.log(`[DEBUG] 🎯 Intent determined as: [${intent.toUpperCase()}]`);
 
                         // Combine text and context for the LLM
-                        const fullPrompt = data.context 
-                            ? `--- ATTACHED CONTEXT ---\n${data.context}\n\n--- USER QUERY ---\n${data.text}` 
+                        const fullPrompt = data.context
+                            ? `--- ATTACHED CONTEXT ---\n${data.context}\n\n--- USER QUERY ---\n${data.text}`
                             : data.text;
 
                         if (intent === 'build') {
                             console.log("[DEBUG] 🛠️ Entering BUILD pipeline");
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Architecting plan..." });
-                            
+
                             // 🔥 Initialize chat bubble for the pre-explanation
                             this._view?.webview.postMessage({ type: 'startChatStream' });
 
                             await indexWorkspace((msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg }));
-                            const fileTree = await getProjectContext(await this.getTargetContext());
-                            const ragContext = await retrieveContext(data.text); 
-                            
-                            const result = await askQwenForStructure(fullPrompt, `${fileTree}\n\n${ragContext}`);
+
+
+                            const [lspContext, styleGuide, astContext, hybridContext] = await Promise.all([
+                                getLspContext(data.task),
+                                getProjectStyleGuides(),
+                                getSmartASTContext(data.task),       // 🌳 Pillar 1
+                                retrieveHybridContext(data.task, 5)  // 🔍 Pillar 2
+                            ]);
+
+                            const finalContext = `${lspContext}\n\n${astContext}\n\n${hybridContext}\n\n${styleGuide}`;
+
+                            const result = await askQwenForStructure(fullPrompt, finalContext);
 
                             // Stream the explanation to the UI
                             this._view?.webview.postMessage({ type: 'chatToken', token: result.explanation + "\n\n" });
@@ -210,7 +294,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             });
 
                             if (result.plan.folderStructure.length > 0) await createWorkspaceStructure(result.plan.folderStructure);
-                            
+
                             this._view?.webview.postMessage({ type: "structureResponse", value: result.plan });
                             console.log("[DEBUG] ✅ Build plan successfully sent to UI.");
 
@@ -218,10 +302,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // --- CHAT & EXPLAIN PIPELINE ---
                             console.log("[DEBUG] 💬 Entering CHAT/EXPLAIN pipeline");
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Gathering context..." });
-                            
+
                             const workspacePath = await this.getTargetContext();
-                            const ragContext = await retrieveContext(data.text);
-                            
+                            const ragContext = await await retrieveHybridContext(data.text, 5);
+
                             let openFilesContext = "";
                             vscode.workspace.textDocuments.forEach(doc => {
                                 if (doc.uri.scheme === 'file' && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
@@ -267,18 +351,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-                
+
 
                 case "cancelTask": {
                     if (this._activeTaskController) {
                         this._activeTaskController.abort();
                         this._activeTaskController = undefined;
-                        
+
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: "⚠️ Task cancelled by user." });
-                        
+
                         // 🔥 AUTO-CLEAR STATUS AFTER 3 SECONDS
                         setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 3000);
-                        
+
                         vscode.window.showWarningMessage("NexusCode: Generation Stopped.");
                     }
                     break;
@@ -299,211 +383,277 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     vscode.window.withProgress({
                         location: vscode.ProgressLocation.Notification,
                         title: this._isMetaMode ? "⚠️ NexusCode Self-Evolving..." : "NexusCode is working...",
-                        cancellable: true 
+                        cancellable: true
                     }, async (progress, token) => {
-                        token.onCancellationRequested(() => {
-                            console.log("[DEBUG-EXEC] 🛑 User cancelled task.");
-                            this._activeTaskController?.abort();
-                        });
+                        token.onCancellationRequested(() => this._activeTaskController?.abort());
 
-                        try {
-                            const [lspContext, styleGuide, ragContext] = await Promise.all([
-                                getLspContext(data.task),
-                                getProjectStyleGuides(),
-                                retrieveContext(data.task)
-                            ]);
+                        const MAX_RETRIES = 2;
+                        let attempt = 1;
+                        let success = false;
 
-                            const smartContext = await runAgenticExploration(
-                                data.task, rootUri.fsPath,
-                                (stepType, description, details) => {
-                                    webviewView.webview.postMessage({ 
-                                        type: 'agentStep', 
-                                        task: data.task, 
-                                        stepType, 
-                                        description, 
-                                        details 
+                        const taskStartTime = Date.now();
+                        let streamStartTime = 0;
+                        let streamEndTime = 0;
+
+                        while (attempt <= MAX_RETRIES && !success) {
+                            try {
+                                if (attempt > 1) {
+                                    webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'heal', description: `Retrying (Attempt ${attempt}/${MAX_RETRIES})...` });
+                                }
+
+                                // 🔥 Kiro-Level 3-Pillar Context Engine
+                                const [lspContext, styleGuide, astContext, hybridContext] = await Promise.all([
+                                    getLspContext(data.task),
+                                    getProjectStyleGuides(),
+                                    getSmartASTContext(data.task),       // 🌳 Pillar 1
+                                    retrieveHybridContext(data.task, 5)  // 🔍 Pillar 2
+                                ]);
+
+                                const smartContext = await runAgenticExploration(data.task, rootUri.fsPath, (stepType, description, details) => {
+                                    webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType, description, details });
+                                });
+
+                                let targetFilepath = "";
+                                const explicitPathMatch = data.task.match(/[a-zA-Z0-9_\-\/\\]+\.[a-zA-Z0-9]+/);
+
+                                if (isReadOnly && explicitPathMatch) targetFilepath = explicitPathMatch[0];
+                                else {
+                                    const targetInfo = await askQwenForTargetFile(data.task, projectStructure, this._lastActiveFile);
+                                    targetFilepath = targetInfo.filepath;
+                                }
+
+                                const { finalPaths } = await resolveCanonicalPaths([targetFilepath], contextRoot);
+                                const realFilepath = finalPaths[0] || targetFilepath;
+                                this._lastActiveFile = realFilepath;
+
+                                const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
+
+                                if (isReadOnly) {
+                                    const document = await vscode.workspace.openTextDocument(fileUri);
+                                    await vscode.window.showTextDocument(document, { preview: false });
+                                    const duration = ((Date.now() - taskStartTime) / 1000).toFixed(1);
+                                    webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'approved', summary: `📂 Opened ${realFilepath} (took ${duration}s)` });
+                                    return;
+                                }
+
+                                let currentFileContent = "";
+                                let fileExists = false;
+                                try {
+                                    const fileData = await vscode.workspace.fs.readFile(fileUri);
+                                    currentFileContent = new TextDecoder().decode(fileData);
+                                    fileExists = true;
+                                } catch { }
+                                const feedbackInjection = data.feedback ? 
+                                    `\n\n⚠️ CRITICAL USER FEEDBACK FROM PREVIOUS REJECTION:\n"${data.feedback}"\nDo NOT repeat your previous mistakes. Incorporate this feedback perfectly.` : "";
+
+                                // Combine all context pillars!
+                                const promptContext = `--- AUTONOMOUSLY GATHERED CONTEXT ---\n${smartContext}\n${astContext}\n${hybridContext}\nTarget File: ${realFilepath}\nContent:\n\`\`\`\n${currentFileContent.substring(0, 15000)}\n\`\`\`\nFile Exists: ${fileExists}\n${lspContext}\n${styleGuide}`;
+
+                                this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Speculative Execution (Shadow Compiling)...` });
+                                webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: 'Speculative Execution', details: `Drafting ${realFilepath} in background...` });
+
+                                let generatedCommand = "";
+                                let shadowCodeBuffer = "";
+                                let streamAction = 'replace';
+                                let streamTarget = '';
+
+                                streamStartTime = Date.now(); // ⏱️ START GENERATION TIMER
+
+                                // =====================================================================
+                                // 👻 PHASE 1: SHADOW GENERATION
+                                // =====================================================================
+                                await streamQwenForCode(
+                                    data.task, [], promptContext, data.codingStyle, [],
+                                    {
+                                        onReasoning: async (token: string) => {
+                                            this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: token });
+                                        },
+                                        onSetup: async (action: string, filepath: string, target?: string) => {
+                                            streamAction = !fileExists ? 'replace' : action;
+                                            streamTarget = target || '';
+                                        },
+                                        onToken: async (token: string) => {
+                                            if (token.includes('<command>')) {
+                                                const match = token.match(/<command>(.*?)<\/command>/s);
+                                                if (match) generatedCommand = match[1];
+                                            }
+                                            const cleanToken = token.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').replace(/<\/code>/g, '').replace(/<\/code/g, '');
+                                            shadowCodeBuffer += cleanToken;
+
+                                            // Stream the code into the Reasoning panel so the user can watch it write invisibly
+                                            this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: cleanToken });
+                                        }
+                                    },
+                                    this._activeTaskController?.signal
+                                );
+
+                                // 🔥 Merge the AI's output into the original file using Brace-Matching!
+                                const composedDraftCode = injectCodeIntoContent(currentFileContent, streamTarget, shadowCodeBuffer, streamAction);
+
+                                // =====================================================================
+                                // 🛠️ PHASE 2: SHADOW COMPILATION & INVISIBLE HEALING
+                                // =====================================================================
+                                const shadowFilename = `.${path.basename(realFilepath)}.nexus_shadow`;
+                                const shadowUri = vscode.Uri.joinPath(rootUri, path.dirname(realFilepath), shadowFilename);
+                                let finalPerfectCode = composedDraftCode;
+
+                                try {
+                                    // Write the fully merged code to the hidden shadow file
+                                    await vscode.workspace.fs.writeFile(shadowUri, Buffer.from(composedDraftCode, 'utf8'));
+                                    await vscode.workspace.openTextDocument(shadowUri);
+
+                                    webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: 'Checking Diagnostics', details: `Compiling shadow file...` });
+
+                                    // Wait 2 seconds for the VS Code Compiler (LSP)
+                                    await new Promise(resolve => setTimeout(resolve, 2000));
+
+                                    const diagnostics = vscode.languages.getDiagnostics(shadowUri);
+                                    const errors = diagnostics.filter(d => d.severity === vscode.DiagnosticSeverity.Error || d.severity === vscode.DiagnosticSeverity.Warning);
+
+                                    // Auto-Heal if the merge broke something!
+                                    if (errors.length > 0) {
+                                        webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'heal', description: 'Shadow Compile Failed', details: `Found ${errors.length} issues. Auto-healing invisibly...` });
+
+                                        const errorLog = errors.map(e => `[Line ${e.range.start.line + 1}] ${e.message}`).join('\n');
+                                        const healContext = `The following compilation/syntax errors were found in your draft:\n\n${errorLog}\n\nPlease output the COMPLETELY FIXED file.`;
+
+                                        let healedCodeBuffer = "";
+                                        await streamQwenForCode("Fix syntax errors", [], healContext, data.codingStyle, [], {
+                                            onSetup: async () => { },
+                                            onToken: async (token: string) => {
+                                                const cleanToken = token.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').replace(/<\/code>/g, '').replace(/<\/code/g, '');
+                                                healedCodeBuffer += cleanToken;
+                                                this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: cleanToken });
+                                            }
+                                        }, this._activeTaskController?.signal);
+
+                                        // If it heals, we assume the healer outputted the full replaced file
+                                        finalPerfectCode = healedCodeBuffer;
+                                        webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'success', description: 'Shadow Heal Complete', details: `Invisible syntax fix applied.` });
+                                    } else {
+                                        webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'success', description: 'Shadow Compile Passed', details: `Zero syntax errors detected.` });
+                                    }
+                                } finally {
+                                    try { await vscode.workspace.fs.delete(shadowUri); } catch (e) { }
+                                }
+
+                                streamEndTime = Date.now(); // ⏱️ END GENERATION TIMER
+
+                                // =====================================================================
+                                // ✨ PHASE 3: FINAL DELIVERY (Push perfect code to active editor)
+                                // =====================================================================
+                                if (!fileExists) {
+                                    try { await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(rootUri, path.dirname(realFilepath))); } catch (e) { }
+                                    await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
+                                }
+
+                                const originalUri = vscode.Uri.parse(`nexus-original:${fileUri.path}`);
+                                originalContentProvider.setContent(originalUri, currentFileContent);
+
+                                const document = await vscode.workspace.openTextDocument(fileUri);
+                                const editor = await vscode.window.showTextDocument(document, { preview: false });
+
+                                // Safely replace the ENTIRE editor with our perfectly spliced memory buffer
+                                const lastSafeLine = Math.max(0, document.lineCount - 1);
+                                const lastSafeChar = document.lineCount > 0 ? document.lineAt(lastSafeLine).text.length : 0;
+
+                                const mergedHeader = getAIHeader(realFilepath, data.task, currentFileContent) + "\n";
+
+                                await editor.edit(b => {
+                                    b.delete(new vscode.Range(0, 0, lastSafeLine, lastSafeChar));
+                                    b.insert(new vscode.Position(0, 0), mergedHeader + finalPerfectCode);
+                                });
+
+                                const finalSafeLine = Math.max(0, editor.document.lineCount - 1);
+                                let status = this._tracker?.trackStreamedReview(editor, currentFileContent, data.task, 0, finalSafeLine) || "reviewing";
+
+                                try { await resolveMissingImports(editor); } catch (e) { }
+
+                                if (generatedCommand) await this.confirmAndRunCommand(generatedCommand, rootUri.fsPath, `Running command...`);
+
+                                // 🔥 Telemetry Calculation & Formatting
+                                const waitTime = ((streamStartTime - taskStartTime) / 1000).toFixed(1);
+                                const genTime = ((streamEndTime - streamStartTime) / 1000).toFixed(1);
+                                const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
+
+                                webviewView.webview.postMessage({
+                                    type: 'taskCompleted',
+                                    task: data.task,
+                                    status,
+                                    filepath: realFilepath,
+                                    summary: `Updated ${realFilepath} (Wait: ${waitTime}s | Gen: ${genTime}s | Total: ${totalTime}s)`
+                                });
+
+                                success = true; // Break the retry loop!
+
+                            } catch (error: any) {
+                                if (error.name === 'AbortError') {
+                                    webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: `🛑 Cancelled` });
+                                    break;
+                                }
+
+                                attempt++;
+                                if (attempt > MAX_RETRIES) {
+                                    const totalFailTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
+                                    webviewView.webview.postMessage({
+                                        type: 'taskCompleted',
+                                        task: data.task,
+                                        status: 'error',
+                                        summary: `⚠️ Failed after ${MAX_RETRIES} attempts (${totalFailTime}s)`
                                     });
                                 }
-                            );
-
-                            progress.report({ message: "Locating target file..." });
-                            let targetFilepath = "";
-                            const explicitPathMatch = data.task.match(/[a-zA-Z0-9_\-\/\\]+\.[a-zA-Z0-9]+/);
-
-                            if (isReadOnly && explicitPathMatch) {
-                                targetFilepath = explicitPathMatch[0];
-                            } else {
-                                const targetInfo = await askQwenForTargetFile(data.task, projectStructure, this._lastActiveFile);
-                                targetFilepath = targetInfo.filepath;
                             }
-
-                            const { finalPaths } = await resolveCanonicalPaths([targetFilepath], contextRoot);
-                            const realFilepath = finalPaths[0] || targetFilepath;
-                            this._lastActiveFile = realFilepath;
-
-                            const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
-
-                            if (isReadOnly) {
-                                const document = await vscode.workspace.openTextDocument(fileUri);
-                                await vscode.window.showTextDocument(document, { preview: false });
-                                webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'approved', summary: `📂 Opened ${realFilepath}` });
-                                return;
-                            }
-
-                            let currentFileContent = "";
-                            let fileExists = false;
-                            try {
-                                const fileData = await vscode.workspace.fs.readFile(fileUri);
-                                currentFileContent = new TextDecoder().decode(fileData);
-                                fileExists = true;
-                            } catch { }
-
-                            const contextPayload = currentFileContent.length > 20000
-                                ? `[LARGE FILE - HEADERS ONLY]\n${currentFileContent.substring(0, 2000)}...`
-                                : currentFileContent;
-
-                            const promptContext = `
-                                --- AUTONOMOUSLY GATHERED CONTEXT ---
-                                ${smartContext}
-                                ${ragContext}
-                                Target File: ${realFilepath}
-                                Content:\n\`\`\`\n${contextPayload}\n\`\`\`
-                                File Exists: ${fileExists}
-                                ${lspContext}
-                                ${styleGuide}
-                            `;
-
-                            progress.report({ message: "Writing Code Live..." });
-                            this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Streaming into ${realFilepath}...` });
-
-                            let summary = `Updated ${realFilepath}`;
-                            if (!fileExists) {
-                                try {
-                                    const parentDir = vscode.Uri.joinPath(rootUri, path.dirname(realFilepath));
-                                    await vscode.workspace.fs.createDirectory(parentDir);
-                                } catch (e) { }
-                                await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
-                                summary = `✨ Created ${realFilepath}`;
-                            }
-
-                            const document = await vscode.workspace.openTextDocument(fileUri);
-                            const editor = await vscode.window.showTextDocument(document, { preview: false });
-
-                            let streamAction = 'replace';
-                            let currentPosition = new vscode.Position(0, 0);
-                            let streamStartLine = 0;
-                            let fullGeneratedCode = "";
-                            let generatedCommand = "";
-
-                            const originalContentForDiff = currentFileContent;
-
-                            console.log("[DEBUG-EXEC] 🌊 Starting streamQwenForCode...");
-
-                            await streamQwenForCode(
-                                data.task, [], promptContext, data.codingStyle, [],
-                                {
-                                    onReasoning: async (token: string) => {
-                                        this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: token });
-                                    },
-                                    onSetup: async (action: string, filepath: string, target?: string) => {
-                                        streamAction = !fileExists ? 'replace' : action;
-
-                                        // 🔥 FIX: Strictly clamp to 0-indexed bounds to prevent VS Code crashes!
-                                        const lastSafeLine = Math.max(0, document.lineCount - 1);
-                                        const lastSafeChar = document.lineCount > 0 ? document.lineAt(lastSafeLine).text.length : 0;
-
-                                        if (streamAction === 'replace') {
-                                            await editor.edit(b => b.delete(new vscode.Range(0, 0, lastSafeLine, lastSafeChar)));
-                                            currentPosition = new vscode.Position(0, 0);
-                                            streamStartLine = 0;
-                                        } else if (streamAction === 'append') {
-                                            currentPosition = new vscode.Position(lastSafeLine, lastSafeChar);
-                                            await editor.edit(b => b.insert(currentPosition, "\n\n"));
-                                            currentPosition = new vscode.Position(lastSafeLine + 2, 0);
-                                            streamStartLine = lastSafeLine + 2;
-                                        } else if (streamAction === 'inject' && target) {
-                                            const injectionPos = await getInjectionPosition(this._extensionUri, document, target);
-                                            if (injectionPos) {
-                                                currentPosition = injectionPos;
-                                                await editor.edit(b => b.insert(currentPosition, "\n    "));
-                                                currentPosition = new vscode.Position(injectionPos.line + 1, 4);
-                                                streamStartLine = currentPosition.line;
-                                            } else {
-                                                streamAction = 'append';
-                                                currentPosition = new vscode.Position(lastSafeLine, lastSafeChar);
-                                                await editor.edit(b => b.insert(currentPosition, "\n\n"));
-                                                currentPosition = new vscode.Position(lastSafeLine + 2, 0);
-                                                streamStartLine = lastSafeLine + 2;
-                                            }
-                                        }
-                                    },
-                                    onToken: async (token: string) => {
-                                        if (token.includes('<command>')) {
-                                            const match = token.match(/<command>(.*?)<\/command>/s);
-                                            if (match) generatedCommand = match[1];
-                                        }
-
-                                        const cleanToken = token.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').replace(/<\/code>/g, '').replace(/<\/code/g, '');
-                                        fullGeneratedCode += cleanToken;
-
-                                        await editor.edit(b => b.insert(currentPosition, cleanToken), { undoStopBefore: false, undoStopAfter: false });
-
-                                        const lines = cleanToken.split('\n');
-                                        if (lines.length > 1) {
-                                            currentPosition = new vscode.Position(currentPosition.line + lines.length - 1, lines[lines.length - 1].length);
-                                        } else {
-                                            currentPosition = new vscode.Position(currentPosition.line, currentPosition.character + cleanToken.length);
-                                        }
-                                        editor.revealRange(new vscode.Range(currentPosition, currentPosition), vscode.TextEditorRevealType.Default);
-                                        // 🔥 FIX: Removed experimental streamCode here
-                                    }
-                                },
-                                this._activeTaskController?.signal
-                            );
-
-                            console.log("[DEBUG-EXEC] ✅ streamQwenForCode finished.");
-                            // 🔥 FIX: Removed experimental finishTrackingTask here
-
-                            let status = "reviewing";
-                            const finalSafeLine = Math.max(0, editor.document.lineCount - 1); // 🔥 FIX: 0-indexed limit
-
-                            if (streamAction === 'replace') {
-                                const mergedHeader = getAIHeader(realFilepath, data.task, originalContentForDiff);
-                                await editor.edit(b => b.insert(new vscode.Position(0, 0), mergedHeader + "\n"));
-                                status = this._tracker?.trackStreamedReview(editor, originalContentForDiff, data.task, 0, finalSafeLine) || "reviewing";
-                            } else {
-                                const aiHeader = getAIHeader(realFilepath, data.task);
-                                await editor.edit(b => b.insert(new vscode.Position(streamStartLine, 0), aiHeader));
-                                status = this._tracker?.trackStreamedReview(editor, originalContentForDiff, data.task, streamStartLine, finalSafeLine) || "reviewing";
-                            }
-
-                            try { await resolveMissingImports(editor); } catch (e) { }
-
-                            if (generatedCommand) {
-                                await this.confirmAndRunCommand(generatedCommand, rootUri.fsPath, `Running command...`);
-                            }
-
-                            webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status, summary });
-                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
-                            console.log("[DEBUG-EXEC] 🏁 Task execution complete.");
-
-                        } catch (error: any) {
-                            console.error("[DEBUG-EXEC] 💥 ERROR:", error);
-                            if (error.name === 'AbortError') {
-                                webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: `🛑 Cancelled by user` });
-                            } else {
-                                webviewView.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: `⚠️ Error: ${error.message}` });
-                            }
-                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
-                        } finally {
-                            this._activeTaskController = undefined;
                         }
+                        this._activeTaskController = undefined;
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                     });
                     break;
                 }
 
                 case "refreshCodeLens": {
                     vscode.commands.executeCommand('nexuscode.refreshLens');
+                    break;
+                }
+
+                case "searchFiles": {
+                    // Search workspace matching the query, ignore node_modules, max 10 results
+                    const files = await vscode.workspace.findFiles(`**/*${data.query}*`, '{**/node_modules/**,**/.git/**,**/dist/**}', 10);
+                    const results = files.map(f => vscode.workspace.asRelativePath(f));
+                    webviewView.webview.postMessage({ type: 'searchResults', results });
+                    break;
+                }
+
+                case "showDiff": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) return;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+
+                    const fileUri = vscode.Uri.joinPath(rootUri, data.filepath);
+                    const originalUri = vscode.Uri.parse(`nexus-original:${fileUri.path}`);
+
+                    await vscode.commands.executeCommand('vscode.diff', originalUri, fileUri, `NexusCode Diff: ${path.basename(data.filepath)}`);
+                    break;
+                }
+
+                case "readFileContext": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) return;
+
+                    const fileUri = vscode.Uri.joinPath(this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri, data.file);
+                    try {
+                        const content = await vscode.workspace.fs.readFile(fileUri);
+                        const code = new TextDecoder().decode(content);
+                        const ext = path.extname(data.file).substring(1);
+
+                        webviewView.webview.postMessage({
+                            type: 'addContext',
+                            file: data.file,
+                            code: code,
+                            language: ext || 'text'
+                        });
+                    } catch (e) {
+                        console.error("Failed to read file for context:", e);
+                    }
                     break;
                 }
 

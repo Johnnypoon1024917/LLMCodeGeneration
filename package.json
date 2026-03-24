@@ -86,6 +86,10 @@
     },
     "commands": [
       {
+        "command": "nexuscode.inlineEdit",
+        "title": "NexusCode: Inline Edit (Cmd/Ctrl + Shift + K)"
+      },
+      {
         "command": "nexuscode.optimizeSelection",
         "title": "Qwen: Optimize Selection"
       },
@@ -106,6 +110,14 @@
       {
         "id": "nexuscode.submenu",
         "label": "🤖 NexusCode"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "nexuscode.inlineEdit",
+        "key": "ctrl+shift+k",
+        "mac": "cmd+shift+k",
+        "when": "editorTextFocus"
       }
     ]
   },

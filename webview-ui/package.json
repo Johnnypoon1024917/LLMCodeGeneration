@@ -1,6 +1,9 @@
 {
-  "name": "nexuscode-webview",
-  "version": "0.1.0",
+  "name": "nexuscode",
+  "displayName": "NexusCode AI",
+  "description": "Enterprise-grade autonomous coding agent.",
+  "version": "1.0.0",
+  "publisher": "Dr. Johnny Poon",
   "private": true,
   "type": "module",
   "scripts": {

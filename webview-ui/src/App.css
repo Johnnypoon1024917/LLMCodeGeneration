@@ -583,3 +583,40 @@ body, html, #root {
   font-family: var(--vscode-editor-font-family), Consolas, monospace;
   word-break: break-all;
 }
+
+/* --- @-MENTION MENU --- */
+.mention-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  background: var(--nexus-card-bg);
+  border: 1px solid var(--nexus-border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  box-shadow: 0 -4px 12px rgba(0,0,0,0.3);
+  z-index: 50;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.mention-header {
+  padding: 6px 12px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--nexus-subtext);
+  border-bottom: 1px solid var(--nexus-card-border);
+  text-transform: uppercase;
+}
+
+.mention-item {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--nexus-text);
+  cursor: pointer;
+  font-family: var(--vscode-editor-font-family), Consolas, monospace;
+}
+
+.mention-item:hover {
+  background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.1));
+}
