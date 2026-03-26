@@ -95,7 +95,7 @@ function activate(context) {
         const selection = editor.document.getText(editor.selection);
         const filename = vscode.workspace.asRelativePath(editor.document.uri);
         const userInput = await vscode.window.showInputBox({
-            prompt: "🤖 NexusCode: What do you want to generate or modify?",
+            prompt: "NexusCode: What do you want to generate or modify?",
             placeHolder: "e.g., Extract this logic into a separate React component..."
         });
         if (!userInput)

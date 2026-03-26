@@ -109,7 +109,7 @@
     "submenus": [
       {
         "id": "nexuscode.submenu",
-        "label": "🤖 NexusCode"
+        "label": "NexusCode"
       }
     ],
     "keybindings": [

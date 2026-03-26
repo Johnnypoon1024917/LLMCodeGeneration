@@ -3,6 +3,7 @@ import * as path from 'path';
 
 // 🔥 THE BULLETPROOF WASM IMPORT: Bypasses broken TypeScript definitions
 const Parser = require('web-tree-sitter');
+//import Parser = require('web-tree-sitter');
 
 // 🔥 The Holy Grail: A global map of every Symbol -> Filepath in the workspace
 export const astSymbolGraph = new Map<string, Set<string>>();

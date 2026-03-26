@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.safeParseJSON = safeParseJSON;
 exports.determineIntent = determineIntent;
 exports.streamQwenChat = streamQwenChat;
+exports.askQwenForRequirements = askQwenForRequirements;
 exports.askQwenForStructure = askQwenForStructure;
 exports.askQwenForTargetFile = askQwenForTargetFile;
 exports.runAgenticExploration = runAgenticExploration;
@@ -44,6 +45,10 @@ exports.askQwenToFixError = askQwenToFixError;
 exports.askQwenForAtomicEdits = askQwenForAtomicEdits;
 exports.streamQwenForCode = streamQwenForCode;
 exports.getAvailableModels = getAvailableModels;
+exports.askQwenForDesign = askQwenForDesign;
+exports.askQwenForProjectTasks = askQwenForProjectTasks;
+exports.askQwenToVerifyTask = askQwenToVerifyTask;
+exports.askQwenToUpdatePRD = askQwenToUpdatePRD;
 // src/llmService.ts
 const vscode = __importStar(require("vscode"));
 const agentTools_1 = require("./agentTools");
@@ -90,9 +95,6 @@ function safeParseJSON(jsonString) {
         throw new Error("Failed to extract JSON: " + String(e));
     }
 }
-/**
- * Automatically classifies the user's prompt to determine the correct execution flow.
- */
 async function determineIntent(prompt) {
     console.log("[DEBUG-LLM] determineIntent triggered for prompt:", prompt);
     const systemPrompt = `You are an intent classifier for an AI coding assistant.
@@ -115,11 +117,9 @@ Reply ONLY with the exact word: "build", "explain", or "ask".`;
                 temperature: 0.1
             })
         });
-        console.log("[DEBUG-LLM] determineIntent HTTP Status:", response.status);
         if (!response.ok)
             throw new Error(`HTTP ${response.status} - ${await response.text()}`);
         const data = await response.json();
-        console.log("[DEBUG-LLM] determineIntent Raw Response:", JSON.stringify(data));
         if (!data.choices || data.choices.length === 0)
             return 'ask';
         const intent = data.choices[0].message.content.trim().toLowerCase();
@@ -130,12 +130,10 @@ Reply ONLY with the exact word: "build", "explain", or "ask".`;
         return 'ask';
     }
     catch (e) {
-        console.error("[DEBUG-LLM] determineIntent failed! Defaulting to 'ask'. Error:", e);
         return 'ask';
     }
 }
 async function streamQwenChat(prompt, contextStr, onToken, abortSignal) {
-    console.log("[DEBUG-LLM] streamQwenChat triggered.");
     const { endpoint, model, apiKey } = await getLLMConfig();
     const systemPrompt = `You are Nexus, an elite Enterprise AI Software Architect. 
 You are having a conversation with the developer about their codebase. 
@@ -201,9 +199,6 @@ Always format your response in clean, highly readable Markdown. Use bullet point
                 }
             }
         }
-        // 🔥 FIX: FLUSH LEFTOVER BUFFER
-        // If LM Studio sends the whole response on one line without a newline, 
-        // lines.pop() traps it here. We must manually flush it!
         if (networkBuffer.trim().startsWith('{')) {
             try {
                 const data = JSON.parse(networkBuffer.trim());
@@ -211,15 +206,54 @@ Always format your response in clean, highly readable Markdown. Use bullet point
                 if (token)
                     onToken(token);
             }
-            catch (e) {
-                console.warn("[DEBUG-LLM] Leftover buffer parse error:", e);
-            }
+            catch (e) { }
         }
     }
     catch (error) {
-        console.error("[DEBUG-LLM] streamQwenChat critically failed:", error);
         throw error;
     }
+}
+async function askQwenForRequirements(rawIdea) {
+    const systemPrompt = `You are an elite Enterprise Business Analyst and Product Manager. 
+    The user will give you a raw, brief idea for a software application.
+    Your job is to expand this into a strict, Agile Product Requirements Document (PRD).
+    
+    Return ONLY valid JSON matching this exact schema:
+    {
+        "projectName": "Catchy Name",
+        "domain": "e.g., Travel & Hospitality",
+        "targetAudience": "e.g., Budget backpackers and solo travelers",
+        "userStories": [
+            { 
+                "epic": "Authentication", 
+                "story": "As a user, I want to sign up using my email so that I can save my bookings.", 
+                "acceptanceCriteria": ["Must validate email format", "Passwords must be hashed", "Return 400 on duplicate email"] 
+            }
+        ],
+        "nonFunctionalRequirements": ["99.9% Uptime", "Mobile Responsive UI", "GDPR Compliant Data Storage"]
+    }
+    
+    🔥 CRITICAL RULES:
+    1. Extract exactly 5 to 8 core Epics.
+    2. Write strict, highly technical Acceptance Criteria for every user story. The AI Coder will use these criteria to write unit tests!
+    3. Include critical Non-Functional Requirements (NFRs) regarding security, performance, or UI UX.`;
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+            model: model,
+            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Raw Idea: ${rawIdea}` }],
+            temperature: 0.2
+        })
+    });
+    const data = await response.json();
+    if (data.error)
+        throw new Error(data.error.message);
+    let content = data.choices[0].message.content;
+    const jsonStart = content.indexOf('{');
+    const jsonEnd = content.lastIndexOf('}');
+    return safeParseJSON(content.substring(jsonStart, jsonEnd + 1));
 }
 async function askQwenForStructure(prompt, projectContext) {
     const systemPrompt = `You are an expert AI software architect. Analyze the user's request and the EXISTING DIRECTORY STRUCTURE provided.
@@ -240,7 +274,6 @@ async function askQwenForStructure(prompt, projectContext) {
       "implementationTasks": ["Add booking tab to navigation in public/index.html"]
     }
     \`\`\``;
-    // 🔥 FIX 1: Added 'await' because getLLMConfig now reads from the OS Vault securely!
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await fetch(endpoint, {
         method: 'POST',
@@ -260,7 +293,6 @@ async function askQwenForStructure(prompt, projectContext) {
     if (!data.choices || data.choices.length === 0)
         throw new Error("Invalid response from LLM API.");
     const rawText = data.choices[0].message.content;
-    // 🔥 FIX 2: Bulletproof separation of the human explanation and the JSON code
     const jsonStart = rawText.indexOf('{');
     const jsonEnd = rawText.lastIndexOf('}');
     let explanation = "Here is the implementation plan:";
@@ -298,10 +330,8 @@ async function askQwenForTargetFile(taskDescription, projectContext, lastActiveF
     let content = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     return safeParseJSON(content);
 }
-// 🔥 ENTERPRISE UPGRADE: Structured Agent Telemetry
 async function runAgenticExploration(taskDescription, workspaceRoot, statusCallback) {
     const { endpoint, model, apiKey, enableTools } = await getLLMConfig();
-    // 🔥 FIX 1: If tools are disabled (local LLMs), bypass instantly! No more 2-minute hangs!
     if (!enableTools) {
         statusCallback('analyze', 'Skipped Agentic Search', 'Tools disabled in settings. Relying on RAG.');
         return "";
@@ -317,9 +347,8 @@ Once you have enough context, reply with the exact word: "READY_TO_CODE" and not
     ];
     let gatheredContext = "";
     statusCallback('analyze', 'Analyzed task', taskDescription);
-    for (let step = 0; step < 3; step++) { // Reduced to 3 steps to save time
+    for (let step = 0; step < 3; step++) {
         try {
-            // 🔥 FIX 2: Added a strict 15-second AbortController so it NEVER hangs forever
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 15000);
             const response = await fetch(endpoint, {
@@ -357,9 +386,8 @@ Once you have enough context, reply with the exact word: "READY_TO_CODE" and not
             }
         }
         catch (e) {
-            console.warn("[DEBUG] Agentic loop failed/timed out, bypassing safely.", e);
             statusCallback('error', 'Agent API Error', 'Failed to use tools. Falling back to standard context.');
-            break; // Break cleanly instead of crashing the whole pipeline
+            break;
         }
     }
     return gatheredContext;
@@ -418,25 +446,38 @@ async function askQwenForAtomicEdits(tasks, projectContext, codingStyle) {
 }
 async function streamQwenForCode(taskDescription, availableFiles = [], currentFileContent = "", codingStyle = "precise", chatHistory = [], callbacks, abortSignal) {
     const { endpoint, model, apiKey } = await getLLMConfig();
-    // 🔥 ENTERPRISE UPGRADE: Multi-file Prompt
     const systemPrompt = `You are an elite autonomous Enterprise coding agent.
-    CRITICAL RULE: MULTI-FILE MODE. You may create or modify multiple files in a single response.
+    CRITICAL RULE: ATOMIC SINGLE-FILE MODE. You are executing exactly ONE atomic task.
+    You MUST ONLY output the code for the SINGLE target file requested. 
+    DO NOT write code for multiple files. DO NOT output multiple <filepath> blocks.
+    
+    🔥 ZERO CONVERSATIONAL FILLER ALLOWED 🔥
+    DO NOT output phrases like "Here is the code".
+    
+    🔥 UNIVERSAL LANGUAGE RULES 🔥
+    - TypeScript/JavaScript: NEVER append '.ts'/'.tsx'/'.js' to import paths! ALWAYS use ES6 'import' syntax.
+    - Python: Use strict PEP8 formatting.
+    - Go: Handle all errors explicitly (\`if err != nil\`).
+    - Java/C#: Class names MUST exactly match the filename.
     
     <action> rules: 
-    - 'replace': Overwrites the entire file (default).
-    - 'append': Adds code to the end of the file.
-    - 'inject': Inserts code into a specific Class or Function (requires <target> tag).
+    - 'replace': Overwrites the entire file.
+    - 'append': Adds code to the end.
+    - 'inject': Inserts code into a specific Class/Function (requires <target>).
     
     🔥 XML FORMAT STRICT ORDER 🔥
-    For EVERY file you need to modify, you MUST output this EXACT sequence:
+    Output EXACTLY this sequence:
     
-    <reasoning>Explain your step-by-step thinking for this file.</reasoning>
+    <reasoning>
+    Brief step-by-step thinking.
+    </reasoning>
     <filepath>path/to/file.ext</filepath>
-    <action>replace | append | inject</action>
-    <target>ClassNameOrFunctionName</target> \`\`\`
-    ... code here ...
+    <action>replace</action>
+    <target>OptionalTargetName</target>
+    \`\`\`typescript
+    // YOUR CODE GOES HERE. TRIPLE BACKTICKS ARE MANDATORY!
     \`\`\`
-    <command>npm install package-name</command> You can repeat this entire sequence as many times as needed to complete the multi-file feature.`;
+    <command>npm install package-name</command>`;
     const userPrompt = currentFileContent.trim() ? `Task: ${taskDescription}\n\nEXISTING FILE:\n\`\`\`\n${currentFileContent}\n\`\`\`` : `Task: ${taskDescription}`;
     const response = await fetch(endpoint, {
         method: 'POST',
@@ -448,9 +489,10 @@ async function streamQwenForCode(taskDescription, availableFiles = [], currentFi
         throw new Error("No readable stream available.");
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
-    // 🔥 ENTERPRISE UPGRADE: Robust sliding-window AST parser
     let buffer = "";
     let isStreamingCode = false;
+    let isReasoningCompleted = false;
+    let isFirstCodeChunk = false;
     while (true) {
         const { done, value } = await reader.read();
         if (done)
@@ -460,74 +502,390 @@ async function streamQwenForCode(taskDescription, availableFiles = [], currentFi
         for (const line of lines) {
             if (line.startsWith('data: ') && line !== 'data: [DONE]') {
                 try {
-                    const data = JSON.parse(line.substring(6));
+                    const dataStr = line.substring(6).trim();
+                    if (!dataStr)
+                        continue;
+                    const data = JSON.parse(dataStr);
                     const token = data.choices[0]?.delta?.content || "";
                     buffer += token;
+                    // 🔥 1. GLOBAL COMMAND EXTRACTOR (Routes purely to onCommand)
+                    const cmdRegex = /<command>\s*(.*?)\s*<\/command>/is;
+                    let cmdMatch;
+                    while ((cmdMatch = buffer.match(cmdRegex)) !== null) {
+                        if (callbacks.onCommand)
+                            await callbacks.onCommand(cmdMatch[1].trim());
+                        buffer = buffer.replace(cmdMatch[0], '');
+                    }
                     if (!isStreamingCode) {
-                        // Forward reasoning if present
-                        const rMatch = buffer.match(/<reasoning>(.*?)<\/reasoning>/s);
-                        if (rMatch && callbacks.onReasoning)
-                            await callbacks.onReasoning(token);
-                        // Look for robust triggers indicating code is about to start
-                        const fpMatch = buffer.match(/<filepath>(.*?)<\/filepath>/s);
-                        const acMatch = buffer.match(/<action>(.*?)<\/action>/s);
-                        const targetMatch = buffer.match(/<target>(.*?)<\/target>/s);
-                        // Tolerate ANY code block trigger (```, ```javascript, <code>)
+                        if (buffer.match(/<\/reason/i) || buffer.includes('<filepath>')) {
+                            isReasoningCompleted = true;
+                        }
+                        if (callbacks.onReasoning && !isReasoningCompleted) {
+                            let cleanToken = token.replace(/<\/?(reasoning|filepath|action|target|command|typescript)[^>]*>/gi, '');
+                            if (cleanToken && !buffer.includes('###')) {
+                                await callbacks.onReasoning(cleanToken);
+                            }
+                        }
+                        const fpMatch = buffer.match(/<filepath>\s*(.*?)\s*<\/filepath>/i);
+                        const acMatch = buffer.match(/<action>\s*(.*?)\s*<\/action>/i);
+                        const targetMatch = buffer.match(/<target>\s*(.*?)\s*<\/target>/i);
                         const codeStartIdx = Math.max(buffer.lastIndexOf('```'), buffer.lastIndexOf('<code>'));
-                        if (fpMatch && acMatch && codeStartIdx !== -1) {
-                            const filepath = fpMatch[1].trim();
-                            const action = acMatch[1].trim().toLowerCase();
+                        const ultraFallbackMatch = buffer.match(/<\/?[a-z]+>\s*(?:(?:typescript|javascript|tsx|jsx|ts|js|html|css|json)\s*)?(import |const |let |var |export |class |function )/i);
+                        if ((fpMatch && acMatch && (codeStartIdx !== -1 || buffer.length - (acMatch.index + acMatch[0].length) > 25)) ||
+                            codeStartIdx !== -1 ||
+                            ultraFallbackMatch) {
+                            const filepath = fpMatch ? fpMatch[1].trim() : "unknown";
+                            const action = acMatch ? acMatch[1].trim().toLowerCase() : "replace";
                             const target = targetMatch ? targetMatch[1].trim() : undefined;
                             await callbacks.onSetup(action, filepath, target);
-                            // Slice off everything before the code block
-                            const newLineAfterCodeStart = buffer.indexOf('\n', codeStartIdx);
-                            buffer = newLineAfterCodeStart !== -1 ? buffer.substring(newLineAfterCodeStart + 1) : "";
+                            let cutIndex = 0;
+                            if (codeStartIdx !== -1) {
+                                const nl = buffer.indexOf('\n', codeStartIdx);
+                                cutIndex = nl !== -1 ? nl + 1 : codeStartIdx + 3;
+                            }
+                            else if (ultraFallbackMatch) {
+                                cutIndex = ultraFallbackMatch.index + ultraFallbackMatch[0].indexOf(ultraFallbackMatch[1]);
+                            }
+                            else if (targetMatch) {
+                                cutIndex = targetMatch.index + targetMatch[0].length;
+                            }
+                            else if (acMatch) {
+                                cutIndex = acMatch.index + acMatch[0].length;
+                            }
+                            let codeBuffer = buffer.substring(cutIndex);
+                            codeBuffer = codeBuffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s*\n/i, '');
+                            codeBuffer = codeBuffer.replace(/<\/?(filepath|action|target|reasoning|reason|typescript|javascript)[^>]*>/gi, '');
+                            buffer = codeBuffer;
                             isStreamingCode = true;
+                            isFirstCodeChunk = true;
+                            isReasoningCompleted = false;
                         }
                     }
                     else {
-                        // Streaming actual code
-                        const codeEndIdx = Math.max(buffer.lastIndexOf('```'), buffer.lastIndexOf('</code'));
-                        if (codeEndIdx !== -1) {
-                            // Code block finished
-                            const finalCodeChunk = buffer.substring(0, codeEndIdx);
+                        if (isFirstCodeChunk) {
+                            if (buffer.length < 30 && !buffer.includes('\n'))
+                                continue;
+                            buffer = buffer.replace(/^\s*```[a-z]*\s*\n?/i, '');
+                            buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s*\n/i, '');
+                            buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s+(import |const |let |var |export |class |function )/i, '$2');
+                            isFirstCodeChunk = false;
+                        }
+                        const codeEndMatch = buffer.match(/```|<\/code>/i);
+                        const emergencyCommandMatch = buffer.match(/<command/i);
+                        if (codeEndMatch || emergencyCommandMatch) {
+                            const cutIndex = codeEndMatch ? codeEndMatch.index : emergencyCommandMatch.index;
+                            const finalCodeChunk = buffer.substring(0, cutIndex);
                             if (finalCodeChunk)
                                 await callbacks.onToken(finalCodeChunk);
                             if (callbacks.onFileComplete)
                                 await callbacks.onFileComplete();
-                            // Reset state to catch the NEXT file in the stream!
                             isStreamingCode = false;
-                            buffer = buffer.substring(codeEndIdx + 3);
+                            buffer = buffer.substring(cutIndex + (codeEndMatch ? codeEndMatch[0].length : 0));
                         }
                         else {
-                            // Safe emission window (prevent splitting closing tags)
-                            if (buffer.length > 10) {
-                                const emitChunk = buffer.substring(0, buffer.length - 10);
+                            const cmdStartIdx = buffer.lastIndexOf('<command');
+                            let safeTailLength = 15;
+                            if (cmdStartIdx !== -1)
+                                safeTailLength = Math.max(15, buffer.length - cmdStartIdx);
+                            if (buffer.length > safeTailLength) {
+                                const emitChunk = buffer.substring(0, buffer.length - safeTailLength);
                                 await callbacks.onToken(emitChunk);
-                                buffer = buffer.substring(buffer.length - 10);
+                                buffer = buffer.substring(buffer.length - safeTailLength);
                             }
                         }
                     }
                 }
-                catch (e) { } // Ignore JSON cuts
+                catch (e) { }
             }
         }
     }
-    // Flush remaining code buffer
-    if (isStreamingCode && buffer.length > 0) {
-        const cleanEnd = buffer.replace(/```$/, '').replace(/<\/code>$/, '');
-        await callbacks.onToken(cleanEnd);
-        if (callbacks.onFileComplete)
-            await callbacks.onFileComplete();
+    if (buffer.length > 0) {
+        const cmdRegex = /<command>\s*(.*?)\s*<\/command>/is;
+        let cmdMatch;
+        while ((cmdMatch = buffer.match(cmdRegex)) !== null) {
+            if (callbacks.onCommand)
+                await callbacks.onCommand(cmdMatch[1].trim());
+            buffer = buffer.replace(cmdMatch[0], '');
+        }
+        if (isStreamingCode) {
+            const cleanEnd = buffer.replace(/```$/, '').replace(/<\/code>$/, '');
+            await callbacks.onToken(cleanEnd);
+            if (callbacks.onFileComplete)
+                await callbacks.onFileComplete();
+        }
     }
 }
-/**
- * Fetches available models dynamically from the LM Studio / API endpoint.
- */
 async function getAvailableModels() {
     const config = vscode.workspace.getConfiguration('nexuscode');
-    // Check if the user manually overrode it in settings, otherwise enforce the fixed model
     const fixedModel = config.get('model') || 'qwen2.5-coder';
     return [fixedModel];
+}
+async function askQwenForDesign(requirements) {
+    const systemPrompt = `You are an elite Principal System Architect at a top FAANG company. 
+    The user has provided a Product Requirements Document (PRD).
+    Your job is to generate a massive, highly detailed Technical Design Document (TDD) based strictly on these requirements.
+    
+    The document MUST include:
+    1. High-Level Architecture: System context, data flow, scaling strategy, and tech stack justifications.
+    2. Database Schema: Detailed tables, fields, data types, and relationships.
+    3. API Design: Core REST/GraphQL routes, payload structures, and HTTP status codes.
+    4. Enterprise ASCII Diagrams: You MUST draw extremely detailed, professional ASCII diagrams. You must include:
+       - A complex Network/Architecture Diagram (including Gateways, Load Balancers, Microservices, DB clusters).
+       - An Entity-Relationship (ER) Diagram showing tables and foreign keys.
+       - A Sequence Diagram illustrating the core critical-path data flow (e.g., authentication or checkout).
+    
+    Do NOT generate simple, tiny boxes. Use professional spacing, comprehensive labels, and detailed ASCII connectors.
+    Format the output in clean, highly readable Markdown. Return ONLY the Markdown text.`;
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+            model: model,
+            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Requirements:\n${requirements}` }],
+            temperature: 0.2,
+            stream: true
+        })
+    });
+    if (!response.ok)
+        throw new Error(`HTTP ${response.status}`);
+    if (!response.body)
+        throw new Error("No readable stream.");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let fullDesign = "";
+    let networkBuffer = "";
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done)
+            break;
+        networkBuffer += decoder.decode(value, { stream: true });
+        const packets = networkBuffer.split(/\r?\n\r?\n/);
+        networkBuffer = packets.pop() || "";
+        for (const packet of packets) {
+            const lines = packet.split(/\r?\n/);
+            for (const line of lines) {
+                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                    try {
+                        const dataStr = line.substring(6).trim();
+                        if (!dataStr)
+                            continue;
+                        const data = JSON.parse(dataStr);
+                        if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
+                            fullDesign += data.choices[0].delta.content;
+                        }
+                    }
+                    catch (e) { }
+                }
+            }
+        }
+    }
+    if (networkBuffer) {
+        const lines = networkBuffer.split(/\r?\n/);
+        for (const line of lines) {
+            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                try {
+                    const dataStr = line.substring(6).trim();
+                    if (dataStr) {
+                        const data = JSON.parse(dataStr);
+                        if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
+                            fullDesign += data.choices[0].delta.content;
+                        }
+                    }
+                }
+                catch (e) { }
+            }
+        }
+    }
+    return fullDesign.trim();
+}
+async function askQwenForProjectTasks(requirements, design) {
+    const systemPrompt = `You are a strict, elite Lead Staff Engineer. 
+    The user has provided a PRD and a Technical Design Document.
+    Break the entire project down into an actionable, exhaustive implementation plan.
+    
+    Return ONLY valid JSON matching this exact schema:
+    {
+      "folderStructure": ["src/index.ts", "src/routes/auth.ts"],
+      "implementationTasks": [
+        {
+          "step": "Setup Express server and middleware",
+          "file": "src/index.ts",
+          "detailedInstructions": "Initialize Express. Configure CORS, Helmet, and Morgan middleware.",
+          "relatedRequirement": "Epic: Authentication - Core Server Setup"
+        },
+        {
+          "step": "Implement JWT authentication route",
+          "file": "src/routes/auth.ts",
+          "detailedInstructions": "Create POST /login and /register routes. Hash passwords using bcrypt.",
+          "relatedRequirement": "Epic: Authentication - User Story 1"
+        }
+      ]
+    }
+    
+    🔥 CRITICAL RULES 🔥:
+    1. You MUST output an array of OBJECTS for 'implementationTasks'. DO NOT output simple strings.
+    2. EXHAUSTIVE TASKS: 'detailedInstructions' must be a massive paragraph detailing EXACTLY what libraries to use, what methods to write, and the expected business logic from the PRD.
+    3. ATOMIC EXECUTION: Each task MUST target exactly 1 primary 'file'.
+    4. TRACEABILITY: 'relatedRequirement' MUST reference the exact Epic/Story from the PRD.
+    5. COMPLETE ARCHITECTURE: Ensure 'folderStructure' contains EVERY file required for a production-ready app.`;
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+            model: model,
+            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `PRD:\n${requirements}\n\nDESIGN:\n${design}` }],
+            temperature: 0.1,
+            stream: true
+        })
+    });
+    if (!response.ok)
+        throw new Error(`HTTP ${response.status}`);
+    if (!response.body)
+        throw new Error("No readable stream.");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let fullContent = "";
+    let networkBuffer = "";
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done)
+            break;
+        networkBuffer += decoder.decode(value, { stream: true });
+        const packets = networkBuffer.split(/\r?\n\r?\n/);
+        networkBuffer = packets.pop() || "";
+        for (const packet of packets) {
+            const lines = packet.split(/\r?\n/);
+            for (const line of lines) {
+                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                    try {
+                        const dataStr = line.substring(6).trim();
+                        if (!dataStr)
+                            continue;
+                        const data = JSON.parse(dataStr);
+                        if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
+                            fullContent += data.choices[0].delta.content;
+                        }
+                    }
+                    catch (e) { }
+                }
+            }
+        }
+    }
+    if (networkBuffer) {
+        const lines = networkBuffer.split(/\r?\n/);
+        for (const line of lines) {
+            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                try {
+                    const dataStr = line.substring(6).trim();
+                    if (dataStr) {
+                        const data = JSON.parse(dataStr);
+                        if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
+                            fullContent += data.choices[0].delta.content;
+                        }
+                    }
+                }
+                catch (e) { }
+            }
+        }
+    }
+    const jsonStart = fullContent.indexOf('{');
+    const jsonEnd = fullContent.lastIndexOf('}');
+    if (jsonStart === -1 || jsonEnd === -1)
+        throw new Error("Failed to parse JSON plan.");
+    const parsedPlan = safeParseJSON(fullContent.substring(jsonStart, jsonEnd + 1));
+    if (parsedPlan && Array.isArray(parsedPlan.implementationTasks)) {
+        parsedPlan.implementationTasks = parsedPlan.implementationTasks.map((task) => {
+            if (typeof task === 'string') {
+                return {
+                    step: task,
+                    file: "unknown",
+                    detailedInstructions: task,
+                    relatedRequirement: "General/Infrastructure"
+                };
+            }
+            return task;
+        });
+    }
+    return parsedPlan;
+}
+async function askQwenToVerifyTask(taskDescription, requirements, codebaseContext) {
+    const systemPrompt = `You are a strict, elite QA Automation Engineer and Code Reviewer.
+    The user (a human developer) claims to have manually completed a task.
+    
+    You must review their current codebase context against the Task Instructions and the PRD Acceptance Criteria.
+    
+    Return ONLY valid JSON matching this schema:
+    {
+        "verified": true, 
+        "reasoning": "Explain exactly what criteria were met, or what is missing if you reject it."
+    }`;
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+            model: model,
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `TASK INSTRUCTIONS:\n${taskDescription}\n\nSTRICT PRD:\n${requirements}\n\nCURRENT CODEBASE CONTEXT:\n${codebaseContext}` }
+            ],
+            temperature: 0.1
+        })
+    });
+    const data = await response.json();
+    if (data.error)
+        throw new Error(data.error.message);
+    const content = data.choices[0].message.content;
+    const jsonStart = content.indexOf('{');
+    const jsonEnd = content.lastIndexOf('}');
+    return safeParseJSON(content.substring(jsonStart, jsonEnd + 1));
+}
+// 🔥 ENHANCEMENT A: The Living PRD QA Agent
+async function askQwenToUpdatePRD(prdContext, taskDescription, filepath, newCode) {
+    const systemPrompt = `You are an elite QA Agent maintaining a "Living PRD".
+    The developer just completed a task. You must read the new code and the PRD.
+    Identify if ANY "- [ ]" Acceptance Criteria or Requirements were fulfilled by this specific code.
+    
+    Return ONLY valid JSON containing an array of string replacements.
+    You must match the original string EXACTLY so it can be replaced in the Markdown file.
+    
+    Schema:
+    {
+        "replacements": [
+            {
+                "original": "- [ ] Must validate email format",
+                "updated": "- [x] Must validate email format (Completed in src/routes/auth.ts)"
+            }
+        ]
+    }
+    
+    CRITICAL: If the code does NOT fully satisfy a criteria, do not include it. Return an empty array [] if nothing was fully completed.`;
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    try {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify({
+                model: model,
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: `TASK:\n${taskDescription}\n\nFILE: ${filepath}\n\nNEW CODE:\n\`\`\`\n${newCode.substring(0, 10000)}\n\`\`\`\n\nCURRENT PRD:\n${prdContext}` }
+                ],
+                temperature: 0.1
+            })
+        });
+        const data = await response.json();
+        const content = data.choices[0].message.content;
+        const jsonStart = content.indexOf('{');
+        const jsonEnd = content.lastIndexOf('}');
+        const parsed = safeParseJSON(content.substring(jsonStart, jsonEnd + 1));
+        return parsed.replacements || [];
+    }
+    catch (e) {
+        console.warn("[DEBUG] QA Agent failed to parse PRD updates.");
+        return [];
+    }
 }
 //# sourceMappingURL=llmService.js.map

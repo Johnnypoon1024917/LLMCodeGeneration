@@ -17,7 +17,12 @@ import {
     runAgenticExploration,
     getAvailableModels,
     determineIntent,
-    streamQwenChat
+    streamQwenChat,
+    askQwenForRequirements,
+    askQwenForDesign,
+    askQwenForProjectTasks,
+    askQwenToVerifyTask,
+    askQwenToUpdatePRD
 } from "./llmService";
 
 // Context Managers
@@ -92,6 +97,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _terminalManager?: TerminalManager;
     private _metaManager?: MetaContextManager;
     private _activeTaskController?: AbortController;
+    private _activeRequirements: string = "";
+    private _activeDesign: string = "";
 
     private _lastActiveFile?: string;
     private _isMetaMode: boolean = false;
@@ -109,16 +116,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             vscode.window.showInformationMessage("Please open the NexusCode sidebar first.");
         }
     }
-    
+
     public injectTerminalTask(prompt: string) {
         if (this._view) {
-            this._view.webview.postMessage({ 
-                type: 'injectTerminalTask', 
-                task: prompt 
+            this._view.webview.postMessage({
+                type: 'injectTerminalTask',
+                task: prompt
             });
         }
     }
-
 
     public toggleMetaMode() {
         this._isMetaMode = !this._isMetaMode;
@@ -135,7 +141,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // --- 🛡️ ENTERPRISE GUARDRAIL: Human-in-the-Loop Command Execution ---
     private async confirmAndRunCommand(command: string, workspacePath: string, progressMessage: string): Promise<{ success: boolean, output: string } | undefined> {
         const userChoice = await vscode.window.showWarningMessage(
-            `🤖 NexusCode wants to execute a terminal command:\n\n\`${command}\``,
+            `NexusCode wants to execute a terminal command:\n\n\`${command}\``,
             { modal: true },
             "Run Command",
             "Deny"
@@ -194,17 +200,244 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const taskSummaries = globalContext.globalState.get<any>('nexus_task_summaries') || {};
         const hasApiKey = !!(await globalContext.secrets.get('nexuscode_apikey'));
 
+        // Load requirements and design from .md files!
+        let savedReqs = "";
+        let savedDesign = "";
+        let savedTasks = null;
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders) {
+            const nexusDir = vscode.Uri.joinPath(workspaceFolders[0].uri, 'nexuscode');
+            try { savedReqs = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'requirements.md'))); this._activeRequirements = savedReqs; } catch (e) { }
+            try { savedDesign = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'design.md'))); this._activeDesign = savedDesign; } catch (e) { }
+            try {
+                const taskData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'tasks.json'));
+                savedTasks = JSON.parse(new TextDecoder().decode(taskData));
+            } catch (e) { }
+        }
+
         // Send initial state to React
         webviewView.webview.postMessage({
             type: 'initState',
             messages: chatHistory,
             taskStatuses: taskStatuses,
             taskSummaries: taskSummaries,
+            requirements: savedReqs,
+            design: savedDesign,
+            tasks: savedTasks,
             hasKey: hasApiKey
         });
 
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
+
+                case "verifyTask": {
+                    if (!workspaceFolders) return;
+                    this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'reviewing', summary: 'Gathering context to verify your code...' });
+
+                    try {
+                        const taskQuery = data.prompt || data.task;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+
+                        // Gather the context of the code you just wrote
+                        const [astContext, hybridContext] = await Promise.all([
+                            getSmartASTContext(taskQuery),
+                            retrieveHybridContext(taskQuery, 5)
+                        ]);
+                        const fullContext = `${astContext}\n\n${hybridContext}`;
+
+                        this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'reviewing', summary: 'AI QA is checking your work against PRD...' });
+
+                        const verification = await askQwenToVerifyTask(taskQuery, this._activeRequirements, fullContext);
+
+                        if (verification.verified) {
+                            // ✅ IT PASSED! Check off the box in tasks.md
+                            const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                            const tasksMdUri = vscode.Uri.joinPath(nexusDir, 'tasks.md');
+                            try {
+                                let mdContent = new TextDecoder().decode(await vscode.workspace.fs.readFile(tasksMdUri));
+                                mdContent = mdContent.replace(`[ ] **${data.task}**`, `[x] **${data.task}**`);
+                                mdContent = mdContent.replace(`[ ] ${data.task}`, `[x] ${data.task}`);
+                                await vscode.workspace.fs.writeFile(tasksMdUri, Buffer.from(mdContent, 'utf8'));
+                            } catch (e) { console.warn("Could not update tasks.md"); }
+
+                            // 🔥 ENHANCEMENT A: Update the Living PRD for manually written code too!
+                            try {
+                                if (this._activeRequirements) {
+                                    this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus QA: Scanning your code to update Living PRD...` });
+                                    const reqMdUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'requirements.md');
+                                    let currentPRD = this._activeRequirements;
+
+                                    // Use fullContext as the "new code" representation since they wrote it manually
+                                    const prdUpdates = await askQwenToUpdatePRD(currentPRD, data.task, "Manual Code Edit", fullContext);
+
+                                    if (prdUpdates.length > 0) {
+                                        prdUpdates.forEach(update => {
+                                            currentPRD = currentPRD.replace(update.original, update.updated);
+                                        });
+
+                                        await vscode.workspace.fs.writeFile(reqMdUri, Buffer.from(currentPRD, 'utf8'));
+                                        this._activeRequirements = currentPRD;
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn("[DEBUG] Living PRD QA check failed for manual verify", e);
+                            }
+
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'approved', summary: `✅ VERIFIED: ${verification.reasoning}` });
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                        } else {
+                            // ❌ IT FAILED!
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'rejected', summary: `❌ REJECTED: ${verification.reasoning}` });
+                        }
+
+                    } catch (error: any) {
+                        this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Verification Error: ${error.message}` });
+                    }
+                    break;
+                }
+
+                case "generateRequirements": {
+                    if (!workspaceFolders) return;
+
+                    this._view?.webview.postMessage({ type: 'reqStep', message: '━━━ Step 1: Understanding your request & building feature discovery prompt ━━━' });
+                    this._view?.webview.postMessage({ type: 'reqStep', message: `Generated prompt for LLM (${data.text.length + 150} chars)\n` });
+
+                    try {
+                        this._view?.webview.postMessage({ type: 'reqStep', message: '━━━ Step 2: Drafting Agile User Stories & Acceptance Criteria ━━━' });
+                        this._view?.webview.postMessage({ type: 'reqStep', message: 'Calling LLM...\n' });
+
+                        const reqPlan = await askQwenForRequirements(data.text);
+
+                        // Stream the Agile logs to the UI!
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `Project:      ${reqPlan.projectName}` });
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `Domain:       ${reqPlan.domain}` });
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `Audience:     ${reqPlan.targetAudience}` });
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `Stories:      ${reqPlan.userStories.length} generated` });
+
+                        this._view?.webview.postMessage({ type: 'reqStep', message: '\n━━━ Step 3: Composing Master PRD Document ━━━' });
+
+                        // Build the FAANG-Grade Markdown PRD
+                        let enrichedPrompt = `# 📋 Product Requirements Document (PRD): ${reqPlan.projectName}\n\n`;
+                        enrichedPrompt += `**Domain:** ${reqPlan.domain}\n`;
+                        enrichedPrompt += `**Target Audience:** ${reqPlan.targetAudience}\n`;
+                        enrichedPrompt += `**Original Request:** "${data.text}"\n\n`;
+
+                        enrichedPrompt += `## 🎯 Agile User Stories\n\n`;
+                        reqPlan.userStories.forEach((us: any, i: number) => {
+                            enrichedPrompt += `### ${i + 1}. Epic: ${us.epic}\n`;
+                            enrichedPrompt += `**Story:** ${us.story}\n\n`;
+                            enrichedPrompt += `**Acceptance Criteria:**\n`;
+                            us.acceptanceCriteria.forEach((ac: string) => {
+                                enrichedPrompt += `- [ ] ${ac}\n`;
+                            });
+                            enrichedPrompt += `\n`;
+                        });
+
+                        enrichedPrompt += `## 🛡️ Non-Functional Requirements (NFRs)\n`;
+                        reqPlan.nonFunctionalRequirements.forEach((nfr: string) => {
+                            enrichedPrompt += `- ${nfr}\n`;
+                        });
+
+                        enrichedPrompt += `\n## 💻 Technical Instructions for AI Coder\n- Create a clean, modular project structure\n- Implement each Epic as a separate component/module\n- Ensure all Acceptance Criteria are met before marking a task complete.\n- Use modern best practices and frameworks\n`;
+
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                        const reqFileUri = vscode.Uri.joinPath(nexusDir, 'requirements.md');
+
+                        try { await vscode.workspace.fs.createDirectory(nexusDir); } catch (e) { }
+                        await vscode.workspace.fs.writeFile(reqFileUri, Buffer.from(enrichedPrompt, 'utf8'));
+                        this._activeRequirements = enrichedPrompt;
+
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `✅ Saved requirements.md` });
+
+                        // 🔥 WE STOP HERE NOW!
+                        this._view?.webview.postMessage({ type: 'requirementsGenerated', text: enrichedPrompt });
+
+                    } catch (error: any) {
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${error.message}` });
+                    }
+                    break;
+                }
+
+                // 🔥 PHASE 2: Architecting System Design (Triggered by the Approve button)
+                case "generateDesign": {
+                    if (!workspaceFolders) return;
+
+                    this._view?.webview.postMessage({ type: 'reqStep', message: '\n━━━ Step 4: Architecting System Design ━━━' });
+                    this._view?.webview.postMessage({ type: 'reqStep', message: 'Analyzing approved PRD and drafting architecture...\n' });
+
+                    try {
+                        const designDoc = await askQwenForDesign(data.requirements);
+
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const designFileUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'design.md');
+                        await vscode.workspace.fs.writeFile(designFileUri, Buffer.from(designDoc, 'utf8'));
+
+                        this._activeDesign = designDoc;
+
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `✅ Saved design.md` });
+                        this._view?.webview.postMessage({ type: 'designGenerated', text: designDoc });
+                    } catch (error: any) {
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${error.message}` });
+                    }
+                    break;
+                }
+
+                // 🔥 PHASE 3: The Master Project Builder Loop
+                case "generateProjectTasks": {
+                    if (!workspaceFolders) return;
+                    this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Drafting Master Implementation Plan..." });
+
+                    // Initialize an empty chat bubble to hold the response
+                    this._view?.webview.postMessage({ type: 'startChatStream' });
+
+                    try {
+                        const plan = await askQwenForProjectTasks(this._activeRequirements, this._activeDesign);
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+
+                        // 1. Save tasks.json for system recovery
+                        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(nexusDir, 'tasks.json'), Buffer.from(JSON.stringify(plan, null, 2), 'utf8'));
+
+                        // 2. Save tasks.md for human readability!
+                        let mdContent = "# Master Implementation Plan\n\n## 📁 Folder Structure\n";
+                        plan.folderStructure.forEach(f => mdContent += `- \`${f}\`\n`);
+                        mdContent += "\n## 🛠️ Execution Tasks\n";
+                        plan.implementationTasks.forEach((t: any, i: number) => {
+                            if (typeof t === 'string') mdContent += `${i + 1}. [ ] ${t}\n`;
+                            else mdContent += `${i + 1}. [ ] **${t.step}** (File: \`${t.file}\`)\n   - *Instructions:* ${t.detailedInstructions}\n`;
+                        });
+                        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(nexusDir, 'tasks.md'), Buffer.from(mdContent, 'utf8'));
+
+                        // 3. Resolve paths
+                        const { finalPaths, renamingMap } = await resolveCanonicalPaths(plan.folderStructure, rootUri.fsPath);
+                        plan.folderStructure = finalPaths;
+                        plan.implementationTasks = plan.implementationTasks.map((task: any) => {
+                            if (typeof task === 'string') return task;
+                            let updatedTask = { ...task };
+                            renamingMap.forEach((realPath, plannedPath) => {
+                                if (updatedTask.file === plannedPath) updatedTask.file = realPath;
+                                if (updatedTask.detailedInstructions.includes(plannedPath)) {
+                                    updatedTask.detailedInstructions = updatedTask.detailedInstructions.replace(plannedPath, realPath);
+                                }
+                            });
+                            return updatedTask;
+                        });
+
+                        if (plan.folderStructure.length > 0) await createWorkspaceStructure(plan.folderStructure);
+
+                        // 4. Push it to the UI!
+                        this._view?.webview.postMessage({ type: 'chatToken', token: "I have analyzed the PRD and System Architecture. Here is the master implementation plan. You can execute these tasks one by one using the buttons below, or run them all at once.\n\n" });
+                        this._view?.webview.postMessage({ type: "structureResponse", value: plan });
+                        this._view?.webview.postMessage({ type: 'tasksGenerated' });
+
+                    } catch (error: any) {
+                        vscode.window.showErrorMessage(`Failed to generate tasks: ${error.message}`);
+                    }
+                    this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                    break;
+                }
+
                 case "requestRevision": {
                     const feedback = await vscode.window.showInputBox({
                         prompt: `Why was the code for "${data.task}" rejected?`,
@@ -213,12 +446,42 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     if (feedback === undefined) return; // User pressed Esc to cancel
 
-                    // Tell React to reset the UI and restart the task with the new feedback
                     this._view?.webview.postMessage({
                         type: 'startRevision',
                         task: data.task,
                         feedback: feedback || "The previous attempt was rejected. Try a different approach and ensure the code is completely bug-free."
                     });
+                    break;
+                }
+
+                case "updateRequirements": {
+                    this._activeRequirements = data.text;
+                    if (workspaceFolders && data.text.trim()) {
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const reqFileUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'requirements.md');
+                        try {
+                            await vscode.workspace.fs.writeFile(reqFileUri, Buffer.from(data.text, 'utf8'));
+                        } catch (e) {
+                            console.warn("Failed to save requirements.md", e);
+                        }
+                    } else if (data.text === "") {
+                        this._activeRequirements = "";
+                        this._activeDesign = ""; // Clear design on start over
+                    }
+                    break;
+                }
+
+                case "updateDesign": {
+                    this._activeDesign = data.text;
+                    if (workspaceFolders && data.text.trim()) {
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const designFileUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'design.md');
+                        try {
+                            await vscode.workspace.fs.writeFile(designFileUri, Buffer.from(data.text, 'utf8'));
+                        } catch (e) {
+                            console.warn("Failed to save design.md", e);
+                        }
+                    }
                     break;
                 }
 
@@ -250,7 +513,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const intent = await determineIntent(data.text);
                         console.log(`[DEBUG] 🎯 Intent determined as: [${intent.toUpperCase()}]`);
 
-                        // Combine text and context for the LLM
                         const fullPrompt = data.context
                             ? `--- ATTACHED CONTEXT ---\n${data.context}\n\n--- USER QUERY ---\n${data.text}`
                             : data.text;
@@ -259,24 +521,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             console.log("[DEBUG] 🛠️ Entering BUILD pipeline");
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Architecting plan..." });
 
-                            // 🔥 Initialize chat bubble for the pre-explanation
                             this._view?.webview.postMessage({ type: 'startChatStream' });
 
                             await indexWorkspace((msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg }));
 
-
+                            // 🔥 Fixed: using data.text instead of data.task!
                             const [lspContext, styleGuide, astContext, hybridContext] = await Promise.all([
-                                getLspContext(data.task),
+                                getLspContext(data.text),
                                 getProjectStyleGuides(),
-                                getSmartASTContext(data.task),       // 🌳 Pillar 1
-                                retrieveHybridContext(data.task, 5)  // 🔍 Pillar 2
+                                getSmartASTContext(data.text),       // 🌳 Pillar 1
+                                retrieveHybridContext(data.text, 5)  // 🔍 Pillar 2
                             ]);
 
-                            const finalContext = `${lspContext}\n\n${astContext}\n\n${hybridContext}\n\n${styleGuide}`;
+                            const requirementInjection = this._activeRequirements ? `\n\n--- 📋 STRICT BUSINESS REQUIREMENTS ---\nYou must follow these rules absolutely:\n${this._activeRequirements}\n-----------------------------------\n` : "";
+                            const designInjection = this._activeDesign ? `\n\n--- 🏗️ SYSTEM ARCHITECTURE & DESIGN ---\nYou must follow this technical design strictly:\n${this._activeDesign}\n-----------------------------------\n` : "";
+
+                            const finalContext = `${lspContext}\n\n${astContext}\n\n${hybridContext}\n\n${styleGuide}${requirementInjection}${designInjection}`;
 
                             const result = await askQwenForStructure(fullPrompt, finalContext);
 
-                            // Stream the explanation to the UI
                             this._view?.webview.postMessage({ type: 'chatToken', token: result.explanation + "\n\n" });
 
                             const rootSearchPath = this._isMetaMode ? this._extensionUri.fsPath : undefined;
@@ -287,8 +550,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 let updatedTask = task;
                                 renamingMap.forEach((realPath, plannedPath) => {
                                     const plannedName = path.basename(plannedPath);
-                                    if (updatedTask.includes(plannedPath)) updatedTask = updatedTask.replace(plannedPath, realPath);
-                                    else if (updatedTask.includes(plannedName)) updatedTask = updatedTask.replace(plannedName, `${plannedName} (found at ${realPath})`);
+                                    if (typeof updatedTask === 'string') {
+                                        if (updatedTask.includes(plannedPath)) updatedTask = updatedTask.replace(plannedPath, realPath);
+                                        else if (updatedTask.includes(plannedName)) updatedTask = updatedTask.replace(plannedName, `${plannedName} (found at ${realPath})`);
+                                    }
                                 });
                                 return updatedTask;
                             });
@@ -304,7 +569,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Gathering context..." });
 
                             const workspacePath = await this.getTargetContext();
-                            const ragContext = await await retrieveHybridContext(data.text, 5);
+                            // 🔥 Fixed double await syntax error!
+                            const ragContext = await retrieveHybridContext(data.text, 5);
 
                             let openFilesContext = "";
                             vscode.workspace.textDocuments.forEach(doc => {
@@ -351,8 +617,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-
-
                 case "cancelTask": {
                     if (this._activeTaskController) {
                         this._activeTaskController.abort();
@@ -360,15 +624,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: "⚠️ Task cancelled by user." });
 
-                        // 🔥 AUTO-CLEAR STATUS AFTER 3 SECONDS
                         setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 3000);
 
                         vscode.window.showWarningMessage("NexusCode: Generation Stopped.");
                     }
                     break;
                 }
+
                 case "executeTask": {
+                    // 🔥 CRITICAL FIX: The Hidden Meta-Payload Routing!
+                    const taskQuery = data.prompt || data.task;
                     console.log(`\n\n[DEBUG-EXEC] 🚀 STARTING EXECUTION FOR TASK: "${data.task}"`);
+
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) return;
 
@@ -376,7 +643,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
                     const projectStructure = await getProjectContext(contextRoot);
 
-                    const lowerTask = data.task.toLowerCase();
+                    const lowerTask = taskQuery.toLowerCase();
                     const isReadOnly = (lowerTask.startsWith("open") || lowerTask.startsWith("locate")) && !lowerTask.includes("fix");
                     this._activeTaskController = new AbortController();
 
@@ -401,24 +668,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'heal', description: `Retrying (Attempt ${attempt}/${MAX_RETRIES})...` });
                                 }
 
-                                // 🔥 Kiro-Level 3-Pillar Context Engine
+                                // 🔥 Use taskQuery for AI operations, keep data.task for UI updates!
                                 const [lspContext, styleGuide, astContext, hybridContext] = await Promise.all([
-                                    getLspContext(data.task),
+                                    getLspContext(taskQuery),
                                     getProjectStyleGuides(),
-                                    getSmartASTContext(data.task),       // 🌳 Pillar 1
-                                    retrieveHybridContext(data.task, 5)  // 🔍 Pillar 2
+                                    getSmartASTContext(taskQuery),       // 🌳 Pillar 1
+                                    retrieveHybridContext(taskQuery, 5)  // 🔍 Pillar 2
                                 ]);
 
-                                const smartContext = await runAgenticExploration(data.task, rootUri.fsPath, (stepType, description, details) => {
+                                const smartContext = await runAgenticExploration(taskQuery, rootUri.fsPath, (stepType, description, details) => {
                                     webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType, description, details });
                                 });
 
                                 let targetFilepath = "";
-                                const explicitPathMatch = data.task.match(/[a-zA-Z0-9_\-\/\\]+\.[a-zA-Z0-9]+/);
+                                const explicitPathMatch = taskQuery.match(/[a-zA-Z0-9_\-\/\\]+\.[a-zA-Z0-9]+/);
 
                                 if (isReadOnly && explicitPathMatch) targetFilepath = explicitPathMatch[0];
                                 else {
-                                    const targetInfo = await askQwenForTargetFile(data.task, projectStructure, this._lastActiveFile);
+                                    const targetInfo = await askQwenForTargetFile(taskQuery, projectStructure, this._lastActiveFile);
                                     targetFilepath = targetInfo.filepath;
                                 }
 
@@ -443,11 +710,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     currentFileContent = new TextDecoder().decode(fileData);
                                     fileExists = true;
                                 } catch { }
-                                const feedbackInjection = data.feedback ? 
+
+                                const feedbackInjection = data.feedback ?
                                     `\n\n⚠️ CRITICAL USER FEEDBACK FROM PREVIOUS REJECTION:\n"${data.feedback}"\nDo NOT repeat your previous mistakes. Incorporate this feedback perfectly.` : "";
 
+                                const requirementInjection = this._activeRequirements ? `\n\n--- 📋 STRICT BUSINESS REQUIREMENTS ---\nYou must follow these rules absolutely:\n${this._activeRequirements}\n-----------------------------------\n` : "";
+                                const designInjection = this._activeDesign ? `\n\n--- 🏗️ SYSTEM ARCHITECTURE & DESIGN ---\nYou must follow this technical design strictly:\n${this._activeDesign}\n-----------------------------------\n` : "";
+
                                 // Combine all context pillars!
-                                const promptContext = `--- AUTONOMOUSLY GATHERED CONTEXT ---\n${smartContext}\n${astContext}\n${hybridContext}\nTarget File: ${realFilepath}\nContent:\n\`\`\`\n${currentFileContent.substring(0, 15000)}\n\`\`\`\nFile Exists: ${fileExists}\n${lspContext}\n${styleGuide}`;
+                                const promptContext = `--- AUTONOMOUSLY GATHERED CONTEXT ---\n${smartContext}\n${astContext}\n${hybridContext}\nTarget File: ${realFilepath}\nContent:\n\`\`\`\n${currentFileContent.substring(0, 15000)}\n\`\`\`\nFile Exists: ${fileExists}\n${lspContext}\n${styleGuide}${feedbackInjection}${requirementInjection}${designInjection}`;
 
                                 this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Speculative Execution (Shadow Compiling)...` });
                                 webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: 'Speculative Execution', details: `Drafting ${realFilepath} in background...` });
@@ -463,7 +734,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 // 👻 PHASE 1: SHADOW GENERATION
                                 // =====================================================================
                                 await streamQwenForCode(
-                                    data.task, [], promptContext, data.codingStyle, [],
+                                    taskQuery, [], promptContext, data.codingStyle, [],
                                     {
                                         onReasoning: async (token: string) => {
                                             this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: token });
@@ -472,15 +743,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                             streamAction = !fileExists ? 'replace' : action;
                                             streamTarget = target || '';
                                         },
+                                        onCommand: async (cmd: string) => {
+                                            generatedCommand = cmd; // 🔥 Dedicated route! Never touches the file buffer!
+                                        },
                                         onToken: async (token: string) => {
-                                            if (token.includes('<command>')) {
-                                                const match = token.match(/<command>(.*?)<\/command>/s);
-                                                if (match) generatedCommand = match[1];
-                                            }
                                             const cleanToken = token.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').replace(/<\/code>/g, '').replace(/<\/code/g, '');
                                             shadowCodeBuffer += cleanToken;
-
-                                            // Stream the code into the Reasoning panel so the user can watch it write invisibly
                                             this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: cleanToken });
                                         }
                                     },
@@ -564,6 +832,71 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     b.insert(new vscode.Position(0, 0), mergedHeader + finalPerfectCode);
                                 });
 
+                                await document.save(); // 🔥 Force save so TS Server can scan it!
+
+                                // =====================================================================
+                                // 🔄 PHASE 4: THE TDD AUTO-LOOP (Live Post-Save Verification)
+                                // =====================================================================
+                                webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: 'TDD Post-Check', details: `Scanning editor for TypeScript errors...` });
+
+                                // Wait 2.5 seconds for VS Code's Language Server to fully analyze the file
+                                await new Promise(resolve => setTimeout(resolve, 2500));
+
+                                const liveDiagnostics = vscode.languages.getDiagnostics(fileUri);
+                                const liveErrors = liveDiagnostics.filter(d => d.severity === vscode.DiagnosticSeverity.Error);
+
+                                // Filter out "Phantom Imports" (error 2307) for local files, because they just haven't been generated yet!
+                                const realSyntaxErrors = liveErrors.filter(e => {
+                                    const isPhantomImport = (e.code === 2307 || e.message.includes("Cannot find module")) && e.message.includes('./');
+                                    return !isPhantomImport;
+                                });
+
+                                if (realSyntaxErrors.length > 0) {
+                                    webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'heal', description: 'TDD Auto-Heal Triggered', details: `Caught ${realSyntaxErrors.length} live syntax errors! Rewriting...` });
+
+                                    const errorLog = realSyntaxErrors.map(e => `[Line ${e.range.start.line + 1}] ${e.message}`).join('\n');
+                                    
+                                    let languageSpecificFixes = "";
+                                    const ext = path.extname(realFilepath).toLowerCase();
+                                    
+                                    if (ext === '.ts' || ext === '.tsx' || ext === '.js') {
+                                        languageSpecificFixes = "1. If you appended '.ts'/'.js' to an import, REMOVE IT.\n2. If you used 'require', switch to ES6 imports.";
+                                    } else if (ext === '.py') {
+                                        languageSpecificFixes = "1. Ensure strict PEP8 indentation.\n2. Check for missing imports or undefined variables.";
+                                    } else {
+                                        languageSpecificFixes = "1. Fix the syntax/compilation errors exactly as reported by the compiler.";
+                                    }
+
+                                    // 🔥 ANTI-DELETION PROTOCOL ADDED
+                                    const healContext = `The code you just wrote has the following live compilation/syntax errors in the editor:\n\n${errorLog}\n\nCRITICAL FIX INSTRUCTIONS:\n${languageSpecificFixes}\n\n🔥 ANTI-DELETION PROTOCOL 🔥\nYou MUST output the ENTIRE, unmodified file content with ONLY the syntax errors fixed. DO NOT delete, summarize, or remove ANY existing middleware, routes, or business logic! Output the COMPLETELY FIXED file from start to finish.`;
+
+                                    let healedCodeBuffer = "";
+                                    await streamQwenForCode("Fix Live Compilation Errors", [], healContext, data.codingStyle, [], {
+                                        onSetup: async () => { },
+                                        onCommand: async (cmd: string) => {
+                                            generatedCommand = cmd; 
+                                        },
+                                        onToken: async (token: string) => {
+                                            const cleanToken = token.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').replace(/<\/code>/g, '').replace(/<\/code/g, '');
+                                            healedCodeBuffer += cleanToken;
+                                            this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: cleanToken });
+                                        }
+                                    }, this._activeTaskController?.signal);
+
+                                    await editor.edit(b => {
+                                        const finalLine = Math.max(0, document.lineCount - 1);
+                                        const finalChar = document.lineCount > 0 ? document.lineAt(finalLine).text.length : 0;
+                                        b.delete(new vscode.Range(0, 0, finalLine, finalChar));
+                                        b.insert(new vscode.Position(0, 0), mergedHeader + healedCodeBuffer);
+                                    });
+                                    await document.save();
+                                    
+                                    finalPerfectCode = healedCodeBuffer; 
+                                    webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'success', description: 'TDD Auto-Heal Passed', details: `Syntax errors resolved autonomously.` });
+                                } else {
+                                    webviewView.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'success', description: 'TDD Post-Check Passed', details: `Zero syntax errors detected.` });
+                                }
+
                                 const finalSafeLine = Math.max(0, editor.document.lineCount - 1);
                                 let status = this._tracker?.trackStreamedReview(editor, currentFileContent, data.task, 0, finalSafeLine) || "reviewing";
 
@@ -571,7 +904,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                                 if (generatedCommand) await this.confirmAndRunCommand(generatedCommand, rootUri.fsPath, `Running command...`);
 
-                                // 🔥 Telemetry Calculation & Formatting
                                 const waitTime = ((streamStartTime - taskStartTime) / 1000).toFixed(1);
                                 const genTime = ((streamEndTime - streamStartTime) / 1000).toFixed(1);
                                 const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
@@ -583,6 +915,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     filepath: realFilepath,
                                     summary: `Updated ${realFilepath} (Wait: ${waitTime}s | Gen: ${genTime}s | Total: ${totalTime}s)`
                                 });
+
+                                try {
+                                    const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                                    const tasksMdUri = vscode.Uri.joinPath(nexusDir, 'tasks.md');
+                                    let mdContent = new TextDecoder().decode(await vscode.workspace.fs.readFile(tasksMdUri));
+                                    // Check off the task whether it's bolded or plain text
+                                    mdContent = mdContent.replace(`[ ] **${data.task}**`, `[x] **${data.task}**`);
+                                    mdContent = mdContent.replace(`[ ] ${data.task}`, `[x] ${data.task}`);
+                                    await vscode.workspace.fs.writeFile(tasksMdUri, Buffer.from(mdContent, 'utf8'));
+                                } catch (e) {
+                                    console.warn("[DEBUG] Could not auto-update tasks.md");
+                                }
+
+                                // 🔥 ENHANCEMENT A: The Living PRD Engine (Auto-Code execution)
+                                try {
+                                    if (this._activeRequirements) {
+                                        this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus QA: Scanning code to update Living PRD...` });
+
+                                        const reqMdUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'requirements.md');
+                                        let currentPRD = this._activeRequirements;
+
+                                        const prdUpdates = await askQwenToUpdatePRD(currentPRD, data.task, realFilepath, finalPerfectCode);
+
+                                        if (prdUpdates.length > 0) {
+                                            prdUpdates.forEach(update => {
+                                                // Surgically replace unchecked boxes with checked ones
+                                                currentPRD = currentPRD.replace(update.original, update.updated);
+                                            });
+
+                                            await vscode.workspace.fs.writeFile(reqMdUri, Buffer.from(currentPRD, 'utf8'));
+                                            this._activeRequirements = currentPRD; // Update memory
+
+                                            // Tell UI it was successful
+                                            this._view?.webview.postMessage({ type: 'statusUpdate', message: `✅ Living PRD Updated (${prdUpdates.length} criteria met)` });
+                                            setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 4000);
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.warn("[DEBUG] Living PRD QA check failed", e);
+                                }
 
                                 success = true; // Break the retry loop!
 
@@ -616,7 +988,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
 
                 case "searchFiles": {
-                    // Search workspace matching the query, ignore node_modules, max 10 results
                     const files = await vscode.workspace.findFiles(`**/*${data.query}*`, '{**/node_modules/**,**/.git/**,**/dist/**}', 10);
                     const results = files.map(f => vscode.workspace.asRelativePath(f));
                     webviewView.webview.postMessage({ type: 'searchResults', results });
@@ -816,10 +1187,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-                case "toggleMetaMode": {
-                    this.toggleMetaMode();
-                    break;
-                }
                 case "requestModels": {
                     const models = await getAvailableModels();
                     const currentModel = vscode.workspace.getConfiguration('nexuscode').get<string>('model');
@@ -845,4 +1212,4 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "webview-ui", "build", "assets", "style.css"));
         return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><link href="${styleUri}" rel="stylesheet"></head><body><div id="root"></div><script type="module" src="${scriptUri}"></script></body></html>`;
     }
-}
+} 
