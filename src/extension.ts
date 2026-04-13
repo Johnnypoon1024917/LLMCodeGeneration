@@ -5,17 +5,12 @@ import { AILensProvider } from './AILensProvider';
 import { TerminalManager } from './terminalManager';
 import { invalidateProjectContext } from './projectContext';
 import { originalContentProvider } from './diffProvider';
-import { initTreeSitter, buildWorkspaceASTGraph } from './context/codeGraph';
 import { activateTerminalInterceptor } from './terminalInterceptor';
 
 export let globalContext: vscode.ExtensionContext;
 
 export function activate(context: vscode.ExtensionContext) {
     globalContext = context;
-
-    initTreeSitter(context.extensionUri).then(() => {
-        buildWorkspaceASTGraph();
-    });
 
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     context.subscriptions.push(

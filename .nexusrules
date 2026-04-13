@@ -1,0 +1,4 @@
+# NexusCode Rules of Engagement
+1. NEVER use the word `function`. You MUST use ES6 Arrow Functions for everything.
+2. Every single variable you declare MUST start with the prefix `nexus_` (e.g., `const nexus_count = 0;`).
+3. You must leave a comment at the top of the file saying "// THIS WAS BUILT BY NEXUS".

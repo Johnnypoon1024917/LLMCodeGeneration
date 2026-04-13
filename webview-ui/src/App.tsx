@@ -1,7 +1,8 @@
 // webview-ui/src/App.tsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import './App.css';
 import ReactMarkdown from 'react-markdown';
+import ForceGraph3D from 'react-force-graph-3d';
 
 const vscode = (window as any).acquireVsCodeApi();
 let chatTokenBuffer = "";
@@ -9,31 +10,29 @@ let lastChatUpdate = Date.now();
 let reasoningTokenBuffer = "";
 let lastReasoningUpdate = Date.now();
 
-let chatTokenTimer: any = null;
-let reasoningTokenTimer: any = null;
-
 interface ProjectTask {
     step: string;
     file: string;
     detailedInstructions: string;
+    relatedRequirement: string;
+}
+
+interface AIPlan {
+    folderStructure: string[];
+    implementationTasks: (string | ProjectTask)[];
 }
 
 interface Message {
     role: 'user' | 'assistant';
     content?: string;
-    // 🔥 Upgrade this to accept both strings AND ProjectTasks!
-    plan?: { folderStructure: string[]; implementationTasks: (string | ProjectTask)[]; };
+    plan?: AIPlan;
     attachments?: AttachedContext[];
 }
 
 interface AttachedContext { file: string; code: string; language: string; }
-
 interface AtomicEdit { filepath: string; code: string; action: 'replace' | 'append' | 'inject'; target?: string; }
-
 interface AgentStep { type: string; description: string; details?: string; }
 
-
-// --- Reusable SVG Icons ---
 const Icons = {
     User: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>,
     Nexus: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"></rect><circle cx="12" cy="5" r="2"></circle><path d="M12 7v4"></path><line x1="8" y1="16" x2="8" y2="16"></line><line x1="16" y1="16" x2="16" y2="16"></line></svg>,
@@ -42,10 +41,23 @@ const Icons = {
     UpArrow: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>,
     Brain: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"></path><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"></path><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"></path><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"></path><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"></path><path d="M3.477 10.896a4 4 0 0 1 .585-.396"></path><path d="M19.938 10.5a4 4 0 0 1 .585.396"></path><path d="M6 18a4 4 0 0 1-1.967-.516"></path><path d="M19.967 17.484A4 4 0 0 1 18 18"></path></svg>,
     Loader: <svg className="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="4.93" x2="19.07" y2="7.76"></line></svg>,
-    Eye: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+    Eye: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>,
+    Plus: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>,
+    Trash: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>,
+    Search: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>,
+    Read: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>,
+    Code: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>,
+    Alert: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>,
+    Wrench: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>,
+    CheckCircle: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>,
+    Build: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>,
+    Refresh: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>,
 };
 
 export default function App() {
+    const chatTokenTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const reasoningTokenTimerRef = useRef<NodeJS.Timeout | null>(null);
+
     const [taskSteps, setTaskSteps] = useState<Record<string, AgentStep[]>>({});
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
@@ -53,6 +65,7 @@ export default function App() {
     const [loading, setLoading] = useState(false);
     const [agentStatus, setAgentStatus] = useState<string>('');
     const [codingStyle, setCodingStyle] = useState('precise');
+    const codingStyleRef = useRef('precise');
     const [taskStatuses, setTaskStatuses] = useState<Record<string, string>>({});
     const [taskSummaries, setTaskSummaries] = useState<Record<string, string>>({});
     const [taskFiles, setTaskFiles] = useState<Record<string, string>>({});
@@ -61,28 +74,139 @@ export default function App() {
     const [selectedModel, setSelectedModel] = useState<string>('');
     const [pendingEdits, setPendingEdits] = useState<AtomicEdit[] | null>(null);
     const [metaMode, setMetaMode] = useState(false);
+    const [specTimer, setSpecTimer] = useState(0);
+
     const [attachedContexts, setAttachedContexts] = useState<AttachedContext[]>([]);
+    const [builderContexts, setBuilderContexts] = useState<AttachedContext[]>([]);
+    const searchTargetRef = useRef<'coder' | 'builder'>('coder');
+
     const [isLoaded, setIsLoaded] = useState(false);
     const [mentionQuery, setMentionQuery] = useState('');
     const [mentionResults, setMentionResults] = useState<string[]>([]);
     const [showMentionMenu, setShowMentionMenu] = useState(false);
-    const [hasApiKey, setHasApiKey] = useState(false);
+
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchResults, setSearchResults] = useState<string[]>([]);
+    const [isSearching, setIsSearching] = useState(false);
+
     const chatEndRef = useRef<HTMLDivElement>(null);
-    const [activeTab, setActiveTab] = useState<'coder' | 'requirements'>('coder');
+    const sessionStoreRef = useRef<Record<string, { messages: Message[], taskSteps: Record<string, AgentStep[]>, taskReasoning: Record<string, string> }>>({});
+    
+    const currentStateRef = useRef({ messages, taskSteps, taskReasoning });
+    useEffect(() => {
+        currentStateRef.current = { messages, taskSteps, taskReasoning };
+    }, [messages, taskSteps, taskReasoning]);
+
+    const [activeTab, setActiveTab] = useState<'coder' | 'builder' | 'rules'>('coder');
+    const [nexusRules, setNexusRules] = useState<string>('');
     const [requirements, setRequirements] = useState<string>('');
     const [rawIdea, setRawIdea] = useState<string>('');
     const [isGeneratingReqs, setIsGeneratingReqs] = useState(false);
     const [reqLogs, setReqLogs] = useState<string[]>([]);
     const [isEditingReqs, setIsEditingReqs] = useState(false);
 
-
     const [design, setDesign] = useState<string>('');
     const [isGeneratingDesign, setIsGeneratingDesign] = useState(false);
     const [isEditingDesign, setIsEditingDesign] = useState(false);
     const [isGeneratingTasks, setIsGeneratingTasks] = useState(false);
 
+    const [activePlan, setActivePlan] = useState<AIPlan | null>(null);
+
+    // 📊 Graph Visualizer State
+    const [showGraph, setShowGraph] = useState(false);
+    const [graphData, setGraphData] = useState<Record<string, any> | null>(null);
+
+    const graphContainerRef = useRef<HTMLDivElement>(null);
+    const [graphDims, setGraphDims] = useState({ width: 800, height: 600 });
+
+    const [isAutopilot, setIsAutopilot] = useState(false);
+    const [sessions, setSessions] = useState<{ id: string, name: string }[]>([{ id: '1', name: 'New Session' }]);
+    const [activeSessionId, setActiveSessionId] = useState('1');
+
+
+    useEffect(() => {
+        if (!showGraph || !graphContainerRef.current) return;
+        
+        const resizeObserver = new ResizeObserver(entries => {
+            for (let entry of entries) {
+                setGraphDims({
+                    width: entry.contentRect.width,
+                    height: entry.contentRect.height
+                });
+            }
+        });
+        
+        resizeObserver.observe(graphContainerRef.current);
+        return () => resizeObserver.disconnect();
+    }, [showGraph]);
+
+    // 🔥 NEW: The 3D Data Transformer
+    const visualGraphData = useMemo(() => {
+        if (!graphData) return { nodes: [], links: [] };
+
+        const nodes: any[] = [];
+        const links: any[] = [];
+        const nodeSet = new Set<string>();
+
+        // 1. Create all internal file nodes
+        Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
+            const folder = filepath.split('/')[0] || 'root';
+            // Size the sphere based on how many things it exports!
+            const size = (node.exports?.length || 0) * 2 + (node.classes?.length || 0) * 3 + 2;
+
+            nodes.push({ id: filepath, name: filepath, group: folder, val: size });
+            nodeSet.add(filepath);
+        });
+
+        // 2. Create the dependency links (and external library nodes)
+        Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
+            node.imports?.forEach((imp: string) => {
+                const cleanImp = imp.replace(/['"]/g, '');
+
+                // Try to find if this import points to an internal file we mapped
+                let target = Object.keys(graphData).find(k => k.includes(cleanImp.replace('./', '').replace('../', '')));
+
+                // If not, it's an external library (like 'express' or 'react')! Map it as an external node.
+                if (!target) {
+                    target = cleanImp;
+                    if (!nodeSet.has(target)) {
+                        nodes.push({ id: target, name: target, group: 'external_lib', val: 1 });
+                        nodeSet.add(target);
+                    }
+                }
+
+                links.push({ source: filepath, target: target });
+            });
+        });
+
+        return { nodes, links };
+    }, [graphData]);
+
+    useEffect(() => { codingStyleRef.current = codingStyle; }, [codingStyle]);
+
     useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, agentStatus]);
-    useEffect(() => { vscode.postMessage({ type: 'requestModels' }); }, []);
+
+    useEffect(() => {
+        // 🔥 THE HANDSHAKE: Tell the backend we are alive, even after a refresh!
+        vscode.postMessage({ type: 'webviewReady' });
+        vscode.postMessage({ type: 'requestModels' });
+    }, []);
+
+    useEffect(() => {
+        let interval: NodeJS.Timeout;
+        if (isGeneratingReqs || isGeneratingDesign || isGeneratingTasks) {
+            interval = setInterval(() => setSpecTimer(t => t + 1), 1000);
+        } else {
+            setSpecTimer(0); // Reset when done/cancelled
+        }
+        return () => clearInterval(interval);
+    }, [isGeneratingReqs, isGeneratingDesign, isGeneratingTasks]);
+
+    const formatTime = (sec: number) => {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return `${m}:${s < 10 ? '0' : ''}${s}`;
+    };
 
     useEffect(() => {
         const messageHandler = (event: MessageEvent) => {
@@ -92,13 +216,18 @@ export default function App() {
                 setActiveTab('coder');
             }
 
+            if (data.type === 'workspaceGraphData') {
+                setGraphData(data.data);
+                setShowGraph(true);
+            }
+
             if (data.type === 'startRevision') {
                 const { task, feedback } = data;
                 setTaskStatuses(prev => ({ ...prev, [task]: 'reviewing' }));
                 setTaskSummaries(prev => ({ ...prev, [task]: 'Revising based on feedback...' }));
                 setTaskSteps(prev => ({ ...prev, [task]: [] }));
                 setTaskReasoning(prev => ({ ...prev, [task]: '' }));
-                vscode.postMessage({ type: 'executeTask', task: task, codingStyle, feedback: feedback });
+                vscode.postMessage({ type: 'executeTask', task: task, codingStyle: codingStyleRef.current, feedback: feedback });
             }
 
             if (data.type === 'injectTerminalTask') {
@@ -108,7 +237,7 @@ export default function App() {
                 { role: 'assistant', content: "I am analyzing your terminal crash right now. Hang tight..." }
                 ]);
                 setTaskStatuses(prev => ({ ...prev, [terminalTask]: 'reviewing' }));
-                vscode.postMessage({ type: 'executeTask', task: terminalTask, codingStyle: codingStyle });
+                vscode.postMessage({ type: 'executeTask', task: terminalTask, codingStyle: codingStyleRef.current });
             }
 
             if (data.type === 'agentStep') {
@@ -117,16 +246,40 @@ export default function App() {
                     [data.task]: [...(prev[data.task] || []), { type: data.stepType, description: data.description, details: data.details }]
                 }));
             }
+
             if (data.type === 'searchResults') {
-                setMentionResults(data.results);
+                // If the user typed "@App.tsx:50-100", extract the ":50-100" part
+                const lineMatch = data.originalQuery?.match(/:\d+(?:-\d+)?$/);
+                const suffix = lineMatch ? lineMatch[0] : '';
+
+                // Append the line range to the actual file results so the user can click it
+                const updatedResults = data.results.map((r: string) => r + suffix);
+
+                setMentionResults(updatedResults);
+                setSearchResults(updatedResults);
             }
+
             if (data.type === 'addContext') {
-                setAttachedContexts(prev => {
-                    if (prev.some(c => c.file === data.file && c.code === data.code)) return prev;
-                    return [...prev, { file: data.file, code: data.code, language: data.language }];
-                });
-                setTimeout(() => document.getElementById('chat-input')?.focus(), 100);
+                if (searchTargetRef.current === 'coder') {
+                    setAttachedContexts(prev => {
+                        if (prev.some(c => c.file === data.file && c.code === data.code)) return prev;
+                        return [...prev, { file: data.file, code: data.code, language: data.language }];
+                    });
+                    setTimeout(() => document.getElementById('chat-input')?.focus(), 100);
+                } else {
+                    setBuilderContexts(prev => {
+                        if (prev.some(c => c.file === data.file && c.code === data.code)) return prev;
+                        return [...prev, { file: data.file, code: data.code, language: data.language }];
+                    });
+                }
+                setSearchQuery('');
+                setSearchResults([]);
+                setIsSearching(false);
+                setMentionQuery('');
+                setMentionResults([]);
+                setShowMentionMenu(false);
             }
+
             if (data.type === 'insertText') {
                 setInput(prev => prev + (prev.length > 0 && !prev.endsWith('\n') ? '\n' : '') + data.text);
                 setTimeout(() => {
@@ -134,6 +287,7 @@ export default function App() {
                     if (el) { el.focus(); el.scrollTop = el.scrollHeight; }
                 }, 100);
             }
+
             if (data.type === 'addUserMessageAndSubmit') {
                 const displayContent = `${data.text}\n\n*(Attached from Editor)*\n${data.context || ''}`;
                 setMessages(prev => [...prev, { role: 'user', content: displayContent }]);
@@ -142,48 +296,72 @@ export default function App() {
                     type: 'processUserMessage',
                     text: data.text,
                     context: data.context,
-                    codingStyle: 'precise'
+                    codingStyle: codingStyleRef.current,
+                    autopilot: isAutopilot
                 });
             }
+
             if (data.type === 'initState') {
-                setMessages(data.messages || []);
+                const loadedMsgs = data.messages || [];
                 setHasKey(data.hasKey);
                 if (data.taskStatuses) setTaskStatuses(data.taskStatuses);
                 if (data.taskSummaries) setTaskSummaries(data.taskSummaries);
                 if (data.taskFiles) setTaskFiles(data.taskFiles);
-                setIsLoaded(true);
                 if (data.requirements) setRequirements(data.requirements);
                 if (data.design) setDesign(data.design);
+                if (data.nexusRules) setNexusRules(data.nexusRules);
 
-                if (data.tasks && data.messages.length === 0) {
-                    setMessages([{
-                        role: 'assistant',
-                        content: "Welcome back! I found your existing master implementation plan. You can execute tasks autonomously, or code them yourself and ask me to verify them.",
-                        plan: data.tasks
-                    }]);
+                if (data.tasks) {
+                    setActivePlan(data.tasks);
+                    const hasPlan = loadedMsgs.some((m: Message) => m.plan);
+                    if (!hasPlan) {
+                        setMessages([...loadedMsgs, {
+                            role: 'assistant',
+                            content: "Welcome back! Here is your active implementation plan. You can execute tasks autonomously, or code them yourself and ask me to verify them.",
+                            plan: data.tasks
+                        }]);
+                    } else {
+                        setMessages(loadedMsgs);
+                    }
+                } else {
+                    setMessages(loadedMsgs);
                 }
+
+                setTimeout(() => setIsLoaded(true), 100);
             }
-            if (data.type === 'requirementsGenerated') {
+
+            if (data.type === 'requirementsUpdated' || data.type === 'requirementsGenerated') {
                 setRequirements(data.text);
-                setIsGeneratingReqs(false);
+                if (data.type === 'requirementsGenerated') setIsGeneratingReqs(false);
             }
+
             if (data.type === 'designGenerated') {
                 setDesign(data.text);
                 setIsGeneratingDesign(false);
             }
+
             if (data.type === 'reqStep') {
                 setReqLogs(prev => [...prev, data.message]);
             }
-            if (data.type === 'requirementsGenerated') {
-                setRequirements(data.text);
+
+            if (data.type === 'generationFailed') {
                 setIsGeneratingReqs(false);
+                setIsGeneratingDesign(false);
+                setIsGeneratingTasks(false);
             }
+
             if (data.type === 'updateModelsList') {
                 setAvailableModels(data.models);
                 if (data.currentModel && data.models.includes(data.currentModel)) setSelectedModel(data.currentModel);
                 else if (data.models.length > 0) setSelectedModel(data.models[0]);
             }
-            if (data.type === 'structureResponse') { setMessages(prev => [...prev, { role: 'assistant', plan: data.value }]); setLoading(false); }
+
+            if (data.type === 'structureResponse') {
+                setActivePlan(data.value);
+                setMessages(prev => [...prev, { role: 'assistant', plan: data.value }]);
+                setLoading(false);
+            }
+
             if (data.type === 'statusUpdate') setAgentStatus(data.message);
             if (data.type === 'reviewEdits') { setPendingEdits(data.edits); setLoading(false); }
             if (data.type === 'allTasksCompleted') {
@@ -197,13 +375,14 @@ export default function App() {
                 if (data.filepath) setTaskFiles(prev => ({ ...prev, [data.task]: data.filepath }));
                 if (data.status === 'error') setLoading(false);
             }
+
             if (data.type === 'streamReasoning') {
                 reasoningTokenBuffer += data.token;
-                if (!reasoningTokenTimer) {
-                    reasoningTokenTimer = setTimeout(() => {
+                if (!reasoningTokenTimerRef.current) {
+                    reasoningTokenTimerRef.current = setTimeout(() => {
                         const flush = reasoningTokenBuffer;
                         reasoningTokenBuffer = "";
-                        reasoningTokenTimer = null;
+                        reasoningTokenTimerRef.current = null;
                         setTaskReasoning(prev => ({
                             ...prev, [data.task]: (prev[data.task] || '') + flush
                         }));
@@ -215,18 +394,19 @@ export default function App() {
                 setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
                 setLoading(false);
             }
+
             if (data.type === 'chatToken') {
                 chatTokenBuffer += data.token;
-                if (!chatTokenTimer) {
-                    chatTokenTimer = setTimeout(() => {
+                if (!chatTokenTimerRef.current) {
+                    chatTokenTimerRef.current = setTimeout(() => {
                         const flush = chatTokenBuffer;
                         chatTokenBuffer = "";
-                        chatTokenTimer = null;
+                        chatTokenTimerRef.current = null;
                         setMessages(prev => {
                             const newMessages = [...prev];
                             const lastIdx = newMessages.length - 1;
                             if (newMessages[lastIdx] && newMessages[lastIdx].role === 'assistant') {
-                                newMessages[lastIdx].content += flush;
+                                newMessages[lastIdx].content = (newMessages[lastIdx].content || "") + flush;
                             }
                             return newMessages;
                         });
@@ -252,6 +432,8 @@ export default function App() {
             });
         }
     }, [messages, taskStatuses, taskSummaries, taskFiles, hasKey, isLoaded]);
+
+    if (!isLoaded) return <div style={{ padding: '20px', textAlign: 'center', color: 'var(--nexus-subtext)' }}>Loading Nexus...</div>;
 
     if (!hasKey) {
         return (
@@ -288,7 +470,7 @@ export default function App() {
             type: 'processUserMessage',
             text: finalQuery,
             context: contextStr,
-            codingStyle
+            codingStyle: codingStyleRef.current
         });
 
         setInput('');
@@ -322,11 +504,55 @@ export default function App() {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
     };
 
+    const handleClearHistory = () => {
+        vscode.postMessage({ type: 'clearHistory' });
+        
+        // 1. Reset the chat bubbles
+        if (activePlan) {
+            setMessages([{ role: 'assistant', content: "Conversation cleared. Active Implementation Plan preserved:", plan: activePlan }]);
+        } else {
+            setMessages([]);
+        }
+
+        // 2. Wipe the Ghost UI cards
+        setTaskSteps({});
+        setTaskReasoning({});
+        setTaskStatuses({}); 
+        setTaskSummaries({}); 
+        setTaskFiles({});    
+        
+        // 3. Wipe the multi-session memory and reset to a single tab
+        sessionStoreRef.current = {};
+        setSessions([{ id: '1', name: 'New Session' }]);
+        setActiveSessionId('1');
+    };
+
+    const switchSession = (newId: string) => {
+        if (newId === activeSessionId) return;
+
+        sessionStoreRef.current[activeSessionId] = currentStateRef.current;
+
+        // 2. Retrieve the next state (or initialize a fresh one if it's new)
+        const nextState = sessionStoreRef.current[newId] || {
+            messages: activePlan ? [{ role: 'assistant', content: "New session started. Active Implementation Plan preserved:", plan: activePlan }] : [],
+            taskSteps: {},
+            taskReasoning: {}
+        };
+
+        // 3. Mount the state to the UI
+        setMessages(nextState.messages);
+        setTaskSteps(nextState.taskSteps);
+        setTaskReasoning(nextState.taskReasoning);
+        setActiveSessionId(newId);
+    };
+
     return (
         <div className="app-wrapper" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
             <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)', flexShrink: 0 }}>
                 {metaMode ? '⚠️ SELF-EVOLUTION ACTIVE' : 'NexusCode v0.2'}
             </div>
+
+
 
             {/* 🔥 TABS HEADER */}
             <div className="tabs-header" style={{ display: 'flex', borderBottom: '1px solid var(--vscode-widget-border)', flexShrink: 0, marginTop: '5px' }}>
@@ -337,10 +563,24 @@ export default function App() {
                     Vibe
                 </button>
                 <button
-                    style={{ flex: 1, padding: '8px', background: activeTab === 'requirements' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'requirements' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'requirements' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'requirements' ? 'bold' : 'normal' }}
-                    onClick={() => setActiveTab('requirements')}
+                    style={{ flex: 1, padding: '8px', background: activeTab === 'builder' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'builder' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'builder' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'builder' ? 'bold' : 'normal' }}
+                    onClick={() => setActiveTab('builder')}
                 >
                     Spec
+                </button>
+                <button
+                    style={{ flex: 1, padding: '8px', background: activeTab === 'rules' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'rules' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'rules' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'rules' ? 'bold' : 'normal' }}
+                    onClick={() => setActiveTab('rules')}
+                >
+                    Skills
+                </button>
+
+                <button
+                    style={{ padding: '8px 12px', background: 'transparent', border: 'none', color: 'var(--vscode-symbolIcon-classForeground)', cursor: 'pointer' }}
+                    onClick={() => vscode.postMessage({ type: 'requestWorkspaceGraph' })}
+                    title="Visualize Workspace Context Graph"
+                >
+                    🗺️
                 </button>
             </div>
 
@@ -348,6 +588,50 @@ export default function App() {
             {/* 💻 TAB 1: THE CODER (Chat & Execution)                      */}
             {/* ========================================================= */}
             <div style={{ display: activeTab === 'coder' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+                <div style={{ display: 'flex', background: 'var(--vscode-editorGroupHeader-tabsBackground)', overflowX: 'auto', padding: '4px 8px 0 8px', gap: '2px', flexShrink: 0 }}>
+                    {sessions.map(s => (
+                        <div
+                            key={s.id}
+                            style={{
+                                padding: '6px 12px',
+                                background: s.id === activeSessionId ? 'var(--vscode-editor-background)' : 'transparent',
+                                color: s.id === activeSessionId ? 'var(--vscode-tab-activeForeground)' : 'var(--vscode-tab-inactiveForeground)',
+                                borderTop: s.id === activeSessionId ? '2px solid var(--vscode-tab-activeBorderTop)' : '2px solid transparent',
+                                borderTopLeftRadius: '4px', borderTopRightRadius: '4px',
+                                fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer',
+                                minWidth: '100px', justifyContent: 'space-between'
+                            }}
+                            onClick={() => switchSession(s.id)} // 🔥 Triggers the swap engine!
+                        >
+                            <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--vscode-terminal-ansiMagenta)' }}></div>
+                                {s.name}
+                            </span>
+                            <span
+                                style={{ opacity: 0.6, cursor: 'pointer' }}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (sessions.length > 1) {
+                                        const newSessions = sessions.filter(session => session.id !== s.id);
+                                        setSessions(newSessions);
+                                        delete sessionStoreRef.current[s.id]; // Clean up memory
+                                        if (activeSessionId === s.id) {
+                                            switchSession(newSessions[newSessions.length - 1].id); // Fallback to last tab
+                                        }
+                                    }
+                                }}
+                            >×</span>
+                        </div>
+                    ))}
+                    <button
+                        style={{ background: 'transparent', border: 'none', color: 'var(--vscode-tab-inactiveForeground)', cursor: 'pointer', padding: '0 8px', fontSize: '14px' }}
+                        onClick={() => {
+                            const newId = Date.now().toString();
+                            setSessions([...sessions, { id: newId, name: `Session ${sessions.length + 1}` }]);
+                            switchSession(newId); // 🔥 Swap to the new blank state!
+                        }}
+                    >+</button>
+                </div>
 
                 <div className="chat-container" style={{ flex: 1, overflowY: 'auto' }}>
                     {messages.length === 0 && (
@@ -389,60 +673,144 @@ export default function App() {
                                     </div>
                                     <div className="task-list">
                                         {msg.plan.implementationTasks.map((rawTask, tIdx) => {
-                                            // 🔥 THE FIX: Extract the Object properly so React State doesn't break!
                                             const isObj = typeof rawTask !== 'string';
-                                            const taskKey = isObj ? (rawTask as any).step : rawTask;
-                                            const taskTitle = isObj ? (rawTask as any).step : rawTask;
-                                            const taskFile = isObj ? (rawTask as any).file : "";
-                                            // 🔥 NEW: Extract the requirement
-                                            const taskReq = isObj ? (rawTask as any).relatedRequirement : "";
+                                            const taskObj = isObj ? (rawTask as ProjectTask) : null;
 
-                                            // 🔥 Inject it into the Prompt so the LLM checks it while coding!
-                                            const taskPrompt = isObj
-                                                ? `Task: ${(rawTask as any).step}\nTarget File: ${(rawTask as any).file}\nRelated PRD Requirement: ${taskReq}\n\nDetailed Instructions: ${(rawTask as any).detailedInstructions}`
-                                                : rawTask;
+                                            const taskKey = taskObj ? taskObj.step : (rawTask as string);
+                                            const taskTitle = taskObj ? taskObj.step : (rawTask as string);
+                                            const taskFile = taskObj ? taskObj.file : "";
+                                            const taskReq = taskObj ? taskObj.relatedRequirement : "";
+
+                                            const taskPrompt = taskObj
+                                                ? `Task: ${taskObj.step}\nTarget File: ${taskObj.file}\nRelated PRD Requirement: ${taskReq}\n\nDetailed Instructions: ${taskObj.detailedInstructions}`
+                                                : (rawTask as string);
 
                                             const status = taskStatuses[taskKey];
 
                                             return (
                                                 <div key={tIdx} className="task-item" style={{ flexDirection: 'column' }}>
                                                     <div style={{ display: 'flex', width: '100%', gap: '10px' }}>
-                                                        <div className="task-desc">
-                                                            <div style={{ fontWeight: 'bold' }}>{taskTitle}</div>
-                                                            {isObj && <div style={{ fontSize: '11px', color: 'var(--vscode-descriptionForeground)', marginTop: '2px' }}>📄 {taskFile}</div>}
-                                                            {taskSummaries[taskKey] && <div className="task-summary" style={{ marginTop: '4px' }}>{taskSummaries[taskKey]}</div>}
+                                                        <div className="task-desc" style={{ flex: 1 }}>
+                                                            <div style={{ fontWeight: 'bold', fontSize: '13px', color: 'var(--vscode-foreground)' }}>{taskTitle}</div>
+                                                            {taskObj && <div style={{ fontSize: '11px', color: 'var(--vscode-descriptionForeground)', marginTop: '2px', fontFamily: 'monospace' }}>📄 {taskFile}</div>}
+
+                                                            {taskReq && (
+                                                                <div style={{ fontSize: '10.5px', color: 'var(--vscode-textLink-foreground)', fontStyle: 'italic', background: 'var(--vscode-textCodeBlock-background)', padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start', marginTop: '6px', display: 'inline-block' }}>
+                                                                    🔗 Ref: {taskReq}
+                                                                </div>
+                                                            )}
+
+                                                            {taskObj && taskObj.detailedInstructions && (
+                                                                <details style={{ marginTop: '8px', fontSize: '11px', color: 'var(--vscode-descriptionForeground)' }}>
+                                                                    <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none', fontWeight: 'bold', opacity: 0.8 }}>
+                                                                        View Prompt Instructions
+                                                                    </summary>
+                                                                    <div style={{ 
+                                                                        marginTop: '6px', 
+                                                                        padding: '8px 10px', 
+                                                                        borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', 
+                                                                        background: 'var(--vscode-editor-inactiveSelectionBackground)',
+                                                                        whiteSpace: 'pre-wrap',
+                                                                        borderRadius: '0 4px 4px 0',
+                                                                        lineHeight: '1.4'
+                                                                    }}>
+                                                                        {taskObj.detailedInstructions}
+                                                                    </div>
+                                                                </details>
+                                                            )}
+
+                                                            {taskSummaries[taskKey] && (
+                                                                <div className="task-summary" style={{ marginTop: '8px', padding: '6px 8px', background: 'var(--vscode-inputValidation-infoBackground)', border: '1px solid var(--vscode-inputValidation-infoBorder)', borderRadius: '4px', fontSize: '11px', color: 'var(--vscode-foreground)' }}>
+                                                                    ℹ️ {taskSummaries[taskKey]}
+                                                                </div>
+                                                            )}
                                                         </div>
-                                                        <div className="task-status">
+
+
+                                                        <div className="task-status" style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '5px' }}>
                                                             {status === 'reviewing' && <span className="status-pending">⏳ Reviewing</span>}
-                                                            {status === 'approved' && <span className="status-approved">✅ Approved</span>}
+
+                                                            {/* 🔥 KIRO-STYLE SUCCESS BOX */}
+                                                            {status === 'approved' && (
+                                                                <div style={{
+                                                                    padding: '8px 10px',
+                                                                    background: 'var(--vscode-editorWidget-background)',
+                                                                    border: '1px solid var(--vscode-testing-iconPassed)',
+                                                                    borderRadius: '6px',
+                                                                    display: 'flex',
+                                                                    flexDirection: 'column',
+                                                                    gap: '6px',
+                                                                    minWidth: '200px'
+                                                                }}>
+                                                                    <div style={{ display: 'flex', alignItems: 'center', color: 'var(--vscode-testing-iconPassed)', fontWeight: 'bold', gap: '6px', fontSize: '11px' }}>
+                                                                        <span>✓</span> Accepted edits
+                                                                    </div>
+
+                                                                    {taskFiles[taskKey] && (
+                                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--vscode-input-background)', padding: '4px 6px', borderRadius: '4px' }}>
+                                                                            <div
+                                                                                style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '120px' }}
+                                                                                onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}
+                                                                                title={taskFiles[taskKey]}
+                                                                            >
+                                                                                📄 {taskFiles[taskKey].split('/').pop()}
+                                                                            </div>
+
+                                                                            <div style={{ display: 'flex', gap: '8px' }}>
+                                                                                <button
+                                                                                    style={{ background: 'none', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', opacity: 0.7, padding: 0 }}
+                                                                                    onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}
+                                                                                    title="Compare Changes"
+                                                                                >
+                                                                                    ⚖️
+                                                                                </button>
+                                                                                <button
+                                                                                    style={{ background: 'none', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', opacity: 0.7, padding: 0 }}
+                                                                                    onClick={() => {
+                                                                                        vscode.postMessage({ type: 'undoTaskEdit', task: taskKey });
+                                                                                    }}
+                                                                                    title="Undo Edit"
+                                                                                >
+                                                                                    ↩️
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+
+                                                            {/* Handle the Undone state */}
+                                                            {status === 'undone' && (
+                                                                <div style={{ padding: '6px 10px', background: 'var(--vscode-editorWidget-background)', border: '1px dashed var(--vscode-descriptionForeground)', borderRadius: '4px', color: 'var(--vscode-descriptionForeground)', fontSize: '11px' }}>
+                                                                    ⏪ Edit reverted.
+                                                                </div>
+                                                            )}
+
                                                             {status === 'rejected' && (
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                    <span className="status-error">❌ Rejected</span>
+                                                                    <span className="status-error" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-testing-iconFailed)' }}>
+                                                                        {Icons.Alert} Rejected
+                                                                    </span>
                                                                     <button className="micro-btn" style={{ border: '1px solid var(--nexus-border)', padding: '2px 6px' }}
-                                                                        onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle })}>
-                                                                        💬 Revise
+                                                                        onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle: codingStyleRef.current })}>
+                                                                        Revise
                                                                     </button>
                                                                 </div>
                                                             )}
                                                             {status === 'error' && (
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                    <span className="status-error">⚠️ Error</span>
-                                                                    <button className="micro-btn" style={{ border: '1px solid var(--nexus-error)', color: 'var(--nexus-error)', padding: '2px 6px' }}
+                                                                    <span className="status-error" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-testing-iconFailed)' }}>
+                                                                        {Icons.Alert} Error
+                                                                    </span>
+                                                                    <button className="micro-btn" style={{ border: '1px solid var(--vscode-testing-iconFailed)', color: 'var(--vscode-testing-iconFailed)', padding: '2px 6px' }}
                                                                         onClick={() => {
                                                                             setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
                                                                             setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
-                                                                            vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle });
+                                                                            vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current });
                                                                         }}>
-                                                                        🔄 Retry
+                                                                        Retry
                                                                     </button>
                                                                 </div>
-                                                            )}
-
-                                                            {(status === 'reviewing' || status === 'approved') && taskFiles[taskKey] && (
-                                                                <button className="micro-btn" style={{ marginLeft: '8px', padding: '2px 6px', border: '1px solid var(--nexus-border)' }}
-                                                                    onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}>
-                                                                    🔍 View Diff
-                                                                </button>
                                                             )}
 
                                                             {!status && (
@@ -464,7 +832,7 @@ export default function App() {
                                                                             setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
                                                                             setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
                                                                             setTaskReasoning(prev => ({ ...prev, [taskKey]: '' }));
-                                                                            vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle });
+                                                                            vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current });
                                                                         }}>
                                                                         {Icons.Play}
                                                                     </button>
@@ -473,25 +841,32 @@ export default function App() {
                                                         </div>
                                                     </div>
 
-                                                    {/* 🔥 THE FIX: Render Steps and Reasoning using taskKey! */}
                                                     {taskSteps[taskKey] && taskSteps[taskKey].length > 0 && (
                                                         <div className="agent-steps-container">
                                                             {taskSteps[taskKey].map((step, sIdx) => (
-                                                                <div key={sIdx} className="agent-step-card">
-                                                                    <div className="agent-step-header">
-                                                                        <span className="step-icon">
-                                                                            {step.type === 'search' && '🔍'}
-                                                                            {step.type === 'read' && '👁️'}
-                                                                            {step.type === 'analyze' && '</>'}
-                                                                            {step.type === 'error' && '⚠️'}
-                                                                            {step.type === 'heal' && '🏥'}
-                                                                            {step.type === 'success' && '✅'}
+                                                                <div key={sIdx} className="agent-step-card" style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '6px 8px', borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', marginLeft: '4px' }}>
+                                                                    <div className="agent-step-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                        <span className="step-icon" style={{ 
+                                                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                                            color: step.type === 'error' ? 'var(--vscode-testing-iconFailed)' :
+                                                                                   step.type === 'success' ? 'var(--vscode-testing-iconPassed)' :
+                                                                                   step.type === 'heal' ? 'var(--vscode-charts-orange)' :
+                                                                                   'var(--vscode-symbolIcon-propertyForeground)'
+                                                                        }}>
+                                                                            {step.type === 'search' && Icons.Search}
+                                                                            {step.type === 'read' && Icons.Read}
+                                                                            {step.type === 'analyze' && Icons.Code}
+                                                                            {step.type === 'error' && Icons.Alert}
+                                                                            {step.type === 'heal' && Icons.Wrench}
+                                                                            {step.type === 'success' && Icons.CheckCircle}
                                                                         </span>
-                                                                        <span className="step-desc">{step.description}</span>
+                                                                        <span className="step-desc" style={{ fontSize: '11px', fontWeight: 'bold', color: 'var(--vscode-foreground)' }}>
+                                                                            {step.description}
+                                                                        </span>
                                                                     </div>
                                                                     {step.details && (
-                                                                        <div className="agent-step-details">
-                                                                            <span className="detail-pill">{step.details}</span>
+                                                                        <div className="agent-step-details" style={{ paddingLeft: '22px', fontSize: '10.5px', color: 'var(--vscode-descriptionForeground)', whiteSpace: 'pre-wrap', lineHeight: '1.5', marginTop: '4px' }}>
+                                                                            {step.details}
                                                                         </div>
                                                                     )}
                                                                 </div>
@@ -612,17 +987,50 @@ export default function App() {
                                 {availableModels.length === 0 && <option value="">Loading...</option>}
                                 {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
                             </select>
+
+                            {/* 🔥 PHASE 4: AUTOPILOT TOGGLE */}
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: isAutopilot ? 'var(--vscode-terminal-ansiMagenta)' : 'var(--nexus-subtext)', cursor: 'pointer', fontWeight: isAutopilot ? 'bold' : 'normal', marginLeft: '8px' }}>
+                                <div style={{
+                                    width: '24px', height: '14px', borderRadius: '10px', background: isAutopilot ? 'var(--vscode-terminal-ansiMagenta)' : 'var(--vscode-input-background)',
+                                    position: 'relative', transition: '0.2s'
+                                }}>
+                                    <div style={{
+                                        width: '10px', height: '10px', borderRadius: '50%', background: 'white',
+                                        position: 'absolute', top: '2px', left: isAutopilot ? '12px' : '2px', transition: '0.2s'
+                                    }}></div>
+                                </div>
+                                <input
+                                    type="checkbox"
+                                    checked={isAutopilot}
+                                    onChange={(e) => setIsAutopilot(e.target.checked)}
+                                    style={{ display: 'none' }}
+                                />
+                                Autopilot
+                            </label>
                         </div>
-                        <div className="toolbar-group">
-                            <button className="micro-btn" onClick={() => {
-                                setMessages([]);
-                                setTaskStatuses({});
-                                setTaskSummaries({});
-                                setTaskFiles({});
-                                setTaskReasoning({});
-                                vscode.postMessage({ type: 'clearHistory' });
-                            }} title="Clear Chat History">🗑️ Clear</button>
-                            <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'refreshCodeLens' })} title="Force VS Code to redraw Accept/Reject buttons">🔄 Refresh Lens</button>
+
+                        <div className="toolbar-group" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                            <button
+                                className="micro-btn"
+                                style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-testing-iconPassed)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.9, padding: 0 }}
+                                onClick={() => vscode.postMessage({ type: 'runGlobalCompiler' })}
+                                title="Run strict project-wide compilation check">
+                                {Icons.Build} Compile
+                            </button>
+                            <button 
+                                className="micro-btn" 
+                                style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }} 
+                                onClick={handleClearHistory} 
+                                title="Clear Chat History">
+                                {Icons.Trash} Clear
+                            </button>
+                            <button 
+                                className="micro-btn" 
+                                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }} 
+                                onClick={() => vscode.postMessage({ type: 'refreshCodeLens' })} 
+                                title="Refresh UI">
+                                {Icons.Refresh}
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -630,42 +1038,114 @@ export default function App() {
             </div>
 
             {/* ========================================================= */}
-            {/* 📋 TAB 2: THE REQUIREMENT HUB                             */}
+            {/* 📋 TAB 2: THE REQUIREMENT HUB (BUILDER)                   */}
             {/* ========================================================= */}
-            <div style={{ display: activeTab === 'requirements' ? 'flex' : 'none', flexDirection: 'column', padding: '20px', flex: 1, overflowY: 'auto' }}>
+            <div style={{ display: activeTab === 'builder' ? 'flex' : 'none', flexDirection: 'column', padding: '20px', flex: 1, overflowY: 'auto' }}>
 
-                {/* STATE 1: Input Form */}
                 {(!requirements || requirements.trim() === '') && !isGeneratingReqs && (
-                    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-                        <p style={{ fontSize: '13px', color: 'var(--vscode-descriptionForeground)', marginBottom: '15px' }}>
-                            Describe your app in a few words. Nexus will analyze the domain and generate a PRD.
-                        </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        <h3 style={{ margin: 0, color: 'var(--vscode-foreground)' }}>Start a New Project</h3>
+                        <p style={{ margin: 0, fontSize: '12px', color: 'var(--nexus-subtext)' }}>Describe your app idea. Attach API docs or reference files to enforce exact payloads.</p>
+
+                        {builderContexts.length > 0 && (
+                            <div className="context-chips" style={{ marginBottom: '5px' }}>
+                                {builderContexts.map((ctx, idx) => (
+                                    <div key={idx} className="context-chip" title={ctx.code}>
+                                        <span className="chip-icon">📄</span>
+                                        <span className="chip-label">{ctx.file}</span>
+                                        <span className="chip-close" onClick={() => setBuilderContexts(prev => prev.filter((_, i) => i !== idx))}>×</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                            <button
+                                style={{ padding: '6px 12px', background: 'var(--vscode-editor-inactiveSelectionBackground)', color: 'var(--vscode-foreground)', border: '1px solid var(--nexus-border)', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                                onClick={() => { searchTargetRef.current = 'builder'; setIsSearching(true); }}
+                            >
+                                {Icons.Plus} Attach Specs / API Docs
+                            </button>
+                        </div>
+
+                        {isSearching && (
+                            <div style={{ background: 'var(--vscode-editor-background)', border: '1px solid var(--nexus-border)', borderRadius: '6px', padding: '10px', marginBottom: '10px', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                    <span style={{ fontSize: '11px', fontWeight: 'bold' }}>Search Workspace</span>
+                                    <button style={{ background: 'none', border: 'none', color: 'var(--nexus-subtext)', cursor: 'pointer' }} onClick={() => setIsSearching(false)}>✖</button>
+                                </div>
+                                <input
+                                    autoFocus
+                                    type="text"
+                                    value={searchQuery}
+                                    onChange={(e) => {
+                                        setSearchQuery(e.target.value);
+                                        if (e.target.value.length > 2) vscode.postMessage({ type: 'searchFiles', query: e.target.value });
+                                        else setSearchResults([]);
+                                    }}
+                                    placeholder="Search files by name (e.g., stripe.ts)..."
+                                    style={{ width: '100%', boxSizing: 'border-box', padding: '6px', marginBottom: '8px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '4px' }}
+                                />
+                                <div style={{ maxHeight: '120px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                    {searchResults.map(res => (
+                                        <button key={res} style={{ textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', padding: '4px', fontSize: '12px' }}
+                                            onClick={() => vscode.postMessage({ type: 'readFileContext', file: res })}>
+                                            📄 {res}
+                                        </button>
+                                    ))}
+                                    {searchQuery.length > 2 && searchResults.length === 0 && <div style={{ fontSize: '11px', color: 'var(--nexus-subtext)' }}>No files found.</div>}
+                                </div>
+                            </div>
+                        )}
+
                         <textarea
-                            style={{ flex: 1, maxHeight: '120px', resize: 'none', padding: '12px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', fontFamily: 'inherit', marginBottom: '15px' }}
-                            placeholder="e.g., 'generate me with a Trip.com website'"
                             value={rawIdea}
                             onChange={(e) => setRawIdea(e.target.value)}
+                            placeholder="e.g. Build a checkout system. Use the attached Stripe API docs for the exact JSON payloads..."
+                            rows={5}
+                            style={{ width: '100%', boxSizing: 'border-box', padding: '10px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '4px', fontFamily: 'var(--vscode-editor-font-family)' }}
                         />
                         <button
                             style={{ padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
                             onClick={() => {
                                 if (!rawIdea.trim()) return;
-                                setIsGeneratingReqs(true);
                                 setReqLogs([]);
-                                vscode.postMessage({ type: 'generateRequirements', text: rawIdea });
+                                setIsGeneratingReqs(true);
+
+                                let contextStr = "";
+                                if (builderContexts.length > 0) {
+                                    contextStr = builderContexts.map(c => `File: ${c.file}\n\`\`\`${c.language}\n${c.code}\n\`\`\``).join('\n\n');
+                                }
+
+                                vscode.postMessage({ type: 'generateRequirements', text: rawIdea, context: contextStr });
                             }}
                         >
-                            🪄 Auto-Generate PRD
+                            🪄 Auto-Generate RAG-Enhanced PRD
                         </button>
                     </div>
                 )}
 
-                {/* STATE 2: Loading Stream (PRD or Design) */}
                 {(isGeneratingReqs || isGeneratingDesign) && (
                     <div className="plan-card" style={{ flex: 1, display: 'flex', flexDirection: 'column', marginTop: '10px' }}>
-                        <div className="plan-card-header" style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '12px 15px' }}>
-                            <div style={{ color: 'var(--vscode-button-background)' }}>{Icons.Loader}</div>
-                            <span style={{ fontWeight: 'bold' }}>{isGeneratingReqs ? 'Drafting PRD...' : 'Architecting System Design...'}</span>
+                        <div className="plan-card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 15px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <div style={{ color: 'var(--vscode-button-background)' }}>{Icons.Loader}</div>
+                                <span style={{ fontWeight: 'bold' }}>
+                                    {isGeneratingReqs ? 'Drafting PRD...' : 'Architecting System Design...'}
+                                    <span style={{ color: 'var(--nexus-subtext)', marginLeft: '8px', fontFamily: 'monospace' }}>[{formatTime(specTimer)}]</span>
+                                </span>
+                            </div>
+                            <button
+                                className="micro-btn"
+                                style={{ border: '1px solid var(--nexus-error)', color: 'var(--nexus-error)', padding: '4px 8px' }}
+                                onClick={() => {
+                                    vscode.postMessage({ type: 'cancelTask' });
+                                    setIsGeneratingReqs(false);
+                                    setIsGeneratingDesign(false);
+                                }}
+                            >
+                                🛑 Stop
+                            </button>
                         </div>
                         <div style={{ padding: '15px', flex: 1, overflowY: 'auto', background: 'var(--vscode-input-background)', color: 'var(--vscode-descriptionForeground)', fontFamily: 'monospace', fontSize: '12px', borderBottomLeftRadius: '6px', borderBottomRightRadius: '6px' }}>
                             {reqLogs.map((log, i) => {
@@ -679,7 +1159,6 @@ export default function App() {
                     </div>
                 )}
 
-                {/* STATE 3: PRD Completed, Pending Design Approval */}
                 {(requirements && requirements.trim() !== '') && !design && !isGeneratingReqs && !isGeneratingDesign && (
                     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
@@ -723,7 +1202,6 @@ export default function App() {
                     </div>
                 )}
 
-                {/* STATE 4: Full Stack (PRD + Design Completed) */}
                 {(requirements && design) && !isGeneratingDesign && (
                     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
@@ -759,8 +1237,16 @@ export default function App() {
                         )}
 
                         {isGeneratingTasks ? (
-                            <div style={{ padding: '10px', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', borderRadius: '4px', textAlign: 'center', marginTop: '15px' }}>
-                                {Icons.Loader} Drafting Master Implementation Plan...
+                            <div style={{ padding: '10px', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '15px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    {Icons.Loader} Drafting Master Implementation Plan... <span style={{ fontFamily: 'monospace' }}>[{formatTime(specTimer)}]</span>
+                                </div>
+                                <button
+                                    style={{ background: 'transparent', border: '1px solid white', color: 'white', borderRadius: '4px', cursor: 'pointer', padding: '2px 8px' }}
+                                    onClick={() => { vscode.postMessage({ type: 'cancelTask' }); setIsGeneratingTasks(false); }}
+                                >
+                                    Stop
+                                </button>
                             </div>
                         ) : (
                             <div style={{ display: 'flex', gap: '10px', marginTop: '15px', flexShrink: 0 }}>
@@ -788,6 +1274,145 @@ export default function App() {
                     </div>
                 )}
             </div>
+
+            {/* ========================================================= */}
+            {/* ✨ TAB 3: AGENT SKILLS & RULES (.nexusrules)              */}
+            {/* ========================================================= */}
+            <div style={{ display: activeTab === 'rules' ? 'flex' : 'none', flexDirection: 'column', padding: '20px', flex: 1, overflowY: 'auto' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                    <h3 style={{ margin: '0 0 5px 0', color: 'var(--vscode-foreground)' }}>Agent Skills & Directives</h3>
+                    <p style={{ margin: '0 0 15px 0', fontSize: '12px', color: 'var(--nexus-subtext)' }}>
+                        Define custom behaviors, preferred libraries, and architectural rules. The AI will strictly follow these instructions when writing code. Saves to <code>.nexusrules</code>.
+                    </p>
+
+                    <textarea
+                        value={nexusRules}
+                        onChange={(e) => setNexusRules(e.target.value)}
+                        placeholder="e.g., Always use Tailwind CSS. Never use class components. Prefer Axios over fetch. All functions must include JSDoc comments."
+                        style={{ flex: 1, width: '100%', boxSizing: 'border-box', padding: '15px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', fontFamily: 'monospace', fontSize: '13px', lineHeight: '1.5', resize: 'none', marginBottom: '15px' }}
+                    />
+
+                    <button
+                        style={{ padding: '12px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold', flexShrink: 0 }}
+                        onClick={() => vscode.postMessage({ type: 'saveNexusRules', text: nexusRules })}
+                    >
+                        Save Agent Skills
+                    </button>
+                </div>
+            </div>
+
+            {/* ========================================================= */}
+            {/* 🌌 THE SPLIT-VIEW MATRIX (3D Graph + Text Detail)         */}
+            {/* ========================================================= */}
+            {showGraph && (
+                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: '#0d1117', zIndex: 999, display: 'flex', flexDirection: 'column' }}>
+                    
+                    {/* Header Controls */}
+                    <div style={{ padding: '15px', borderBottom: '1px solid var(--vscode-widget-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(13, 17, 23, 0.8)', zIndex: 1000 }}>
+                        <div>
+                            <h3 style={{ margin: 0, color: 'white' }}>🌌 Codebase Matrix</h3>
+                            <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '4px' }}>Click a 3D Node to view its structural text data.</div>
+                        </div>
+                        <button style={{ background: '#21262d', border: '1px solid #30363d', color: '#c9d1d9', cursor: 'pointer', fontSize: '14px', padding: '4px 10px', borderRadius: '6px' }} onClick={() => setShowGraph(false)}>Close Matrix</button>
+                    </div>
+
+                    {/* Split View Body */}
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
+                        
+                        {/* LEFT SIDE: WebGL 3D Canvas (60% Width) */}
+                        <div ref={graphContainerRef} style={{ flex: 3, position: 'relative', borderRight: '1px solid #30363d', overflow: 'hidden' }}>
+                            {!graphData ? (
+                                <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>Scanning workspace geometry...</div>
+                            ) : (
+                                <ForceGraph3D
+                                    width={graphDims.width}   
+                                    height={graphDims.height}
+                                    graphData={visualGraphData}
+                                    nodeAutoColorBy="group"
+                                    nodeLabel="name"
+                                    linkDirectionalArrowLength={3.5}
+                                    linkDirectionalArrowRelPos={1}
+                                    linkWidth={0.5}
+                                    linkColor={() => 'rgba(255,255,255,0.2)'}
+                                    nodeVal="val"
+                                    backgroundColor="#0d1117"
+                                    onNodeClick={(node: any) => {
+                                        if (node.group !== 'external_lib') {
+                                            const safeId = `node-card-${node.id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+                                            const el = document.getElementById(safeId);
+                                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                            
+                                            if (el) {
+                                                el.style.borderColor = '#58a6ff';
+                                                setTimeout(() => { el.style.borderColor = 'var(--vscode-input-border)'; }, 1500);
+                                            }
+                                        }
+                                    }}
+                                />
+                            )}
+                        </div>
+
+                        {/* RIGHT SIDE: Text Detail Sidebar (40% Width) */}
+                        <div style={{ flex: 2, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '15px', background: 'var(--vscode-editor-background)' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--nexus-subtext)', marginBottom: '5px', textTransform: 'uppercase' }}>File Anatomy</div>
+                            
+                            {!graphData ? null : (
+                                Object.entries(graphData).map(([filepath, node]: [string, any]) => {
+                                    const safeId = `node-card-${filepath.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+                                    return (
+                                        <div id={safeId} key={filepath} style={{ background: 'var(--vscode-input-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', padding: '12px', transition: 'border-color 0.3s' }}>
+                                            <div style={{ color: 'var(--vscode-textLink-foreground)', fontWeight: 'bold', fontSize: '13px', marginBottom: '8px', wordBreak: 'break-all', display: 'flex', justifyContent: 'space-between' }}>
+                                                <span>📄 {filepath}</span>
+                                                <button 
+                                                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }} 
+                                                    title="Open File"
+                                                    onClick={() => vscode.postMessage({ type: 'showDiff', filepath: filepath })}>
+                                                    📂
+                                                </button>
+                                            </div>
+                                            
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '11px' }}>
+                                                {node.exports?.length > 0 && (
+                                                    <div style={{ background: 'rgba(81, 207, 102, 0.1)', color: '#51cf66', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(81, 207, 102, 0.3)' }}>
+                                                        <strong>Exports:</strong> {node.exports.join(', ')}
+                                                    </div>
+                                                )}
+                                                {node.classes?.length > 0 && (
+                                                    <div style={{ background: 'rgba(252, 163, 17, 0.1)', color: '#fca311', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(252, 163, 17, 0.3)' }}>
+                                                        <strong>Classes:</strong> {node.classes.join(', ')}
+                                                    </div>
+                                                )}
+                                                {node.functions?.length > 0 && (
+                                                    <div style={{ background: 'rgba(51, 154, 240, 0.1)', color: '#339af0', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(51, 154, 240, 0.3)' }}>
+                                                        <strong>Functions:</strong> {node.functions.join(', ')}
+                                                    </div>
+                                                )}
+                                                {/* 🔥 NEW: Interfaces and Variables rendering */}
+                                                {node.interfaces?.length > 0 && (
+                                                    <div style={{ background: 'rgba(206, 147, 216, 0.1)', color: '#ce93d8', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(206, 147, 216, 0.3)' }}>
+                                                        <strong>Interfaces:</strong> {node.interfaces.join(', ')}
+                                                    </div>
+                                                )}
+                                                {node.variables?.length > 0 && (
+                                                    <div style={{ background: 'rgba(255, 204, 128, 0.1)', color: '#ffcc80', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(255, 204, 128, 0.3)' }}>
+                                                        <strong>Vars/Consts:</strong> {node.variables.join(', ')}
+                                                    </div>
+                                                )}
+                                                {node.imports?.length > 0 && (
+                                                    <div style={{ width: '100%', marginTop: '4px', color: 'var(--nexus-subtext)' }}>
+                                                        ↳ Imports: {node.imports.map((imp: string) => imp.replace(/['"]/g, '')).join(', ')}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
         </div>
     );
 }

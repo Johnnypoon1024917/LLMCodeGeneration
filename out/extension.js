@@ -42,13 +42,9 @@ const AILensProvider_1 = require("./AILensProvider");
 const terminalManager_1 = require("./terminalManager");
 const projectContext_1 = require("./projectContext");
 const diffProvider_1 = require("./diffProvider");
-const codeGraph_1 = require("./context/codeGraph");
 const terminalInterceptor_1 = require("./terminalInterceptor");
 function activate(context) {
     exports.globalContext = context;
-    (0, codeGraph_1.initTreeSitter)(context.extensionUri).then(() => {
-        (0, codeGraph_1.buildWorkspaceASTGraph)();
-    });
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     context.subscriptions.push(watcher.onDidCreate(() => (0, projectContext_1.invalidateProjectContext)()), watcher.onDidDelete(() => (0, projectContext_1.invalidateProjectContext)()), 
     // Note: We don't track onDidChange because changing a file's contents doesn't change the Directory Tree structure.
