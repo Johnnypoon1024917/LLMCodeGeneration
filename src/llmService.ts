@@ -53,7 +53,7 @@ export function safeParseJSON<T>(jsonString: string): T {
         const endArr = jsonString.lastIndexOf(']');
         const lastChar = Math.max(endObj, endArr);
 
-        if (firstChar === -1 || lastChar === -1) throw new Error("No JSON object found");
+        if (firstChar === -1 || lastChar === -1) { throw new Error("No JSON object found"); }
 
         let extract = jsonString.substring(firstChar, lastChar + 1);
 
@@ -99,10 +99,10 @@ export function safeParseJSON<T>(jsonString: string): T {
                             nextMeaningful = extract[j];
                             if (nextMeaningful === '"') {
                                 let k = j + 1;
-                                while (k < extract.length && extract[k] !== '"') k++;
+                                while (k < extract.length && extract[k] !== '"') { k++; }
                                 k++;
-                                while (k < extract.length && /[ \n\r\t]/.test(extract[k])) k++;
-                                if (extract[k] === ':') isKey = true;
+                                while (k < extract.length && /[ \n\r\t]/.test(extract[k])) { k++; }
+                                if (extract[k] === ':') { isKey = true; }
                             }
                             break;
                         }
@@ -170,7 +170,7 @@ export function safeParseJSON<T>(jsonString: string): T {
         }
 
         // 🚨 HEALER 4: The Cut-Off Fixer (If it hit a token limit)
-        if (inString) healed += '"';
+        if (inString) { healed += '"'; }
         while (stack.length > 0) {
             const unclosed = stack.pop();
             healed += (unclosed === '{' ? '}' : ']');
@@ -215,15 +215,15 @@ Reply ONLY with the exact word: "build", "explain", or "ask".`;
             })
         });
 
-        if (!response.ok) throw new Error(`HTTP ${response.status} - ${await response.text()}`);
+        if (!response.ok) { throw new Error(`HTTP ${response.status} - ${await response.text()}`); }
 
         const data = await response.json() as any;
 
-        if (!data.choices || data.choices.length === 0) return 'ask';
+        if (!data.choices || data.choices.length === 0) { return 'ask'; }
 
         const intent = data.choices[0].message.content.trim().toLowerCase();
-        if (intent.includes('build')) return 'build';
-        if (intent.includes('explain')) return 'explain';
+        if (intent.includes('build')) { return 'build'; }
+        if (intent.includes('explain')) { return 'explain'; }
         return 'ask';
     } catch (e) {
         return 'ask';
@@ -264,8 +264,8 @@ Always format your response in clean, highly readable Markdown. Use bullet point
             signal: abortSignal
         });
 
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        if (!response.body) throw new Error("No readable stream.");
+        if (!response.ok) { throw new Error(`HTTP ${response.status}`); }
+        if (!response.body) { throw new Error("No readable stream."); }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder("utf-8");
@@ -274,7 +274,7 @@ Always format your response in clean, highly readable Markdown. Use bullet point
 
         while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) { break; }
 
             networkBuffer += decoder.decode(value, { stream: true });
             let lines = networkBuffer.split('\n');
@@ -282,7 +282,7 @@ Always format your response in clean, highly readable Markdown. Use bullet point
 
             for (const line of lines) {
                 const trimmed = line.trim();
-                if (!trimmed) continue;
+                if (!trimmed) { continue; }
 
                 if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
                     try {
@@ -377,18 +377,20 @@ export interface AtomicEdit { filepath: string; code: string; action: 'replace' 
 interface QwenResponse { choices: { message: { content: string; }; }[]; }
 
 export async function askQwenForStructure(prompt: string, projectContext: string): Promise<{ explanation: string, plan: AIPlan }> {
-    const systemPrompt = `You are an expert AI software architect. Analyze the user's request and the EXISTING DIRECTORY STRUCTURE provided.
+    const systemPrompt = `You are the Coordinator Agent (Lead Architect).
+    Your job is to analyze the user's request and the EXISTING DIRECTORY STRUCTURE, then break it down into atomic tasks.
+    YOU DO NOT WRITE THE FINAL CODE. You only generate the blueprint for the Coder Agent.
     
-    1. First, write a brief 1-2 sentence explanation of what you are going to do and why.
+    1. First, write a brief 1-2 sentence explanation of the architectural approach.
     2. Then, output the implementation plan in STRICT JSON format.
     
     CRITICAL RULES FOR JSON:
-    - ADAPT to the existing folder structure.
+    - ADAPT to the existing folder structure. Do not invent new paradigms.
     - In "folderStructure", list EVERY file that needs to be created OR modified.
-    - ATOMIC TASKS: Break down "implementationTasks" so EACH task targets ONE file. 
+    - ATOMIC TASKS: Break down "implementationTasks" so EACH task targets ONE file.
 
     Example Output:
-    We need to add a new Booking tab to the navigation menu to allow users to access the booking form.
+    We need to add a new Booking tab to the navigation menu.
     \`\`\`json
     {
       "folderStructure": ["public/index.html"],
@@ -412,8 +414,8 @@ export async function askQwenForStructure(prompt: string, projectContext: string
     });
 
     const data = await response.json() as any;
-    if (data.error) throw new Error(`LLM API Error: ${data.error.message}`);
-    if (!data.choices || data.choices.length === 0) throw new Error("Invalid response from LLM API.");
+    if (data.error) { throw new Error(`LLM API Error: ${data.error.message}`); }
+    if (!data.choices || data.choices.length === 0) { throw new Error("Invalid response from LLM API."); }
 
     const rawText = data.choices[0].message.content;
 
@@ -425,7 +427,7 @@ export async function askQwenForStructure(prompt: string, projectContext: string
 
     if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd >= jsonStart) {
         const textBefore = rawText.substring(0, jsonStart).replace(/```json/g, '').replace(/```/g, '').trim();
-        if (textBefore) explanation = textBefore;
+        if (textBefore) { explanation = textBefore; }
         jsonStr = rawText.substring(jsonStart, jsonEnd + 1);
     } else {
         explanation = rawText;
@@ -453,7 +455,7 @@ export async function askQwenForTargetFile(taskDescription: string, projectConte
     });
 
     const data = await response.json() as any;
-    if (data.error) throw new Error(`API Error: ${data.error.message}`);
+    if (data.error) { throw new Error(`API Error: ${data.error.message}`); }
 
     let content = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     return safeParseJSON<{ filepath: string, reasoning: string }>(content);
@@ -467,18 +469,28 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
         return "";
     }
 
+    // 🔥 THE EXPLORE SUB-AGENT: Strictly read-only, heavily constrained
+    const explorePrompt = `You are the Explore Sub-Agent. Your role is EXCLUSIVELY to search and analyze the codebase to gather context for a given task.
+    
+    🔥 CRITICAL RULES 🔥
+    1. YOU ARE STRICTLY PROHIBITED FROM: Creating new files, modifying existing files, or writing code.
+    2. Do NOT propose solutions. Do NOT write code snippets.
+    3. Use your tools to read files, list directories, and grep the codebase.
+    4. Extract only the precise function signatures, imports, and variables relevant to the task.
+    5. Once you have enough context, reply with the exact word: "READY_TO_CODE" and nothing else.`;
+
     let messages: any[] = [
-        {
-            role: "system",
-            content: `You are an elite autonomous software architect. Your goal is to EXPLORE the codebase to gather the exact context needed.
-Use your tools to read files, list directories, and search the codebase.
-Once you have enough context, reply with the exact word: "READY_TO_CODE" and nothing else.`
-        },
-        { role: "user", content: `Task: ${taskDescription}\nExplore the codebase to figure out how to do this.` }
+        { role: "system", content: explorePrompt },
+        { role: "user", content: `Task: ${taskDescription}\nExplore the codebase to gather the exact context needed.` }
     ];
 
     let gatheredContext = "";
     statusCallback('analyze', 'Analyzed task', taskDescription);
+
+    // 🔥 Filter tools to ONLY allow read operations for the Explore Agent
+    const readOnlyTools = agentToolDefinitions.filter(t =>
+        ['search_codebase', 'read_file', 'list_directory'].includes(t.function.name)
+    );
 
     for (let step = 0; step < 3; step++) {
         try {
@@ -488,13 +500,13 @@ Once you have enough context, reply with the exact word: "READY_TO_CODE" and not
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-                body: JSON.stringify({ model: model, messages: messages, tools: agentToolDefinitions, tool_choice: "auto", temperature: 0.1 }),
+                body: JSON.stringify({ model: model, messages: messages, tools: readOnlyTools, tool_choice: "auto", temperature: 0.1 }),
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
 
             const data = await response.json() as any;
-            if (data.error) throw new Error(data.error.message);
+            if (data.error) { throw new Error(data.error.message); }
 
             const aiMessage = data.choices[0].message;
             messages.push(aiMessage);
@@ -504,17 +516,17 @@ Once you have enough context, reply with the exact word: "READY_TO_CODE" and not
                     const funcName = toolCall.function.name;
                     const funcArgs = JSON.parse(toolCall.function.arguments);
 
-                    if (funcName === 'search_codebase') statusCallback('search', 'Searched workspace', `Keyword: ${funcArgs.keyword}`);
-                    else if (funcName === 'read_file') statusCallback('read', 'Read file(s)', funcArgs.filepath);
-                    else if (funcName === 'list_directory') statusCallback('analyze', 'Analyzed directory', funcArgs.dirpath);
+                    if (funcName === 'search_codebase') { statusCallback('search', 'Searched workspace', `Keyword: ${funcArgs.keyword}`); }
+                    else if (funcName === 'read_file') { statusCallback('read', 'Read file(s)', funcArgs.filepath); }
+                    else if (funcName === 'list_directory') { statusCallback('analyze', 'Analyzed directory', funcArgs.dirpath); }
 
                     const toolResult = await executeAgentTool(toolCall, workspaceRoot);
                     gatheredContext += `\n--- Tool Result: ${funcName}(${JSON.stringify(funcArgs)}) ---\n${toolResult}\n`;
                     messages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
                 }
             } else {
-                if (aiMessage.content && aiMessage.content.includes("READY_TO_CODE")) break;
-                else break;
+                if (aiMessage.content && aiMessage.content.includes("READY_TO_CODE")) { break; }
+                else { break; }
             }
         } catch (e) {
             statusCallback('error', 'Agent API Error', 'Failed to use tools. Falling back to standard context.');
@@ -558,7 +570,7 @@ export async function askQwenToFixError(errorOutput: string, sourceFilePath: str
     let content = data.choices[0].message.content;
     const filepathMatch = content.match(/<filepath>(.*?)<\/filepath>/s);
     const codeMatch = content.match(/<code>(.*?)<\/code>/s);
-    if (!filepathMatch || !codeMatch) throw new Error("Auto-healer failed to return XML tags.");
+    if (!filepathMatch || !codeMatch) { throw new Error("Auto-healer failed to return XML tags."); }
 
     let extractedCode = decodeHTMLEntities(codeMatch[1].trim()).replace(/^```[\w]*\n/, '').replace(/\n```$/, '').trim();
     return { filepath: filepathMatch[1].trim(), code: extractedCode };
@@ -582,10 +594,10 @@ export async function askQwenForAtomicEdits(tasks: string[], projectContext: str
 }
 
 export async function streamQwenForCode(
-    taskDescription: string, 
-    availableFiles: string[] = [], 
-    currentFileContent: string = "", 
-    codingStyle: string = "precise", 
+    taskDescription: string,
+    availableFiles: string[] = [],
+    currentFileContent: string = "",
+    codingStyle: string = "precise",
     chatHistory: any[] = [],
     callbacks: {
         onReasoning?: (token: string) => Promise<void>,
@@ -596,7 +608,7 @@ export async function streamQwenForCode(
     },
     abortSignal?: AbortSignal,
     agentMode: 'creator' | 'healer' | 'rewriter' = 'creator' // 🔥 THE SPLIT
-):Promise<void> {
+): Promise<void> {
     const { endpoint, model, apiKey } = await getLLMConfig();
 
     let personaBrain = "";
@@ -648,7 +660,8 @@ export async function streamQwenForCode(
     EXAMPLE EXACT OUTPUT:
     <plan>1 sentence explaining what you will do.</plan>
     <action>${hasExistingCode ? 'insert_before' : 'replace'}</action>
-    ${hasExistingCode ? '<target>exact line of code to insert above</target>\n' : ''}\`\`\`javascript
+    ${hasExistingCode ? '<target>exact line of code to insert above</target>\n' : ''}<self_critique>Briefly critique your own plan. Did you follow the NO STUBS rule? Did you match the project's existing style? Are there any logical flaws?</self_critique>
+    \`\`\`javascript
     // YOUR CODE GOES HERE. TRIPLE BACKTICKS ARE MANDATORY!
     \`\`\`
     <command></command>`;
@@ -662,7 +675,7 @@ export async function streamQwenForCode(
         signal: abortSignal
     });
 
-    if (!response.body) throw new Error("No readable stream available.");
+    if (!response.body) { throw new Error("No readable stream available."); }
     const reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
 
@@ -693,7 +706,7 @@ export async function streamQwenForCode(
                     const cmdRegex = /<command>\s*(.*?)\s*<\/command>/is;
                     let cmdMatch;
                     while ((cmdMatch = buffer.match(cmdRegex)) !== null) {
-                        if (callbacks.onCommand) await callbacks.onCommand(cmdMatch[1].trim());
+                        if (callbacks.onCommand) { await callbacks.onCommand(cmdMatch[1].trim()); }
                         buffer = buffer.replace(cmdMatch[0], '');
                     }
 
@@ -703,7 +716,8 @@ export async function streamQwenForCode(
                         }
 
                         if (callbacks.onReasoning && !isReasoningCompleted) {
-                            let cleanToken = token.replace(/<\/?(plan|reasoning|filepath|action|target|command|typescript)[^>]*>/gi, '');
+                            // Add self_critique to the regex
+                            let cleanToken = token.replace(/<\/?(plan|reasoning|filepath|action|target|command|typescript|self_critique)[^>]*>/gi, '');
                             if (cleanToken && !buffer.includes('###')) {
                                 await callbacks.onReasoning(cleanToken);
                             }
@@ -740,7 +754,8 @@ export async function streamQwenForCode(
                             let codeBuffer = buffer.substring(cutIndex);
 
                             codeBuffer = codeBuffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s*\n/i, '');
-                            codeBuffer = codeBuffer.replace(/<\/?(plan|filepath|action|target|reasoning|reason|typescript|javascript)[^>]*>/gi, '');
+                            // Add self_critique to the regex
+                            codeBuffer = codeBuffer.replace(/<\/?(plan|filepath|action|target|reasoning|reason|typescript|javascript|self_critique)[^>]*>/gi, '');
 
                             buffer = codeBuffer;
                             isStreamingCode = true;
@@ -749,7 +764,7 @@ export async function streamQwenForCode(
                         }
                     } else {
                         if (isFirstCodeChunk) {
-                            if (buffer.length < 30 && !buffer.includes('\n')) continue;
+                            if (buffer.length < 30 && !buffer.includes('\n')) { continue; }
                             // Strip standard markdown backticks
                             buffer = buffer.replace(/^\s*```[a-z]*\s*\n?/i, '');
                             // Strip raw language words
@@ -771,7 +786,7 @@ export async function streamQwenForCode(
                             if (finalCodeChunk && !hasFinishedCodeBlock) {
                                 await callbacks.onToken(finalCodeChunk);
                             }
-                            if (callbacks.onFileComplete) await callbacks.onFileComplete();
+                            if (callbacks.onFileComplete) { await callbacks.onFileComplete(); }
 
                             isStreamingCode = false;
                             hasFinishedCodeBlock = true;
@@ -780,7 +795,7 @@ export async function streamQwenForCode(
                             if (!hasFinishedCodeBlock) {
                                 const cmdStartIdx = buffer.lastIndexOf('<command');
                                 let safeTailLength = 15;
-                                if (cmdStartIdx !== -1) safeTailLength = Math.max(15, buffer.length - cmdStartIdx);
+                                if (cmdStartIdx !== -1) { safeTailLength = Math.max(15, buffer.length - cmdStartIdx); }
 
                                 if (buffer.length > safeTailLength) {
                                     const emitChunk = buffer.substring(0, buffer.length - safeTailLength);
@@ -902,9 +917,9 @@ export async function askQwenForDesign(requirements: string, abortSignal?: Abort
 }
 
 export async function askQwenForProjectTasks(requirements: string, design: string, abortSignal?: AbortSignal): Promise<AIPlan> {
-    const systemPrompt = `You are a strict, elite Lead Staff Engineer. 
+    const systemPrompt = `You are the Coordinator Agent (Lead Staff Engineer). 
     The user has provided a PRD and a Technical Design Document.
-    Break the entire project down into an actionable, exhaustive implementation plan.
+    YOU DO NOT WRITE CODE. Your job is to break the entire project down into an actionable, exhaustive implementation plan for the Coder Agents.
     
     Return ONLY valid JSON matching this exact schema:
     {
@@ -915,22 +930,15 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
           "file": "src/index.ts",
           "detailedInstructions": "Initialize Express. Configure CORS, Helmet, and Morgan middleware.",
           "relatedRequirement": "Epic: Authentication - Core Server Setup"
-        },
-        {
-          "step": "Implement JWT authentication route",
-          "file": "src/routes/auth.ts",
-          "detailedInstructions": "Create POST /login and /register routes. Hash passwords using bcrypt.",
-          "relatedRequirement": "Epic: Authentication - User Story 1"
         }
       ]
     }
     
     🔥 CRITICAL RULES 🔥:
-    1. You MUST output an array of OBJECTS for 'implementationTasks'. DO NOT output simple strings.
+    1. You MUST output an array of OBJECTS for 'implementationTasks'.
     2. EXHAUSTIVE TASKS: 'detailedInstructions' must be a massive paragraph detailing EXACTLY what libraries to use, what methods to write, and the expected business logic from the PRD.
     3. ATOMIC EXECUTION: Each task MUST target exactly 1 primary 'file'.
-    4. TRACEABILITY: 'relatedRequirement' MUST reference the exact Epic/Story from the PRD.
-    5. COMPLETE ARCHITECTURE: Ensure 'folderStructure' contains EVERY file required for a production-ready app.`;
+    4. TRACEABILITY: 'relatedRequirement' MUST reference the exact Epic/Story from the PRD.`;
 
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await fetch(endpoint, {
@@ -997,7 +1005,7 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
 
     const jsonStart = fullContent.indexOf('{');
     const jsonEnd = fullContent.lastIndexOf('}');
-    if (jsonStart === -1 || jsonEnd === -1) throw new Error("Failed to parse JSON plan.");
+    if (jsonStart === -1 || jsonEnd === -1) { throw new Error("Failed to parse JSON plan."); }
 
     const parsedPlan = safeParseJSON<any>(fullContent.substring(jsonStart, jsonEnd + 1));
 
@@ -1186,4 +1194,99 @@ export async function askQwenToHealGlobalBuild(buildErrors: string, filesContext
         console.error("[DEBUG] Build-Healer failed to parse response.");
         return [];
     }
+}
+
+// 🔥 PHASE 4: ZERO-TRUST SECURITY FIREWALL
+export async function askSecurityMonitor(command: string): Promise<boolean> {
+    const systemPrompt = `You are an elite Security Monitor for an autonomous coding agent.
+    Your ONLY job is to evaluate bash/terminal commands before they are executed.
+    
+    THREAT MODEL:
+    - Irreversible local destruction (e.g., rm -rf /, wiping databases).
+    - Credential exfiltration (e.g., curl sending ~/.aws/credentials to a random IP).
+    - Blind Git Applies (e.g., git push --force without review).
+    
+    Standard dev commands (npm install, mkdir, touch, tsc, git status) are SAFE.
+    
+    If the command is SAFE, reply ONLY with: ALLOW
+    If the command violates the threat model, reply ONLY with: BLOCK`;
+
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    try {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify({
+                model: model,
+                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Command to evaluate: ${command}` }],
+                temperature: 0.0 // MUST be zero for deterministic security!
+            })
+        });
+        const data = await response.json() as any;
+        const decision = data.choices[0].message.content.trim().toUpperCase();
+        return decision.includes("BLOCK"); // Returns true if it should be blocked
+    } catch (e) {
+        return true; // Fail-safe: If the security monitor crashes, BLOCK the command!
+    }
+}
+
+// 🔥 PHASE 4: ADVERSARIAL VERIFICATION SPECIALIST
+export async function generateAdversarialTest(task: string, filepath: string, code: string): Promise<string> {
+    const systemPrompt = `You are a hostile Verification Specialist. You do not trust the Coder Agent.
+    Your job is to write a temporary Node.js script to aggressively test the code they just wrote.
+    Do NOT just test the "happy path". Test edge cases, null inputs, and boundaries.
+    
+    Return ONLY a raw JavaScript script that can be executed via 'node'. 
+    If the tests pass, the script MUST console.log("VERIFICATION_PASSED").
+    If they fail, it MUST throw an Error.`;
+
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+            model: model,
+            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Task: ${task}\nFile: ${filepath}\nCode:\n\`\`\`\n${code}\n\`\`\`` }],
+            temperature: 0.1
+        })
+    });
+    const data = await response.json() as any;
+    let script = data.choices[0].message.content;
+    return script.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').trim();
+}
+
+// 🔥 PHASE 2: THE COMPACTOR DAEMON
+export async function compactConversationHistory(messages: any[]): Promise<string> {
+    const systemPrompt = `You are a background Context Compactor AI. 
+    Your ONLY job is to read a long conversation history and summarize it into a highly dense, structured memory block.
+    
+    You must drop all conversational filler, raw code blocks that are no longer relevant, and apologies.
+    Keep the summary under 40 lines.
+    
+    Return ONLY valid XML matching this structure:
+    <memory_state>
+        <primary_request>What is the user ultimately trying to achieve?</primary_request>
+        <completed_steps>What tasks/files have already been finished?</completed_steps>
+        <pending_tasks>What still needs to be done?</pending_tasks>
+        <important_discoveries>Hard lessons, bugs caught, or architectural rules discovered</important_discoveries>
+    </memory_state>`;
+
+    const formattedHistory = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+            model: model,
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `CONVERSATION TO COMPACT:\n\`\`\`\n${formattedHistory}\n\`\`\`` }
+            ],
+            temperature: 0.1
+        })
+    });
+
+    const data = await response.json() as any;
+    return data.choices[0].message.content.trim();
 }

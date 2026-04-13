@@ -27,6 +27,7 @@ interface Message {
     content?: string;
     plan?: AIPlan;
     attachments?: AttachedContext[];
+    isCompacted?: boolean; // 🔥 Phase 2: Compactor UI Support
 }
 
 interface AttachedContext { file: string; code: string; language: string; }
@@ -55,8 +56,8 @@ const Icons = {
 };
 
 export default function App() {
-    const chatTokenTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const reasoningTokenTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const chatTokenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const reasoningTokenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const [taskSteps, setTaskSteps] = useState<Record<string, AgentStep[]>>({});
     const [input, setInput] = useState('');
@@ -140,7 +141,6 @@ export default function App() {
         return () => resizeObserver.disconnect();
     }, [showGraph]);
 
-    // 🔥 NEW: The 3D Data Transformer
     const visualGraphData = useMemo(() => {
         if (!graphData) return { nodes: [], links: [] };
 
@@ -148,25 +148,19 @@ export default function App() {
         const links: any[] = [];
         const nodeSet = new Set<string>();
 
-        // 1. Create all internal file nodes
         Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
             const folder = filepath.split('/')[0] || 'root';
-            // Size the sphere based on how many things it exports!
             const size = (node.exports?.length || 0) * 2 + (node.classes?.length || 0) * 3 + 2;
 
             nodes.push({ id: filepath, name: filepath, group: folder, val: size });
             nodeSet.add(filepath);
         });
 
-        // 2. Create the dependency links (and external library nodes)
         Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
             node.imports?.forEach((imp: string) => {
                 const cleanImp = imp.replace(/['"]/g, '');
-
-                // Try to find if this import points to an internal file we mapped
                 let target = Object.keys(graphData).find(k => k.includes(cleanImp.replace('./', '').replace('../', '')));
 
-                // If not, it's an external library (like 'express' or 'react')! Map it as an external node.
                 if (!target) {
                     target = cleanImp;
                     if (!nodeSet.has(target)) {
@@ -174,7 +168,6 @@ export default function App() {
                         nodeSet.add(target);
                     }
                 }
-
                 links.push({ source: filepath, target: target });
             });
         });
@@ -187,17 +180,16 @@ export default function App() {
     useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, agentStatus]);
 
     useEffect(() => {
-        // 🔥 THE HANDSHAKE: Tell the backend we are alive, even after a refresh!
         vscode.postMessage({ type: 'webviewReady' });
         vscode.postMessage({ type: 'requestModels' });
     }, []);
 
     useEffect(() => {
-        let interval: NodeJS.Timeout;
+        let interval: ReturnType<typeof setTimeout>;
         if (isGeneratingReqs || isGeneratingDesign || isGeneratingTasks) {
             interval = setInterval(() => setSpecTimer(t => t + 1), 1000);
         } else {
-            setSpecTimer(0); // Reset when done/cancelled
+            setSpecTimer(0);
         }
         return () => clearInterval(interval);
     }, [isGeneratingReqs, isGeneratingDesign, isGeneratingTasks]);
@@ -211,6 +203,12 @@ export default function App() {
     useEffect(() => {
         const messageHandler = (event: MessageEvent) => {
             const data = event.data;
+
+            // 🔥 Phase 2: Context Compaction Handlers
+            if (data.type === 'historyCompacted') {
+                setMessages(data.messages);
+            }
+
             if (data.type === 'tasksGenerated') {
                 setIsGeneratingTasks(false);
                 setActiveTab('coder');
@@ -248,11 +246,8 @@ export default function App() {
             }
 
             if (data.type === 'searchResults') {
-                // If the user typed "@App.tsx:50-100", extract the ":50-100" part
                 const lineMatch = data.originalQuery?.match(/:\d+(?:-\d+)?$/);
                 const suffix = lineMatch ? lineMatch[0] : '';
-
-                // Append the line range to the actual file results so the user can click it
                 const updatedResults = data.results.map((r: string) => r + suffix);
 
                 setMentionResults(updatedResults);
@@ -419,7 +414,7 @@ export default function App() {
         };
         window.addEventListener('message', messageHandler);
         return () => window.removeEventListener('message', messageHandler);
-    }, []);
+    }, [isAutopilot]); // Dependency included
 
     useEffect(() => {
         if (hasKey && isLoaded) {
@@ -438,7 +433,7 @@ export default function App() {
     if (!hasKey) {
         return (
             <div className="auth-screen">
-                <h2>🤖 Welcome to NexusCode</h2>
+                <h2>Welcome to Andromeda</h2>
                 <p>To use Enterprise features, please securely store your API Key.</p>
                 <input type="password" id="api-key-input" placeholder="sk-proj-..." />
                 <button className="auth-btn primary" onClick={() => {
@@ -470,7 +465,8 @@ export default function App() {
             type: 'processUserMessage',
             text: finalQuery,
             context: contextStr,
-            codingStyle: codingStyleRef.current
+            codingStyle: codingStyleRef.current,
+            autopilot: isAutopilot
         });
 
         setInput('');
@@ -507,21 +503,18 @@ export default function App() {
     const handleClearHistory = () => {
         vscode.postMessage({ type: 'clearHistory' });
         
-        // 1. Reset the chat bubbles
         if (activePlan) {
             setMessages([{ role: 'assistant', content: "Conversation cleared. Active Implementation Plan preserved:", plan: activePlan }]);
         } else {
             setMessages([]);
         }
 
-        // 2. Wipe the Ghost UI cards
         setTaskSteps({});
         setTaskReasoning({});
         setTaskStatuses({}); 
         setTaskSummaries({}); 
         setTaskFiles({});    
         
-        // 3. Wipe the multi-session memory and reset to a single tab
         sessionStoreRef.current = {};
         setSessions([{ id: '1', name: 'New Session' }]);
         setActiveSessionId('1');
@@ -532,14 +525,12 @@ export default function App() {
 
         sessionStoreRef.current[activeSessionId] = currentStateRef.current;
 
-        // 2. Retrieve the next state (or initialize a fresh one if it's new)
         const nextState = sessionStoreRef.current[newId] || {
             messages: activePlan ? [{ role: 'assistant', content: "New session started. Active Implementation Plan preserved:", plan: activePlan }] : [],
             taskSteps: {},
             taskReasoning: {}
         };
 
-        // 3. Mount the state to the UI
         setMessages(nextState.messages);
         setTaskSteps(nextState.taskSteps);
         setTaskReasoning(nextState.taskReasoning);
@@ -549,10 +540,8 @@ export default function App() {
     return (
         <div className="app-wrapper" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
             <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)', flexShrink: 0 }}>
-                {metaMode ? '⚠️ SELF-EVOLUTION ACTIVE' : 'NexusCode v0.2'}
+                {metaMode ? '⚠️ SELF-EVOLUTION ACTIVE' : 'Andromeda'}
             </div>
-
-
 
             {/* 🔥 TABS HEADER */}
             <div className="tabs-header" style={{ display: 'flex', borderBottom: '1px solid var(--vscode-widget-border)', flexShrink: 0, marginTop: '5px' }}>
@@ -576,11 +565,11 @@ export default function App() {
                 </button>
 
                 <button
-                    style={{ padding: '8px 12px', background: 'transparent', border: 'none', color: 'var(--vscode-symbolIcon-classForeground)', cursor: 'pointer' }}
+                    style={{ flex: 1, padding: '8px', background: 'transparent', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: 'normal' }}
                     onClick={() => vscode.postMessage({ type: 'requestWorkspaceGraph' })}
                     title="Visualize Workspace Context Graph"
                 >
-                    🗺️
+                    Code Map
                 </button>
             </div>
 
@@ -601,7 +590,7 @@ export default function App() {
                                 fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer',
                                 minWidth: '100px', justifyContent: 'space-between'
                             }}
-                            onClick={() => switchSession(s.id)} // 🔥 Triggers the swap engine!
+                            onClick={() => switchSession(s.id)}
                         >
                             <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                                 <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--vscode-terminal-ansiMagenta)' }}></div>
@@ -614,9 +603,9 @@ export default function App() {
                                     if (sessions.length > 1) {
                                         const newSessions = sessions.filter(session => session.id !== s.id);
                                         setSessions(newSessions);
-                                        delete sessionStoreRef.current[s.id]; // Clean up memory
+                                        delete sessionStoreRef.current[s.id];
                                         if (activeSessionId === s.id) {
-                                            switchSession(newSessions[newSessions.length - 1].id); // Fallback to last tab
+                                            switchSession(newSessions[newSessions.length - 1].id);
                                         }
                                     }
                                 }}
@@ -628,7 +617,7 @@ export default function App() {
                         onClick={() => {
                             const newId = Date.now().toString();
                             setSessions([...sessions, { id: newId, name: `Session ${sessions.length + 1}` }]);
-                            switchSession(newId); // 🔥 Swap to the new blank state!
+                            switchSession(newId);
                         }}
                     >+</button>
                 </div>
@@ -640,260 +629,286 @@ export default function App() {
                         </div>
                     )}
 
-                    {messages.map((msg, idx) => (
-                        <div key={idx} className="message">
-                            <div className={`message-header ${msg.role}`}>
-                                {msg.role === 'user' ? Icons.User : Icons.Nexus}
-                                {msg.role === 'user' ? 'YOU' : 'NEXUS'}
-                            </div>
-
-                            {msg.content && (
-                                <div className="message-content markdown-body">
-                                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    {messages.map((msg, idx) => {
+                        // 🔥 PHASE 2: COMPACTOR UI RENDERING
+                        if (msg.isCompacted) {
+                            return (
+                                <div key={idx} style={{ 
+                                    margin: '16px 8px', 
+                                    padding: '8px 12px', 
+                                    backgroundColor: 'var(--vscode-badge-background)', 
+                                    color: 'var(--vscode-badge-foreground)',
+                                    borderRadius: '6px',
+                                    fontSize: '11px',
+                                    border: '1px solid var(--vscode-widget-border)',
+                                    cursor: 'pointer',
+                                    opacity: 0.8
+                                }}>
+                                    <details>
+                                        <summary style={{ fontWeight: 'bold', outline: 'none' }}>
+                                            🗜️ Context Compacted (Old messages summarized to save tokens)
+                                        </summary>
+                                        <div style={{ marginTop: '8px', padding: '8px', backgroundColor: 'var(--vscode-editor-background)', borderRadius: '4px', border: '1px solid var(--vscode-widget-border)' }}>
+                                             <ReactMarkdown>{msg.content || ''}</ReactMarkdown>
+                                        </div>
+                                    </details>
                                 </div>
-                            )}
+                            );
+                        }
 
-                            {msg.role === 'user' && msg.attachments && msg.attachments.length > 0 && (
-                                <div className="message-attachments">
-                                    {msg.attachments.map((att, i) => (
-                                        <details key={i} className="attachment-details">
-                                            <summary>📄 {att.file}</summary>
-                                            <div className="markdown-body">
-                                                <pre><code className={`language-${att.language}`}>{att.code}</code></pre>
-                                            </div>
-                                        </details>
-                                    ))}
+                        // Standard Chat Bubble Rendering
+                        return (
+                            <div key={idx} className="message">
+                                <div className={`message-header ${msg.role}`}>
+                                    {msg.role === 'user' ? Icons.User : Icons.Nexus}
+                                    {msg.role === 'user' ? 'YOU' : 'NEXUS'}
                                 </div>
-                            )}
 
-                            {msg.plan && (
-                                <div className="plan-card">
-                                    <div className="plan-card-header">
-                                        <span>Implementation Plan</span>
+                                {msg.content && (
+                                    <div className="message-content markdown-body">
+                                        <ReactMarkdown>{msg.content}</ReactMarkdown>
                                     </div>
-                                    <div className="task-list">
-                                        {msg.plan.implementationTasks.map((rawTask, tIdx) => {
-                                            const isObj = typeof rawTask !== 'string';
-                                            const taskObj = isObj ? (rawTask as ProjectTask) : null;
+                                )}
 
-                                            const taskKey = taskObj ? taskObj.step : (rawTask as string);
-                                            const taskTitle = taskObj ? taskObj.step : (rawTask as string);
-                                            const taskFile = taskObj ? taskObj.file : "";
-                                            const taskReq = taskObj ? taskObj.relatedRequirement : "";
+                                {msg.role === 'user' && msg.attachments && msg.attachments.length > 0 && (
+                                    <div className="message-attachments">
+                                        {msg.attachments.map((att, i) => (
+                                            <details key={i} className="attachment-details">
+                                                <summary>📄 {att.file}</summary>
+                                                <div className="markdown-body">
+                                                    <pre><code className={`language-${att.language}`}>{att.code}</code></pre>
+                                                </div>
+                                            </details>
+                                        ))}
+                                    </div>
+                                )}
 
-                                            const taskPrompt = taskObj
-                                                ? `Task: ${taskObj.step}\nTarget File: ${taskObj.file}\nRelated PRD Requirement: ${taskReq}\n\nDetailed Instructions: ${taskObj.detailedInstructions}`
-                                                : (rawTask as string);
+                                {msg.plan && (
+                                    <div className="plan-card">
+                                        <div className="plan-card-header">
+                                            <span>Implementation Plan</span>
+                                        </div>
+                                        <div className="task-list">
+                                            {msg.plan.implementationTasks.map((rawTask, tIdx) => {
+                                                const isObj = typeof rawTask !== 'string';
+                                                const taskObj = isObj ? (rawTask as ProjectTask) : null;
 
-                                            const status = taskStatuses[taskKey];
+                                                const taskKey = taskObj ? taskObj.step : (rawTask as string);
+                                                const taskTitle = taskObj ? taskObj.step : (rawTask as string);
+                                                const taskFile = taskObj ? taskObj.file : "";
+                                                const taskReq = taskObj ? taskObj.relatedRequirement : "";
 
-                                            return (
-                                                <div key={tIdx} className="task-item" style={{ flexDirection: 'column' }}>
-                                                    <div style={{ display: 'flex', width: '100%', gap: '10px' }}>
-                                                        <div className="task-desc" style={{ flex: 1 }}>
-                                                            <div style={{ fontWeight: 'bold', fontSize: '13px', color: 'var(--vscode-foreground)' }}>{taskTitle}</div>
-                                                            {taskObj && <div style={{ fontSize: '11px', color: 'var(--vscode-descriptionForeground)', marginTop: '2px', fontFamily: 'monospace' }}>📄 {taskFile}</div>}
+                                                const taskPrompt = taskObj
+                                                    ? `Task: ${taskObj.step}\nTarget File: ${taskObj.file}\nRelated PRD Requirement: ${taskReq}\n\nDetailed Instructions: ${taskObj.detailedInstructions}`
+                                                    : (rawTask as string);
 
-                                                            {taskReq && (
-                                                                <div style={{ fontSize: '10.5px', color: 'var(--vscode-textLink-foreground)', fontStyle: 'italic', background: 'var(--vscode-textCodeBlock-background)', padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start', marginTop: '6px', display: 'inline-block' }}>
-                                                                    🔗 Ref: {taskReq}
-                                                                </div>
-                                                            )}
+                                                const status = taskStatuses[taskKey];
 
-                                                            {taskObj && taskObj.detailedInstructions && (
-                                                                <details style={{ marginTop: '8px', fontSize: '11px', color: 'var(--vscode-descriptionForeground)' }}>
-                                                                    <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none', fontWeight: 'bold', opacity: 0.8 }}>
-                                                                        View Prompt Instructions
-                                                                    </summary>
-                                                                    <div style={{ 
-                                                                        marginTop: '6px', 
-                                                                        padding: '8px 10px', 
-                                                                        borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', 
-                                                                        background: 'var(--vscode-editor-inactiveSelectionBackground)',
-                                                                        whiteSpace: 'pre-wrap',
-                                                                        borderRadius: '0 4px 4px 0',
-                                                                        lineHeight: '1.4'
+                                                return (
+                                                    <div key={tIdx} className="task-item" style={{ flexDirection: 'column' }}>
+                                                        <div style={{ display: 'flex', width: '100%', gap: '10px' }}>
+                                                            <div className="task-desc" style={{ flex: 1 }}>
+                                                                <div style={{ fontWeight: 'bold', fontSize: '13px', color: 'var(--vscode-foreground)' }}>{taskTitle}</div>
+                                                                {taskObj && <div style={{ fontSize: '11px', color: 'var(--vscode-descriptionForeground)', marginTop: '2px', fontFamily: 'monospace' }}>📄 {taskFile}</div>}
+
+                                                                {taskReq && (
+                                                                    <div style={{ fontSize: '10.5px', color: 'var(--vscode-textLink-foreground)', fontStyle: 'italic', background: 'var(--vscode-textCodeBlock-background)', padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start', marginTop: '6px', display: 'inline-block' }}>
+                                                                        🔗 Ref: {taskReq}
+                                                                    </div>
+                                                                )}
+
+                                                                {taskObj && taskObj.detailedInstructions && (
+                                                                    <details style={{ marginTop: '8px', fontSize: '11px', color: 'var(--vscode-descriptionForeground)' }}>
+                                                                        <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none', fontWeight: 'bold', opacity: 0.8 }}>
+                                                                            View Prompt Instructions
+                                                                        </summary>
+                                                                        <div style={{ 
+                                                                            marginTop: '6px', 
+                                                                            padding: '8px 10px', 
+                                                                            borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', 
+                                                                            background: 'var(--vscode-editor-inactiveSelectionBackground)',
+                                                                            whiteSpace: 'pre-wrap',
+                                                                            borderRadius: '0 4px 4px 0',
+                                                                            lineHeight: '1.4'
+                                                                        }}>
+                                                                            {taskObj.detailedInstructions}
+                                                                        </div>
+                                                                    </details>
+                                                                )}
+
+                                                                {taskSummaries[taskKey] && (
+                                                                    <div className="task-summary" style={{ marginTop: '8px', padding: '6px 8px', background: 'var(--vscode-inputValidation-infoBackground)', border: '1px solid var(--vscode-inputValidation-infoBorder)', borderRadius: '4px', fontSize: '11px', color: 'var(--vscode-foreground)' }}>
+                                                                        ℹ️ {taskSummaries[taskKey]}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+
+                                                            <div className="task-status" style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '5px' }}>
+                                                                {status === 'reviewing' && <span className="status-pending">⏳ Reviewing</span>}
+
+                                                                {status === 'approved' && (
+                                                                    <div style={{
+                                                                        padding: '8px 10px',
+                                                                        background: 'var(--vscode-editorWidget-background)',
+                                                                        border: '1px solid var(--vscode-testing-iconPassed)',
+                                                                        borderRadius: '6px',
+                                                                        display: 'flex',
+                                                                        flexDirection: 'column',
+                                                                        gap: '6px',
+                                                                        minWidth: '200px'
                                                                     }}>
-                                                                        {taskObj.detailedInstructions}
+                                                                        <div style={{ display: 'flex', alignItems: 'center', color: 'var(--vscode-testing-iconPassed)', fontWeight: 'bold', gap: '6px', fontSize: '11px' }}>
+                                                                            <span>✓</span> Accepted edits
+                                                                        </div>
+
+                                                                        {taskFiles[taskKey] && (
+                                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--vscode-input-background)', padding: '4px 6px', borderRadius: '4px' }}>
+                                                                                <div
+                                                                                    style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '120px' }}
+                                                                                    onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}
+                                                                                    title={taskFiles[taskKey]}
+                                                                                >
+                                                                                    📄 {taskFiles[taskKey].split('/').pop()}
+                                                                                </div>
+
+                                                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                                                    <button
+                                                                                        style={{ background: 'none', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', opacity: 0.7, padding: 0 }}
+                                                                                        onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}
+                                                                                        title="Compare Changes"
+                                                                                    >
+                                                                                        ⚖️
+                                                                                    </button>
+                                                                                    <button
+                                                                                        style={{ background: 'none', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', opacity: 0.7, padding: 0 }}
+                                                                                        onClick={() => {
+                                                                                            vscode.postMessage({ type: 'undoTaskEdit', task: taskKey });
+                                                                                        }}
+                                                                                        title="Undo Edit"
+                                                                                    >
+                                                                                        ↩️
+                                                                                    </button>
+                                                                                </div>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                )}
+
+                                                                {status === 'undone' && (
+                                                                    <div style={{ padding: '6px 10px', background: 'var(--vscode-editorWidget-background)', border: '1px dashed var(--vscode-descriptionForeground)', borderRadius: '4px', color: 'var(--vscode-descriptionForeground)', fontSize: '11px' }}>
+                                                                        ⏪ Edit reverted.
+                                                                    </div>
+                                                                )}
+
+                                                                {status === 'rejected' && (
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                        <span className="status-error" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-testing-iconFailed)' }}>
+                                                                            {Icons.Alert} Rejected
+                                                                        </span>
+                                                                        <button className="micro-btn" style={{ border: '1px solid var(--nexus-border)', padding: '2px 6px' }}
+                                                                            onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle: codingStyleRef.current })}>
+                                                                            Revise
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+                                                                {status === 'error' && (
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                        <span className="status-error" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-testing-iconFailed)' }}>
+                                                                            {Icons.Alert} Error
+                                                                        </span>
+                                                                        <button className="micro-btn" style={{ border: '1px solid var(--vscode-testing-iconFailed)', color: 'var(--vscode-testing-iconFailed)', padding: '2px 6px' }}
+                                                                            onClick={() => {
+                                                                                setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
+                                                                                setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
+                                                                                vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current });
+                                                                            }}>
+                                                                            Retry
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+
+                                                                {!status && (
+                                                                    <div style={{ display: 'flex', gap: '12px' }}>
+                                                                        <button style={{ background: 'transparent', border: 'none', color: 'var(--nexus-subtext)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}
+                                                                            title="Verify code I wrote manually"
+                                                                            onClick={() => {
+                                                                                setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
+                                                                                setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
+                                                                                setTaskReasoning(prev => ({ ...prev, [taskKey]: '' }));
+                                                                                vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt });
+                                                                            }}>
+                                                                            {Icons.Eye}
+                                                                        </button>
+
+                                                                        <button style={{ background: 'transparent', border: 'none', color: 'var(--vscode-button-background)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}
+                                                                            title="Let AI execute this task autonomously"
+                                                                            onClick={() => {
+                                                                                setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
+                                                                                setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
+                                                                                setTaskReasoning(prev => ({ ...prev, [taskKey]: '' }));
+                                                                                vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current });
+                                                                            }}>
+                                                                            {Icons.Play}
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        {taskSteps[taskKey] && taskSteps[taskKey].length > 0 && (
+                                                            <div className="agent-steps-container">
+                                                                {taskSteps[taskKey].map((step, sIdx) => (
+                                                                    <div key={sIdx} className="agent-step-card" style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '6px 8px', borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', marginLeft: '4px' }}>
+                                                                        <div className="agent-step-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                            <span className="step-icon" style={{ 
+                                                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                                                color: step.type === 'error' ? 'var(--vscode-testing-iconFailed)' :
+                                                                                       step.type === 'success' ? 'var(--vscode-testing-iconPassed)' :
+                                                                                       step.type === 'heal' ? 'var(--vscode-charts-orange)' :
+                                                                                       'var(--vscode-symbolIcon-propertyForeground)'
+                                                                            }}>
+                                                                                {step.type === 'search' && Icons.Search}
+                                                                                {step.type === 'read' && Icons.Read}
+                                                                                {step.type === 'analyze' && Icons.Code}
+                                                                                {step.type === 'error' && Icons.Alert}
+                                                                                {step.type === 'heal' && Icons.Wrench}
+                                                                                {step.type === 'success' && Icons.CheckCircle}
+                                                                            </span>
+                                                                            <span className="step-desc" style={{ fontSize: '11px', fontWeight: 'bold', color: 'var(--vscode-foreground)' }}>
+                                                                                {step.description}
+                                                                           </span>
+                                                                        </div>
+                                                                        {step.details && (
+                                                                            <div className="agent-step-details" style={{ paddingLeft: '22px', fontSize: '10.5px', color: 'var(--vscode-descriptionForeground)', whiteSpace: 'pre-wrap', lineHeight: '1.5', marginTop: '4px' }}>
+                                                                                {step.details}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+
+                                                        {taskReasoning[taskKey] && (
+                                                            <div className="reasoning-container">
+                                                                <details open>
+                                                                    <summary className="reasoning-summary">
+                                                                        {Icons.Brain} Reasoning...
+                                                                    </summary>
+                                                                    <div className="reasoning-content">
+                                                                        {taskReasoning[taskKey]}
                                                                     </div>
                                                                 </details>
-                                                            )}
-
-                                                            {taskSummaries[taskKey] && (
-                                                                <div className="task-summary" style={{ marginTop: '8px', padding: '6px 8px', background: 'var(--vscode-inputValidation-infoBackground)', border: '1px solid var(--vscode-inputValidation-infoBorder)', borderRadius: '4px', fontSize: '11px', color: 'var(--vscode-foreground)' }}>
-                                                                    ℹ️ {taskSummaries[taskKey]}
-                                                                </div>
-                                                            )}
-                                                        </div>
-
-
-                                                        <div className="task-status" style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '5px' }}>
-                                                            {status === 'reviewing' && <span className="status-pending">⏳ Reviewing</span>}
-
-                                                            {/* 🔥 KIRO-STYLE SUCCESS BOX */}
-                                                            {status === 'approved' && (
-                                                                <div style={{
-                                                                    padding: '8px 10px',
-                                                                    background: 'var(--vscode-editorWidget-background)',
-                                                                    border: '1px solid var(--vscode-testing-iconPassed)',
-                                                                    borderRadius: '6px',
-                                                                    display: 'flex',
-                                                                    flexDirection: 'column',
-                                                                    gap: '6px',
-                                                                    minWidth: '200px'
-                                                                }}>
-                                                                    <div style={{ display: 'flex', alignItems: 'center', color: 'var(--vscode-testing-iconPassed)', fontWeight: 'bold', gap: '6px', fontSize: '11px' }}>
-                                                                        <span>✓</span> Accepted edits
-                                                                    </div>
-
-                                                                    {taskFiles[taskKey] && (
-                                                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--vscode-input-background)', padding: '4px 6px', borderRadius: '4px' }}>
-                                                                            <div
-                                                                                style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '120px' }}
-                                                                                onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}
-                                                                                title={taskFiles[taskKey]}
-                                                                            >
-                                                                                📄 {taskFiles[taskKey].split('/').pop()}
-                                                                            </div>
-
-                                                                            <div style={{ display: 'flex', gap: '8px' }}>
-                                                                                <button
-                                                                                    style={{ background: 'none', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', opacity: 0.7, padding: 0 }}
-                                                                                    onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}
-                                                                                    title="Compare Changes"
-                                                                                >
-                                                                                    ⚖️
-                                                                                </button>
-                                                                                <button
-                                                                                    style={{ background: 'none', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', opacity: 0.7, padding: 0 }}
-                                                                                    onClick={() => {
-                                                                                        vscode.postMessage({ type: 'undoTaskEdit', task: taskKey });
-                                                                                    }}
-                                                                                    title="Undo Edit"
-                                                                                >
-                                                                                    ↩️
-                                                                                </button>
-                                                                            </div>
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            )}
-
-                                                            {/* Handle the Undone state */}
-                                                            {status === 'undone' && (
-                                                                <div style={{ padding: '6px 10px', background: 'var(--vscode-editorWidget-background)', border: '1px dashed var(--vscode-descriptionForeground)', borderRadius: '4px', color: 'var(--vscode-descriptionForeground)', fontSize: '11px' }}>
-                                                                    ⏪ Edit reverted.
-                                                                </div>
-                                                            )}
-
-                                                            {status === 'rejected' && (
-                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                    <span className="status-error" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-testing-iconFailed)' }}>
-                                                                        {Icons.Alert} Rejected
-                                                                    </span>
-                                                                    <button className="micro-btn" style={{ border: '1px solid var(--nexus-border)', padding: '2px 6px' }}
-                                                                        onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle: codingStyleRef.current })}>
-                                                                        Revise
-                                                                    </button>
-                                                                </div>
-                                                            )}
-                                                            {status === 'error' && (
-                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                    <span className="status-error" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-testing-iconFailed)' }}>
-                                                                        {Icons.Alert} Error
-                                                                    </span>
-                                                                    <button className="micro-btn" style={{ border: '1px solid var(--vscode-testing-iconFailed)', color: 'var(--vscode-testing-iconFailed)', padding: '2px 6px' }}
-                                                                        onClick={() => {
-                                                                            setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
-                                                                            setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
-                                                                            vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current });
-                                                                        }}>
-                                                                        Retry
-                                                                    </button>
-                                                                </div>
-                                                            )}
-
-                                                            {!status && (
-                                                                <div style={{ display: 'flex', gap: '12px' }}>
-                                                                    <button style={{ background: 'transparent', border: 'none', color: 'var(--nexus-subtext)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}
-                                                                        title="Verify code I wrote manually"
-                                                                        onClick={() => {
-                                                                            setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
-                                                                            setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
-                                                                            setTaskReasoning(prev => ({ ...prev, [taskKey]: '' }));
-                                                                            vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt });
-                                                                        }}>
-                                                                        {Icons.Eye}
-                                                                    </button>
-
-                                                                    <button style={{ background: 'transparent', border: 'none', color: 'var(--vscode-button-background)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}
-                                                                        title="Let AI execute this task autonomously"
-                                                                        onClick={() => {
-                                                                            setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
-                                                                            setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
-                                                                            setTaskReasoning(prev => ({ ...prev, [taskKey]: '' }));
-                                                                            vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current });
-                                                                        }}>
-                                                                        {Icons.Play}
-                                                                    </button>
-                                                                </div>
-                                                            )}
-                                                        </div>
+                                                            </div>
+                                                        )}
                                                     </div>
-
-                                                    {taskSteps[taskKey] && taskSteps[taskKey].length > 0 && (
-                                                        <div className="agent-steps-container">
-                                                            {taskSteps[taskKey].map((step, sIdx) => (
-                                                                <div key={sIdx} className="agent-step-card" style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '6px 8px', borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', marginLeft: '4px' }}>
-                                                                    <div className="agent-step-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                        <span className="step-icon" style={{ 
-                                                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                                            color: step.type === 'error' ? 'var(--vscode-testing-iconFailed)' :
-                                                                                   step.type === 'success' ? 'var(--vscode-testing-iconPassed)' :
-                                                                                   step.type === 'heal' ? 'var(--vscode-charts-orange)' :
-                                                                                   'var(--vscode-symbolIcon-propertyForeground)'
-                                                                        }}>
-                                                                            {step.type === 'search' && Icons.Search}
-                                                                            {step.type === 'read' && Icons.Read}
-                                                                            {step.type === 'analyze' && Icons.Code}
-                                                                            {step.type === 'error' && Icons.Alert}
-                                                                            {step.type === 'heal' && Icons.Wrench}
-                                                                            {step.type === 'success' && Icons.CheckCircle}
-                                                                        </span>
-                                                                        <span className="step-desc" style={{ fontSize: '11px', fontWeight: 'bold', color: 'var(--vscode-foreground)' }}>
-                                                                            {step.description}
-                                                                        </span>
-                                                                    </div>
-                                                                    {step.details && (
-                                                                        <div className="agent-step-details" style={{ paddingLeft: '22px', fontSize: '10.5px', color: 'var(--vscode-descriptionForeground)', whiteSpace: 'pre-wrap', lineHeight: '1.5', marginTop: '4px' }}>
-                                                                            {step.details}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-
-                                                    {taskReasoning[taskKey] && (
-                                                        <div className="reasoning-container">
-                                                            <details open>
-                                                                <summary className="reasoning-summary">
-                                                                    {Icons.Brain} Reasoning...
-                                                                </summary>
-                                                                <div className="reasoning-content">
-                                                                    {taskReasoning[taskKey]}
-                                                                </div>
-                                                            </details>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            );
-                                        })}
+                                                );
+                                            })}
+                                        </div>
                                     </div>
-                                </div>
-                            )}
-                        </div>
-                    ))}
+                                )}
+                            </div>
+                        );
+                    })}
 
                     {loading && !agentStatus && (
                         <div className="message">
@@ -988,7 +1003,6 @@ export default function App() {
                                 {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
                             </select>
 
-                            {/* 🔥 PHASE 4: AUTOPILOT TOGGLE */}
                             <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: isAutopilot ? 'var(--vscode-terminal-ansiMagenta)' : 'var(--nexus-subtext)', cursor: 'pointer', fontWeight: isAutopilot ? 'bold' : 'normal', marginLeft: '8px' }}>
                                 <div style={{
                                     width: '24px', height: '14px', borderRadius: '10px', background: isAutopilot ? 'var(--vscode-terminal-ansiMagenta)' : 'var(--vscode-input-background)',
@@ -1034,14 +1048,12 @@ export default function App() {
                         </div>
                     </div>
                 </div>
-
             </div>
 
             {/* ========================================================= */}
             {/* 📋 TAB 2: THE REQUIREMENT HUB (BUILDER)                   */}
             {/* ========================================================= */}
             <div style={{ display: activeTab === 'builder' ? 'flex' : 'none', flexDirection: 'column', padding: '20px', flex: 1, overflowY: 'auto' }}>
-
                 {(!requirements || requirements.trim() === '') && !isGeneratingReqs && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                         <h3 style={{ margin: 0, color: 'var(--vscode-foreground)' }}>Start a New Project</h3>
@@ -1387,7 +1399,7 @@ export default function App() {
                                                         <strong>Functions:</strong> {node.functions.join(', ')}
                                                     </div>
                                                 )}
-                                                {/* 🔥 NEW: Interfaces and Variables rendering */}
+                                                {/* Interfaces and Variables rendering */}
                                                 {node.interfaces?.length > 0 && (
                                                     <div style={{ background: 'rgba(206, 147, 216, 0.1)', color: '#ce93d8', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(206, 147, 216, 0.3)' }}>
                                                         <strong>Interfaces:</strong> {node.interfaces.join(', ')}
@@ -1412,7 +1424,6 @@ export default function App() {
                     </div>
                 </div>
             )}
-
         </div>
     );
 }

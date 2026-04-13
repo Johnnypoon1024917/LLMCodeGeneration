@@ -1,6 +1,6 @@
 {
-  "name": "nexuscode",
-  "displayName": "nexuscode",
+  "name": "Andromeda",
+  "displayName": "Andromeda",
   "description": "LLM code generation",
   "version": "0.0.1",
   "engines": {
@@ -13,7 +13,7 @@
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
-      "title": "NexusCode Agent",
+      "title": "Andromeda Agent",
       "properties": {
         "nexuscode.apiEndpoint": {
           "type": "string",
@@ -41,7 +41,7 @@
       "activitybar": [
         {
           "id": "qwen-sidebar-view",
-          "title": "Nexuscoder",
+          "title": "Andromeda",
           "icon": "media/icon.svg"
         }
       ]
@@ -51,7 +51,7 @@
         {
           "type": "webview",
           "id": "qwen-sidebar",
-          "name": "Assistant",
+          "name": "Coding Assistant",
           "icon": "media/icon.svg"
         }
       ]
@@ -133,8 +133,9 @@
     "web-tree-sitter": "^0.26.7"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "^22.19.12",
+    "@types/node": "^22.19.17",
     "@types/vscode": "^1.109.0",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
