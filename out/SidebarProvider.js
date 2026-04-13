@@ -543,12 +543,38 @@ class SidebarProvider {
                     }
                     break;
                 }
-                case "syncHistory":
-                    await extension_1.globalContext.globalState.update('nexus_chat_history', data.messages);
+                case "syncHistory": {
+                    let historyToSave = data.messages;
+                    // 🔥 THE COMPACTOR DAEMON THRESHOLD
+                    if (historyToSave.length > 15) {
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "🗜️ Nexus is compacting context memory..." });
+                        try {
+                            // Keep the 5 most recent messages for immediate conversational context
+                            const RECENT_KEEP_COUNT = 5;
+                            const messagesToCompact = historyToSave.slice(0, historyToSave.length - RECENT_KEEP_COUNT);
+                            const recentMessages = historyToSave.slice(historyToSave.length - RECENT_KEEP_COUNT);
+                            const summary = await (0, llmService_1.compactConversationHistory)(messagesToCompact);
+                            // Replace old history with the compressed memory block!
+                            historyToSave = [
+                                { role: 'assistant', isCompacted: true, content: summary },
+                                ...recentMessages
+                            ];
+                            // Push the newly compacted array back to the React UI
+                            this._view?.webview.postMessage({ type: 'historyCompacted', messages: historyToSave });
+                        }
+                        catch (e) {
+                            console.error("Compaction failed", e);
+                        }
+                        finally {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                        }
+                    }
+                    await extension_1.globalContext.globalState.update('nexus_chat_history', historyToSave);
                     await extension_1.globalContext.globalState.update('nexus_task_statuses', data.taskStatuses);
                     await extension_1.globalContext.globalState.update('nexus_task_summaries', data.taskSummaries);
                     await extension_1.globalContext.globalState.update('nexus_task_files', data.taskFiles);
                     break;
+                }
                 case "clearHistory":
                     await extension_1.globalContext.globalState.update('nexus_chat_history', []);
                     await extension_1.globalContext.globalState.update('nexus_task_statuses', {});

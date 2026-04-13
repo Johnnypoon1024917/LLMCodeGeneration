@@ -53,6 +53,7 @@ exports.reviewCodeCompleteness = reviewCodeCompleteness;
 exports.askQwenToHealGlobalBuild = askQwenToHealGlobalBuild;
 exports.askSecurityMonitor = askSecurityMonitor;
 exports.generateAdversarialTest = generateAdversarialTest;
+exports.compactConversationHistory = compactConversationHistory;
 // src/llmService.ts
 const vscode = __importStar(require("vscode"));
 const agentTools_1 = require("./agentTools");
@@ -1216,5 +1217,37 @@ async function generateAdversarialTest(task, filepath, code) {
     const data = await response.json();
     let script = data.choices[0].message.content;
     return script.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').trim();
+}
+// 🔥 PHASE 2: THE COMPACTOR DAEMON
+async function compactConversationHistory(messages) {
+    const systemPrompt = `You are a background Context Compactor AI. 
+    Your ONLY job is to read a long conversation history and summarize it into a highly dense, structured memory block.
+    
+    You must drop all conversational filler, raw code blocks that are no longer relevant, and apologies.
+    Keep the summary under 40 lines.
+    
+    Return ONLY valid XML matching this structure:
+    <memory_state>
+        <primary_request>What is the user ultimately trying to achieve?</primary_request>
+        <completed_steps>What tasks/files have already been finished?</completed_steps>
+        <pending_tasks>What still needs to be done?</pending_tasks>
+        <important_discoveries>Hard lessons, bugs caught, or architectural rules discovered</important_discoveries>
+    </memory_state>`;
+    const formattedHistory = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+            model: model,
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `CONVERSATION TO COMPACT:\n\`\`\`\n${formattedHistory}\n\`\`\`` }
+            ],
+            temperature: 0.1
+        })
+    });
+    const data = await response.json();
+    return data.choices[0].message.content.trim();
 }
 //# sourceMappingURL=llmService.js.map

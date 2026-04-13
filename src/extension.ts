@@ -6,10 +6,15 @@ import { TerminalManager } from './terminalManager';
 import { invalidateProjectContext } from './projectContext';
 import { originalContentProvider } from './diffProvider';
 import { activateTerminalInterceptor } from './terminalInterceptor';
+import { ASTParser } from './utilities/astParser';
 
 export let globalContext: vscode.ExtensionContext;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
+    console.log('LLMCodeGeneration is now active!');
+    // Initialize the AST Parser on startup
+    await ASTParser.init(context);
+    
     globalContext = context;
 
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');

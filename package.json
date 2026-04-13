@@ -130,7 +130,7 @@
     "test": "vscode-test"
   },
   "dependencies": {
-    "web-tree-sitter": "^0.26.7"
+    "web-tree-sitter": "^0.26.8"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",

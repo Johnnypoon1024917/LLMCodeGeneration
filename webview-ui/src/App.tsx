@@ -215,7 +215,9 @@ export default function App() {
             }
 
             if (data.type === 'workspaceGraphData') {
-                setGraphData(data.data);
+                // 🔥 THE FIX: Safely parse the JSON string into an object!
+                const parsedData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+                setGraphData(parsedData);
                 setShowGraph(true);
             }
 

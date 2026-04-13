@@ -43,7 +43,11 @@ const terminalManager_1 = require("./terminalManager");
 const projectContext_1 = require("./projectContext");
 const diffProvider_1 = require("./diffProvider");
 const terminalInterceptor_1 = require("./terminalInterceptor");
-function activate(context) {
+const astParser_1 = require("./utilities/astParser");
+async function activate(context) {
+    console.log('LLMCodeGeneration is now active!');
+    // Initialize the AST Parser on startup
+    await astParser_1.ASTParser.init(context);
     exports.globalContext = context;
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     context.subscriptions.push(watcher.onDidCreate(() => (0, projectContext_1.invalidateProjectContext)()), watcher.onDidDelete(() => (0, projectContext_1.invalidateProjectContext)()), 
