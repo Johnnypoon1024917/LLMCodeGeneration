@@ -5,6 +5,7 @@ import { globalContext } from './extension';
 import { originalContentProvider } from './diffProvider';
 import { getSmartASTContext } from './context/codeGraph';
 import { SkillsManager } from './skillsManager';
+import { SwarmCoordinator } from './agents/Coordinator';
 
 // AI Services & Tools
 import {
@@ -722,31 +723,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "executeTask": {
                     const originalTaskQuery = data.prompt || data.task;
                     const workspaceFolders = vscode.workspace.workspaceFolders;
-                    if (!workspaceFolders) { return; }
+                    if (!workspaceFolders) return;
 
-                    const contextRoot = this._isMetaMode ? this._extensionUri.fsPath : undefined;
                     const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
                     this._activeTaskController = new AbortController();
 
                     vscode.window.withProgress({
                         location: vscode.ProgressLocation.Notification,
-                        title: this._isMetaMode ? "⚠️ NexusCode Self-Evolving..." : "NexusCode MCTS Execution Engine...",
+                        title: "NexusCode Swarm Execution Engine...",
                         cancellable: true
                     }, async (progress, token) => {
                         token.onCancellationRequested(() => this._activeTaskController?.abort());
-
                         const taskStartTime = Date.now();
 
-                        // 🔥 MCTS PRE-CHECK: Is this a Git Repo? (Required for Worktree Sandboxing)
                         const gitCheck = await this._terminalManager?.runCommandWithCapture("git status", rootUri.fsPath);
                         const isGitRepo = gitCheck && gitCheck.success;
 
-                        // 🧠 PILLAR 1: MULTI-AGENT ARCHITECTURE (The Coordinator)
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Generating MCTS Execution Branches...` });
-                        let approaches = [originalTaskQuery]; // Default to single approach
-                        
+                        let approaches = [originalTaskQuery]; 
                         if (isGitRepo) {
-                            // If we have Git, generate 3 distinct architectural approaches!
                             approaches = await generateMCTSApproaches(originalTaskQuery, "Generating alternative architectures...");
                         }
 
@@ -754,15 +749,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         let winningApproach = 0;
                         let finalMergedFilepath = "";
 
-                        // 🔄 PILLAR 2: MONTE CARLO TREE SEARCH (MCTS) LOOP
                         for (let i = 0; i < approaches.length; i++) {
                             if (success || token.isCancellationRequested) break;
                             
                             const approachNum = i + 1;
                             const isMCTSActive = approaches.length > 1;
-                            const currentApproachPrompt = isMCTSActive ? 
-                                `Original Task: ${originalTaskQuery}\n\nImplementation Directive (Approach ${approachNum}):\n${approaches[i]}` : 
-                                originalTaskQuery;
+                            const currentApproachPrompt = isMCTSActive ? `Original Task: ${originalTaskQuery}\n\nImplementation Directive (Approach ${approachNum}):\n${approaches[i]}` : originalTaskQuery;
                             
                             if (isMCTSActive) {
                                 this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: `Executing Approach ${approachNum}/${approaches.length}`, details: approaches[i] });
@@ -777,159 +769,54 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     await this._terminalManager?.runCommandWithCapture(`git checkout -b ${sandboxBranch}`, rootUri.fsPath);
                                 }
 
-                                // 🕵️‍♂️ THE EXPLORER AGENT
-                                const smartContext = await runAgenticExploration(currentApproachPrompt, rootUri.fsPath, (stepType, description, details) => {
-                                    this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType, description, details });
-                                });
-
-                                const projectStructure = await getProjectContext(contextRoot);
-                                const targetInfo = await askQwenForTargetFile(currentApproachPrompt, projectStructure, this._lastActiveFile);
-                                const { finalPaths } = await resolveCanonicalPaths([targetInfo.filepath], contextRoot);
-                                const realFilepath = finalPaths[0] || targetInfo.filepath;
-                                this._lastActiveFile = realFilepath;
-                                const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
-
-                                let currentFileContent = "";
-                                let fileExists = false;
-                                try {
-                                    const fileData = await vscode.workspace.fs.readFile(fileUri);
-                                    currentFileContent = new TextDecoder().decode(fileData);
-                                    fileExists = true;
-                                } catch { }
-
-                                // 🔭 THE NEW TRUE-LSP BLAST RADIUS ENGINE!
-                                let lspBlastRadiusContext = "No LSP context generated.";
-                                if (fileExists) {
-                                    this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'search', description: `Querying Language Server`, details: `Tracing exact function calls across workspace...` });
-                                    
-                                    try {
-                                        // 1. Get all symbols in the target file
-                                        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>('vscode.executeDocumentSymbolProvider', fileUri);
-                                        if (symbols && symbols.length > 0) {
-                                            const functionsAndClasses = symbols.filter(s => 
-                                                s.kind === vscode.SymbolKind.Function || 
-                                                s.kind === vscode.SymbolKind.Class || 
-                                                s.kind === vscode.SymbolKind.Method
-                                            );
-                                            
-                                            let callGraph = `⚠️ TRUE-LSP CALL GRAPH WARNING ⚠️\nThe following external files explicitly call functions from ${realFilepath}:\n`;
-                                            
-                                            // 2. Cross-reference them across the whole workspace
-                                            for (const sym of functionsAndClasses) {
-                                                const refs = await vscode.commands.executeCommand<vscode.Location[]>('vscode.executeReferenceProvider', fileUri, sym.selectionRange.start);
-                                                if (refs) {
-                                                    const externalRefs = refs.filter(r => r.uri.fsPath !== fileUri.fsPath);
-                                                    if (externalRefs.length > 0) {
-                                                        const uniqueFiles = [...new Set(externalRefs.map(r => vscode.workspace.asRelativePath(r.uri)))];
-                                                        callGraph += `- Function '${sym.name}' is utilized by: ${uniqueFiles.join(', ')}\n`;
-                                                    }
-                                                }
-                                            }
-                                            lspBlastRadiusContext = callGraph;
-                                        }
-                                    } catch (lspErr) {
-                                        console.warn("Native LSP Query Failed. Language server might be initializing.");
-                                    }
-                                }
-
-                                const [lspContext, styleGuide, hybridContext] = await Promise.all([
-                                    getLspContext(currentApproachPrompt),
-                                    getProjectStyleGuides(),
-                                    retrieveHybridContext(currentApproachPrompt, 5)
-                                ]);
-
-                                const feedbackInjection = data.feedback ? `\n\n⚠️ CRITICAL USER FEEDBACK FROM PREVIOUS REJECTION:\n"${data.feedback}"\nDo NOT repeat your previous mistakes. Incorporate this feedback perfectly.` : "";
-
+                                // Fetch Negative Space Memory
                                 let previousFailures = "";
                                 try {
                                     const failData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, 'nexuscode', 'NEXUS_FAILURES.md'));
-                                    previousFailures = `\n\n--- 🚫 ANTI-PATTERNS & PREVIOUS FAILURES ---\nDO NOT repeat these past mistakes in this codebase:\n${new TextDecoder().decode(failData)}\n-----------------------------------\n`;
+                                    previousFailures = new TextDecoder().decode(failData);
                                 } catch { }
 
-                                const requirementInjection = this._activeRequirements ? `\n\n--- 📋 STRICT BUSINESS REQUIREMENTS ---\nYou must follow these rules absolutely:\n${this._activeRequirements}\n-----------------------------------\n` : "";
-                                const designInjection = this._activeDesign ? `\n\n--- 🏗️ SYSTEM ARCHITECTURE & DESIGN ---\nYou must follow this technical design strictly:\n${this._activeDesign}\n-----------------------------------\n` : "";
-
-                                // Build the Ultimate Prompt
-                                const promptContext = `--- AUTONOMOUSLY GATHERED CONTEXT ---\n${smartContext}\n\n${lspBlastRadiusContext}\n\n${hybridContext}\nTarget File: ${realFilepath}\nContent:\n\`\`\`\n${currentFileContent.substring(0, 15000)}\n\`\`\`\nFile Exists: ${fileExists}\n${lspContext}\n${styleGuide}${feedbackInjection}${requirementInjection}${designInjection}${previousFailures}`;
-
-                                // 👨‍💻 THE CODER AGENT (Shadow Compiling)
-                                this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: 'Speculative Execution', details: `Drafting ${realFilepath} in background...` });
-
-                                let streamAction = 'replace';
-                                let streamTarget = '';
-                                let shadowCodeBuffer = "";
-
-                                await streamQwenForCode(currentApproachPrompt, [], promptContext, data.codingStyle, [], {
-                                    onSetup: async (action: string, filepath: string, target?: string) => {
-                                        streamAction = !fileExists ? 'replace' : action;
-                                        streamTarget = target || '';
-                                    },
-                                    onToken: async (token: string) => {
-                                        const cleanToken = token.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').replace(/<\/code>/g, '').replace(/<\/code/g, '');
-                                        shadowCodeBuffer += cleanToken;
-                                        this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: cleanToken });
+                                // 🔥 THE SWARM ORCHESTRATOR 🔥
+                                const finalDiff = await SwarmCoordinator.executeTask(
+                                    currentApproachPrompt,
+                                    rootUri.fsPath,
+                                    "", // We pass empty initial content; the Coder agent in the swarm will generate it. 
+                                    "LSP Context omitted for Swarm dynamic fetch.", 
+                                    this._activeRequirements,
+                                    this._activeDesign,
+                                    previousFailures,
+                                    data.codingStyle || 'precise',
+                                    (msg) => {
+                                        this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
+                                        this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: 'Swarm Orchestration', details: msg });
                                     }
-                                }, this._activeTaskController?.signal);
+                                );
 
-                                let finalPerfectCode = injectCodeIntoContent(currentFileContent, streamTarget, shadowCodeBuffer, streamAction);
+                                if (!finalDiff) throw new Error("Swarm failed to generate verified code.");
 
-                                // 🏥 THE HEALER AGENT (Syntax Check)
-                                const shadowFilename = `.${path.basename(realFilepath)}.nexus_shadow`;
-                                const shadowUri = vscode.Uri.joinPath(rootUri, path.dirname(realFilepath), shadowFilename);
+                                // Inject code into real file
+                                const realFilepath = finalDiff.filepath;
+                                const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
                                 
+                                let currentFileContent = "";
                                 try {
-                                    await vscode.workspace.fs.writeFile(shadowUri, Buffer.from(finalPerfectCode, 'utf8'));
-                                    await vscode.workspace.openTextDocument(shadowUri);
-                                    await new Promise(resolve => setTimeout(resolve, 2000));
+                                    const fileData = await vscode.workspace.fs.readFile(fileUri);
+                                    currentFileContent = new TextDecoder().decode(fileData);
+                                } catch { await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0)); }
 
-                                    const diagnostics = vscode.languages.getDiagnostics(shadowUri);
-                                    const errors = diagnostics.filter(d => d.severity === vscode.DiagnosticSeverity.Error);
+                                const finalPerfectCode = injectCodeIntoContent(currentFileContent, finalDiff.targetLine || '', finalDiff.code, finalDiff.action);
 
-                                    if (errors.length > 0) {
-                                        this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'heal', description: 'Shadow Compile Failed', details: `Found ${errors.length} issues. Auto-healing...` });
-                                        const errorLog = errors.map(e => `[Line ${e.range.start.line + 1}] ${e.message}`).join('\n');
-                                        const healContext = `Live compilation errors:\n\n${errorLog}\n\n🔥 ANTI-DELETION PROTOCOL 🔥\nOutput the ENTIRE file with ONLY syntax errors fixed. Use <action>replace</action>.`;
-                                        
-                                        let healedCodeBuffer = "";
-                                        await streamQwenForCode("Fix syntax errors", [], healContext, data.codingStyle, [], {
-                                            onSetup: async () => { },
-                                            onToken: async (token: string) => {
-                                                const cleanToken = token.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').replace(/<\/code>/g, '').replace(/<\/code/g, '');
-                                                healedCodeBuffer += cleanToken;
-                                            }
-                                        }, this._activeTaskController?.signal, 'healer');
-                                        
-                                        finalPerfectCode = healedCodeBuffer;
-                                    }
-                                } finally {
-                                    try { await vscode.workspace.fs.delete(shadowUri); } catch (e) { }
-                                }
+                                const document = await vscode.workspace.openTextDocument(fileUri);
+                                const editor = await vscode.window.showTextDocument(document, { preview: false });
+                                const mergedHeader = getAIHeader(realFilepath, currentApproachPrompt, currentFileContent) + "\n";
 
-                                // 🧑‍🏫 THE PRINCIPAL REVIEWER (Completeness Check)
-                                this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: 'Principal Review', details: `Checking code against PRD...` });
-                                const review = await reviewCodeCompleteness(currentApproachPrompt, this._activeRequirements, finalPerfectCode);
+                                await editor.edit(b => {
+                                    b.delete(new vscode.Range(0, 0, document.lineCount, 0));
+                                    b.insert(new vscode.Position(0, 0), mergedHeader + finalPerfectCode);
+                                });
+                                await document.save();
 
-                                if (!review.isComplete) {
-                                    // Log to Negative Space Memory!
-                                    try {
-                                        const failUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'NEXUS_FAILURES.md');
-                                        const newFail = `\n- [${new Date().toISOString()}] TASK: "${currentApproachPrompt}" | REJECTION: ${review.critique}`;
-                                        await vscode.workspace.fs.writeFile(failUri, Buffer.from(newFail, 'utf8')); // Quick append logic
-                                    } catch (e) {}
-
-                                    this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'heal', description: 'Code Rejected', details: `Rewriting based on critique: ${review.critique}` });
-                                    
-                                    const rewriteTask = `Original Task: ${currentApproachPrompt}\nCRITICAL REJECTION:\n"${review.critique}"\nFix the issue completely using XML format.`;
-                                    let rewrittenCodeBuffer = "";
-                                    await streamQwenForCode(rewriteTask, [], currentFileContent, data.codingStyle, [], {
-                                        onSetup: async () => {},
-                                        onToken: async (t) => { rewrittenCodeBuffer += t.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, ''); }
-                                    }, this._activeTaskController?.signal, 'rewriter');
-                                    
-                                    finalPerfectCode = injectCodeIntoContent(currentFileContent, streamTarget, rewrittenCodeBuffer, streamAction);
-                                }
-
-                                // ⚔️ PHASE 4: ADVERSARIAL QA VERIFICATION
+                                // ⚔️ PHASE 4: ADVERSARIAL QA VERIFICATION (Post-Swarm validation)
                                 this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'analyze', description: 'Adversarial QA', details: `Writing and executing hostile test script...` });
                                 const testScript = await generateAdversarialTest(currentApproachPrompt, realFilepath, finalPerfectCode);
                                 const testUri = vscode.Uri.joinPath(rootUri, '.nexus_adversarial_test.js');
@@ -944,31 +831,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 }
 
                                 if (!passedQA && isMCTSActive) {
-                                    throw new Error("Adversarial QA Failed."); // Trigger MCTS Rollback
+                                    throw new Error("Adversarial QA Failed.");
                                 }
 
-                                // 🎉 WE SURVIVED THE PIPELINE
                                 success = true;
                                 winningApproach = approachNum;
                                 finalMergedFilepath = realFilepath;
-                                
-                                // Apply the code to the real file system
-                                if (!fileExists) await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
-                                
-                                const document = await vscode.workspace.openTextDocument(fileUri);
-                                const editor = await vscode.window.showTextDocument(document, { preview: false });
-                                const mergedHeader = getAIHeader(realFilepath, currentApproachPrompt, currentFileContent) + "\n";
-
-                                await editor.edit(b => {
-                                    b.delete(new vscode.Range(0, 0, document.lineCount, 0));
-                                    b.insert(new vscode.Position(0, 0), mergedHeader + finalPerfectCode);
-                                });
-                                await document.save();
 
                                 // 🏆 MCTS SUCCESS MERGE
                                 if (isMCTSActive) {
                                     await this._terminalManager?.runCommandWithCapture(`git add . && git commit -m "chore: nexus mcts approach ${approachNum}"`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath); // Back to main branch
+                                    await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
                                     await this._terminalManager?.runCommandWithCapture(`git merge ${sandboxBranch} --squash`, rootUri.fsPath);
                                     await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
                                     await this._terminalManager?.runCommandWithCapture(`git stash pop`, rootUri.fsPath);
@@ -983,29 +856,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
                                     await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
                                 } else {
-                                    // If not MCTS, throw the error normally
                                     vscode.window.showErrorMessage(`Execution failed: ${error.message}`);
                                 }
                             }
                         }
 
-                        // FINAL RESOLUTION
                         if (success) {
                             const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
-                            this._view?.webview.postMessage({
-                                type: 'taskCompleted',
-                                task: data.task,
-                                status: "approved",
-                                filepath: finalMergedFilepath,
-                                summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)`
-                            });
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: "approved", filepath: finalMergedFilepath, summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)` });
                         } else {
-                            this._view?.webview.postMessage({
-                                type: 'taskCompleted',
-                                task: data.task,
-                                status: 'error',
-                                summary: approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.`
-                            });
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.` });
                         }
 
                         this._activeTaskController = undefined;

@@ -30,7 +30,7 @@ function decodeHTMLEntities(text: string): string {
     return decoded;
 }
 
-async function getLLMConfig() {
+export async function getLLMConfig() {
     const config = vscode.workspace.getConfiguration('nexuscode');
     // Attempt to get the key from the secure vault
     const secureKey = await globalContext.secrets.get('nexuscode_apikey');
