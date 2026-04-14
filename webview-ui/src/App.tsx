@@ -150,25 +150,38 @@ export default function App() {
 
         Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
             const folder = filepath.split('/')[0] || 'root';
-            const size = (node.exports?.length || 0) * 2 + (node.classes?.length || 0) * 3 + 2;
+            const filename = filepath.split('/').pop() || '';
 
-            nodes.push({ id: filepath, name: filepath, group: folder, val: size });
+            // 1. Core File Node (Central Hub)
+            nodes.push({ id: filepath, name: `📄 ${filename}`, group: 'file', val: 5 });
             nodeSet.add(filepath);
-        });
 
-        Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
+            // 2. 🔥 Explode Functions (INTRA-FILE)
+            node.functions?.forEach((func: string) => {
+                const funcId = `${filepath}::${func}`;
+                nodes.push({ id: funcId, name: `ƒ ${func}()`, group: 'function', val: 3 });
+                // Bright Blue for functions within the file
+                links.push({ source: filepath, target: funcId, color: 'rgba(51, 154, 240, 0.9)' });
+                nodeSet.add(funcId);
+            });
+
+            // 3. 🔥 Explode Classes (INTRA-FILE)
+            node.classes?.forEach((cls: string) => {
+                const clsId = `${filepath}::${cls}`;
+                nodes.push({ id: clsId, name: `© ${cls}`, group: 'class', val: 4 });
+                // Bright Orange for classes within the file
+                links.push({ source: filepath, target: clsId, color: 'rgba(252, 163, 17, 0.9)' });
+                nodeSet.add(clsId);
+            });
+
+            // 4. File-to-File Dependency Links (INTER-FILE)
             node.imports?.forEach((imp: string) => {
                 const cleanImp = imp.replace(/['"]/g, '');
-                let target = Object.keys(graphData).find(k => k.includes(cleanImp.replace('./', '').replace('../', '')));
-
-                if (!target) {
-                    target = cleanImp;
-                    if (!nodeSet.has(target)) {
-                        nodes.push({ id: target, name: target, group: 'external_lib', val: 1 });
-                        nodeSet.add(target);
-                    }
+                let targetFile = Object.keys(graphData).find(k => k.includes(cleanImp.replace('./', '').replace('../', '')));
+                if (targetFile) {
+                    // 🔥 Neon Magenta/Pink for cross-file imports so they leap off the screen!
+                    links.push({ source: filepath, target: targetFile, color: 'rgba(245, 66, 141, 0.8)' });
                 }
-                links.push({ source: filepath, target: target });
             });
         });
 
@@ -1344,10 +1357,10 @@ export default function App() {
                                     graphData={visualGraphData}
                                     nodeAutoColorBy="group"
                                     nodeLabel="name"
-                                    linkDirectionalArrowLength={3.5}
+                                    linkDirectionalArrowLength={4} // Slightly larger arrows
                                     linkDirectionalArrowRelPos={1}
-                                    linkWidth={0.5}
-                                    linkColor={() => 'rgba(255,255,255,0.2)'}
+                                    linkWidth={1.5} // 🔥 INCREASE LINE THICKNESS!
+                                    linkColor={(link: any) => link.color || 'rgba(255,255,255,0.2)'} // 🔥 THE FIX! READ THE DYNAMIC COLOR!
                                     nodeVal="val"
                                     backgroundColor="#0d1117"
                                     onNodeClick={(node: any) => {
@@ -1379,8 +1392,8 @@ export default function App() {
                                                 <span>📄 {filepath}</span>
                                                 <button 
                                                     style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }} 
-                                                    title="Open File"
-                                                    onClick={() => vscode.postMessage({ type: 'showDiff', filepath: filepath })}>
+                                                    title="Open File in Editor"
+                                                    onClick={() => vscode.postMessage({ type: 'openFile', filepath: filepath })}>
                                                     📂
                                                 </button>
                                             </div>

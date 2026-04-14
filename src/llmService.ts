@@ -464,35 +464,38 @@ export async function askQwenForTargetFile(taskDescription: string, projectConte
 export async function runAgenticExploration(taskDescription: string, workspaceRoot: string, statusCallback: (stepType: string, desc: string, details?: string) => void): Promise<string> {
     const { endpoint, model, apiKey, enableTools } = await getLLMConfig();
 
-    if (!enableTools) {
-        statusCallback('analyze', 'Skipped Agentic Search', 'Tools disabled in settings. Relying on RAG.');
-        return "";
-    }
+    if (!enableTools) return "";
 
-    // 🔥 THE EXPLORE SUB-AGENT: Strictly read-only, heavily constrained
-    const explorePrompt = `You are the Explore Sub-Agent. Your role is EXCLUSIVELY to search and analyze the codebase to gather context for a given task.
+    const explorePrompt = `You are the Explorer Agent. Your role is EXCLUSIVELY to search and analyze the codebase dynamically using tools.
     
     🔥 CRITICAL RULES 🔥
-    1. YOU ARE STRICTLY PROHIBITED FROM: Creating new files, modifying existing files, or writing code.
-    2. Do NOT propose solutions. Do NOT write code snippets.
-    3. Use your tools to read files, list directories, and grep the codebase.
-    4. Extract only the precise function signatures, imports, and variables relevant to the task.
-    5. Once you have enough context, reply with the exact word: "READY_TO_CODE" and nothing else.`;
+    1. YOU ARE STRICTLY PROHIBITED FROM: Creating new files, modifying files, or writing code.
+    2. Use 'grep_search' to find where specific functions, classes, or variables are defined and used across the whole project.
+    3. Use 'read_file' to extract the exact implementation logic.
+    4. Once you have enough context, reply with: "READY_TO_CODE".`;
 
     let messages: any[] = [
         { role: "system", content: explorePrompt },
-        { role: "user", content: `Task: ${taskDescription}\nExplore the codebase to gather the exact context needed.` }
+        { role: "user", content: `Task: ${taskDescription}\nHunt down the required context.` }
+    ];
+
+    // 🔥 Inject the Claude-Style Dynamic Grep Tool
+    const dynamicTools = [
+        {
+            type: "function",
+            function: {
+                name: "grep_search",
+                description: "Search the entire codebase for a regex or string pattern (like ripgrep). Use this to hunt down where functions are used.",
+                parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }
+            }
+        },
+        ...agentToolDefinitions.filter(t => ['read_file', 'list_directory'].includes(t.function.name))
     ];
 
     let gatheredContext = "";
-    statusCallback('analyze', 'Analyzed task', taskDescription);
+    statusCallback('analyze', 'Initializing Dynamic Search');
 
-    // 🔥 Filter tools to ONLY allow read operations for the Explore Agent
-    const readOnlyTools = agentToolDefinitions.filter(t =>
-        ['search_codebase', 'read_file', 'list_directory'].includes(t.function.name)
-    );
-
-    for (let step = 0; step < 3; step++) {
+    for (let step = 0; step < 4; step++) {
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 15000);
@@ -500,14 +503,12 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-                body: JSON.stringify({ model: model, messages: messages, tools: readOnlyTools, tool_choice: "auto", temperature: 0.1 }),
+                body: JSON.stringify({ model: model, messages: messages, tools: dynamicTools, tool_choice: "auto", temperature: 0.1 }),
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
 
             const data = await response.json() as any;
-            if (data.error) { throw new Error(data.error.message); }
-
             const aiMessage = data.choices[0].message;
             messages.push(aiMessage);
 
@@ -515,23 +516,59 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
                 for (const toolCall of aiMessage.tool_calls) {
                     const funcName = toolCall.function.name;
                     const funcArgs = JSON.parse(toolCall.function.arguments);
+                    let toolResult = "";
 
-                    if (funcName === 'search_codebase') { statusCallback('search', 'Searched workspace', `Keyword: ${funcArgs.keyword}`); }
-                    else if (funcName === 'read_file') { statusCallback('read', 'Read file(s)', funcArgs.filepath); }
-                    else if (funcName === 'list_directory') { statusCallback('analyze', 'Analyzed directory', funcArgs.dirpath); }
+                    // 🔥 Execute Native VS Code Grep
+                    if (funcName === 'grep_search') {
+                        statusCallback('search', 'Grep Search', `Pattern: ${funcArgs.pattern}`);
+                        try {
+                            // Search code files, explicitly ignoring heavy build directories
+                            const files = await vscode.workspace.findFiles(
+                                '**/*.{ts,tsx,js,jsx,json,html,css,py,java,cpp,c,go,rs,rb}', 
+                                '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/out/**}', 
+                                300 // Max files to scan for performance
+                            );
+                            
+                            // Safely parse the regex to avoid crash loops on bad AI payloads
+                            const regex = new RegExp(funcArgs.pattern, 'i');
+                            let matchCount = 0;
 
-                    const toolResult = await executeAgentTool(toolCall, workspaceRoot);
+                            for (const file of files) {
+                                if (matchCount >= 30) break; // Strict token safety limit!
+                                try {
+                                    const fileData = await vscode.workspace.fs.readFile(file);
+                                    const content = Buffer.from(fileData).toString('utf8');
+                                    const lines = content.split('\n');
+                                    
+                                    for (let i = 0; i < lines.length; i++) {
+                                        if (regex.test(lines[i])) {
+                                            const relativePath = vscode.workspace.asRelativePath(file);
+                                            // Format: path/to/file.ts:42: const x = ...
+                                            toolResult += `${relativePath}:${i + 1}: ${lines[i].trim().substring(0, 100)}\n`;
+                                            matchCount++;
+                                            if (matchCount >= 30) break;
+                                        }
+                                    }
+                                } catch (err) { 
+                                    // Silently skip unreadable or binary files
+                                }
+                            }
+                            toolResult = toolResult ? toolResult : "No matches found.";
+                        } catch (e) { 
+                            toolResult = "Grep failed due to invalid regex or file permissions."; 
+                        }
+                    }else {
+                        if (funcName === 'read_file') statusCallback('read', 'Read file(s)', funcArgs.filepath);
+                        toolResult = await executeAgentTool(toolCall, workspaceRoot);
+                    }
+
                     gatheredContext += `\n--- Tool Result: ${funcName}(${JSON.stringify(funcArgs)}) ---\n${toolResult}\n`;
                     messages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
                 }
             } else {
-                if (aiMessage.content && aiMessage.content.includes("READY_TO_CODE")) { break; }
-                else { break; }
+                if (aiMessage.content?.includes("READY_TO_CODE")) break;
             }
-        } catch (e) {
-            statusCallback('error', 'Agent API Error', 'Failed to use tools. Falling back to standard context.');
-            break;
-        }
+        } catch (e) { break; }
     }
     return gatheredContext;
 }
@@ -1289,4 +1326,42 @@ export async function compactConversationHistory(messages: any[]): Promise<strin
 
     const data = await response.json() as any;
     return data.choices[0].message.content.trim();
+}
+
+// 🔥 PHASE 4: MONTE CARLO TREE SEARCH (MCTS) PLANNER
+export async function generateMCTSApproaches(task: string, context: string): Promise<string[]> {
+    const systemPrompt = `You are a Principal Software Architect. 
+    The user has requested a feature/fix. Instead of providing one solution, you must provide THREE distinctly different implementation approaches.
+    
+    Approach A: The most straightforward, standard enterprise implementation.
+    Approach B: A defensive, highly-robust approach prioritizing safety and error handling.
+    Approach C: A creative, highly-optimized, or alternative pattern approach.
+    
+    Return EXACTLY valid JSON matching this schema:
+    {
+      "approaches": [
+        "Description of Approach A and exactly what logic to write...",
+        "Description of Approach B and exactly what logic to write...",
+        "Description of Approach C and exactly what logic to write..."
+      ]
+    }`;
+
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    try {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify({
+                model: model,
+                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Task: ${task}\n\nContext:\n${context}` }],
+                temperature: 0.4
+            })
+        });
+        const data = await response.json() as any;
+        const jsonStr = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(jsonStr);
+        return parsed.approaches || [task];
+    } catch (e) {
+        return [task]; // Fallback to standard single execution if JSON fails
+    }
 }

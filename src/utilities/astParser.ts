@@ -1,47 +1,60 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
-
-// Use require to bypass the namespace/type resolution errors
-const Parser = require('web-tree-sitter');
 
 export class ASTParser {
-    private static parser: any = null;
-    private static isInitialized = false;
-
     public static async init(context: vscode.ExtensionContext) {
-        if (this.isInitialized) return;
-
-        try {
-            await Parser.init();
-            this.parser = new Parser();
-            
-            const wasmPath = path.join(context.extensionPath, 'parser', 'tree-sitter-tsx.wasm');
-            const lang = await Parser.Language.load(wasmPath);
-            
-            this.parser.setLanguage(lang);
-            this.isInitialized = true;
-            console.log("AST Parser initialized successfully.");
-        } catch (error) {
-            console.error("Failed to initialize Tree-Sitter:", error);
-        }
+        // 🔥 We have stripped out the fragile WebAssembly Tree-Sitter dependency.
+        // The AST Engine is now powered by a bulletproof, zero-dependency RegExp engine.
+        console.log("AST Regex Engine initialized successfully.");
     }
 
-    public static extractSymbols(content: string): {
-        imports: string[], exports: string[], classes: string[], 
-        functions: string[], interfaces: string[], variables: string[]
-    } {
+    public static extractSymbols(content: string) {
         const result = {
-            imports: [] as string[], exports: [] as string[], classes: [] as string[],
+            imports: [] as string[], exports: [] as string[], classes: [] as string[], 
             functions: [] as string[], interfaces: [] as string[], variables: [] as string[]
         };
 
-        if (!this.parser || !this.isInitialized) return result;
-
         try {
-            const tree = this.parser.parse(content);
-            this.walkTreeSafe(tree.rootNode, result);
+            // Strip comments to avoid false positives
+            const cleanContent = content.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
+
+            // 1. Extract Imports
+            const importRegex = /import\s+(?:\{[^}]+\}|\S+)\s+from\s+['"]([^'"]+)['"]/g;
+            let match;
+            while ((match = importRegex.exec(cleanContent)) !== null) {
+                result.imports.push(match[1]);
+            }
+
+            // 2. Extract Classes
+            const classRegex = /class\s+([a-zA-Z0-9_]+)/g;
+            while ((match = classRegex.exec(cleanContent)) !== null) {
+                result.classes.push(match[1]);
+            }
+
+            // 3. Extract Standard Functions
+            const funcRegex = /function\s+([a-zA-Z0-9_]+)\s*\(/g;
+            while ((match = funcRegex.exec(cleanContent)) !== null) {
+                result.functions.push(match[1]);
+            }
+
+            // 4. Extract Arrow Functions
+            const arrowRegex = /(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>/g;
+            while ((match = arrowRegex.exec(cleanContent)) !== null) {
+                result.functions.push(match[1]);
+            }
+
+            // 5. Extract Interfaces
+            const intRegex = /interface\s+([a-zA-Z0-9_]+)/g;
+            while ((match = intRegex.exec(cleanContent)) !== null) {
+                result.interfaces.push(match[1]);
+            }
+
+            // 6. Extract Exports
+            const exportRegex = /export\s+(?:const|let|var|function|class|interface|type|default)\s+([a-zA-Z0-9_]+)?/g;
+            while ((match = exportRegex.exec(cleanContent)) !== null) {
+                if (match[1]) result.exports.push(match[1]);
+            }
         } catch (e) {
-            console.error("[GraphRAG] Critical error parsing AST content", e);
+            console.error("[AST Parser] Regex parsing failed", e);
         }
 
         return {
@@ -52,88 +65,5 @@ export class ASTParser {
             interfaces: [...new Set(result.interfaces)],
             variables: [...new Set(result.variables)]
         };
-    }
-
-    // 🔥 THE FIX: Iterative Stack traversal. No more Call Stack Exceeded, no more aborted files!
-    private static walkTreeSafe(rootNode: any, result: any) {
-        const stack = [rootNode];
-
-        while (stack.length > 0) {
-            const node = stack.pop();
-            if (!node) continue;
-
-            // Safely push children to the stack to continue traversing downward
-            if (node.children && Array.isArray(node.children)) {
-                for (let i = node.children.length - 1; i >= 0; i--) {
-                    stack.push(node.children[i]);
-                }
-            }
-
-            if (node.type === 'comment') continue;
-
-            try {
-                switch (node.type) {
-                    case 'import_statement': {
-                        const source = node.children?.find((c: any) => c.type === 'string');
-                        if (source) result.imports.push(source.text.replace(/['"`]/g, ''));
-                        break;
-                    }
-                    case 'export_statement': {
-                        const children = node.children || [];
-                        for (const child of children) {
-                            if (child.type === 'class_declaration' || child.type === 'function_declaration' || child.type === 'interface_declaration' || child.type === 'type_alias_declaration') {
-                                const idNode = child.children?.find((c: any) => c.type === 'identifier' || c.type === 'type_identifier');
-                                if (idNode) result.exports.push(idNode.text);
-                            } else if (child.type === 'lexical_declaration' || child.type === 'variable_declaration') {
-                                // 🔥 FIX: Grab ALL variables exported in a single line (e.g., export const x = 1, y = 2)
-                                const varDecls = child.children?.filter((c: any) => c.type === 'variable_declarator') || [];
-                                varDecls.forEach((varDecl: any) => {
-                                    const idNode = varDecl.children?.find((c: any) => c.type === 'identifier');
-                                    if (idNode) result.exports.push(idNode.text);
-                                });
-                            } else if (child.type === 'export_clause') {
-                                // 🔥 FIX: Grab destructured exports (e.g., export { A, B })
-                                child.children?.forEach((c: any) => {
-                                    if (c.type === 'export_specifier') {
-                                        const idNode = c.children?.find((cc: any) => cc.type === 'identifier');
-                                        if (idNode) result.exports.push(idNode.text);
-                                    }
-                                });
-                            }
-                        }
-                        break;
-                    }
-                    case 'class_declaration': {
-                        const className = node.children?.find((c: any) => c.type === 'type_identifier' || c.type === 'identifier');
-                        if (className) result.classes.push(className.text);
-                        break;
-                    }
-                    case 'function_declaration':
-                    case 'method_definition': {
-                        const funcName = node.children?.find((c: any) => c.type === 'property_identifier' || c.type === 'identifier');
-                        if (funcName) result.functions.push(funcName.text);
-                        break;
-                    }
-                    case 'interface_declaration':
-                    case 'type_alias_declaration': {
-                        const intName = node.children?.find((c: any) => c.type === 'type_identifier');
-                        if (intName) result.interfaces.push(intName.text);
-                        break;
-                    }
-                    case 'variable_declarator': {
-                        const varName = node.children?.find((c: any) => c.type === 'identifier');
-                        const isArrow = node.children?.some((c: any) => c.type === 'arrow_function');
-                        if (varName) {
-                            if (isArrow) result.functions.push(varName.text);
-                            else result.variables.push(varName.text);
-                        }
-                        break;
-                    }
-                }
-            } catch (e) {
-                // 🔥 THE SHIELD: If a weird JSX node throws an error, we silently ignore it 
-                // and keep processing the rest of the stack! The file parse survives.
-            }
-        }
     }
 }
