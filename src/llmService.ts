@@ -193,17 +193,16 @@ export function safeParseJSON<T>(jsonString: string): T {
     }
 }
 
-export async function determineIntent(prompt: string): Promise<'build' | 'explain' | 'ask'> {
-    console.log("[DEBUG-LLM] determineIntent triggered for prompt:", prompt);
+export async function determineIntent(prompt: string): Promise<'build' | 'explain' | 'ask' | 'explore'> {
     const systemPrompt = `You are an intent classifier for an AI coding assistant.
-Analyze the user's prompt and classify it into EXACTLY ONE of these three categories:
+Analyze the user's prompt and classify it into EXACTLY ONE of these four categories:
 
-1. "build" - The user wants to write new code, edit, modify, create files, refactor, add a feature, or fix a bug. 
-   CRITICAL: If the user asks to change code (e.g., "Can you edit...", "Please add...", "Make it do X"), you MUST output "build", even if it is phrased as a question!
-2. "explain" - The user is asking for a high-level summary, architectural overview, or explanation of the ENTIRE project.
-3. "ask" - The user is asking a general coding question, asking to explain a specific small snippet, or just chatting.
+1. "build" - The user gives a concrete instruction to write new code, modify a specific file, or implement a feature.
+2. "explore" - The user is asking you to debug, investigate a bug, find out why something failed, or explore the codebase autonomously. (e.g., "check why it failed", "find the bug", "investigate").
+3. "explain" - The user is asking for a high-level summary or architectural overview of the project.
+4. "ask" - The user is asking a general question, or just chatting.
 
-Reply ONLY with the exact word: "build", "explain", or "ask".`;
+Reply ONLY with the exact word: "build", "explore", "explain", or "ask".`;
 
     const { endpoint, model, apiKey } = await getLLMConfig();
     try {
@@ -224,8 +223,12 @@ Reply ONLY with the exact word: "build", "explain", or "ask".`;
         if (!data.choices || data.choices.length === 0) { return 'ask'; }
 
         const intent = data.choices[0].message.content.trim().toLowerCase();
+        
         if (intent.includes('build')) { return 'build'; }
+        // 🔥 2. Add the routing check so it actually returns 'explore'
+        if (intent.includes('explore')) { return 'explore'; } 
         if (intent.includes('explain')) { return 'explain'; }
+        
         return 'ask';
     } catch (e) {
         return 'ask';
@@ -233,7 +236,8 @@ Reply ONLY with the exact word: "build", "explain", or "ask".`;
 }
 
 export async function streamQwenChat(
-    prompt: string, contextStr: string, onToken: (token: string) => void, abortSignal?: AbortSignal
+    prompt: string, contextStr: string,
+    history: any[], onToken: (token: string) => void, abortSignal?: AbortSignal
 ): Promise<void> {
     const { endpoint, model, apiKey } = await getLLMConfig();
 
@@ -250,6 +254,17 @@ Always format your response in clean, highly readable Markdown. Use bullet point
 
     const userPrompt = `--- GATHERED CODEBASE CONTEXT ---\n${contextStr}\n\n--- USER QUERY ---\n${prompt}`;
 
+    const formattedHistory = history.map(msg => {
+        // If this is a compacted memory block, inject it as a system prompt!
+        if (msg.isCompacted) {
+            return { role: "system", content: `--- PREVIOUS CONVERSATION MEMORY ---\n${msg.content}` };
+        }
+        
+        // Strip out huge JSON plans or code attachments to save tokens
+        const safeContent = msg.content || (msg.plan ? "[Implementation Plan Generated]" : "Empty Message");
+        return { role: msg.role === 'user' ? 'user' : 'assistant', content: safeContent };
+    });
+
     try {
         const response = await fetch(endpoint, {
             method: 'POST',
@@ -258,6 +273,7 @@ Always format your response in clean, highly readable Markdown. Use bullet point
                 model: model,
                 messages: [
                     { role: "system", content: systemPrompt },
+                    ...formattedHistory,
                     { role: "user", content: userPrompt }
                 ],
                 temperature: 0.3,
@@ -834,12 +850,12 @@ export async function streamQwenForCode(
                             if (buffer.length < 30 && !buffer.includes('\n')) { continue; }
                             // Strip standard markdown backticks
                             buffer = buffer.replace(/^\s*```[a-z]*\s*\n?/i, '');
-                            // Strip raw language words
-                            buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s*\n?/i, '');
-                            //  STRIP MALFORMED TAGS (e.g., </javascript)
+                            // 🔥 POLYGLOT FIX 1: Strip raw language words for ALL major languages
+                            buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json|python|py|go|rust|rs|java|c|cpp|php|ruby)\s*\n?/i, '');
+                            // STRIP MALFORMED TAGS (e.g., </javascript)
                             buffer = buffer.replace(/^\s*<\/[a-z]+>\s*\n?/i, '');
-                            // Strip language words colliding with code
-                            buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s+(import |const |let |var |export |class |function |router)/i, '$2');
+                            // 🔥 POLYGLOT FIX 2: Strip language words colliding with code syntax (including def, func, fn)
+                            buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json|python|py|go|rust|rs|java|c|cpp|php|ruby)\s+(import |const |let |var |export |class |function |router|def |func |fn |struct )/i, '$2');
                             isFirstCodeChunk = false;
                         }
 
@@ -1008,6 +1024,7 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
     1. TOPOLOGICAL SORTING: You MUST order tasks logically. DB Models -> API Routes -> UI Components.
     2. ATOMIC FILES: Each task MUST target exactly ONE primary 'file'.
     3. EXISTING CONTEXT: Map tasks to the provided EXISTING DIRECTORY STRUCTURE.
+    4. NO METADATA TASKS: DO NOT create tasks for "reviewing", "testing", "debugging", or "verifying". Our Swarm Engine handles QA automatically in the background. ONLY output concrete file-creation or code-editing tasks.
     
     Return ONLY valid JSON matching this exact schema:
     {

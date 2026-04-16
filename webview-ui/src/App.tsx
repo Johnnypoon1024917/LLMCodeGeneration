@@ -235,7 +235,9 @@ export default function App() {
 
     useEffect(() => { codingStyleRef.current = codingStyle; }, [codingStyle]);
 
-    useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [messages, terminalStreams, glassBrainContext, pendingCommand]);
 
     useEffect(() => {
         vscode.postMessage({ type: 'webviewReady' });
@@ -270,6 +272,14 @@ export default function App() {
 
             if (data.type === 'historyCompacted') {
                 setMessages(data.messages);
+            }
+
+            if (data.type === 'clearTerminalStream') {
+                setTerminalStreams(prev => {
+                    const next = { ...prev };
+                    delete next[data.task];
+                    return next;
+                });
             }
 
             if (data.type === 'streamTerminal') {
@@ -572,7 +582,8 @@ export default function App() {
             text: finalQuery,
             context: contextStr,
             codingStyle: codingStyleRef.current,
-            autopilot: isAutopilot
+            autopilot: isAutopilot,
+            history: messages
         });
 
         setInput('');
@@ -1066,12 +1077,15 @@ export default function App() {
                                 </code>
                                 <div style={{ display: 'flex', gap: '8px' }}>
                                     <button className="btn-primary" style={{ flex: 1 }} onClick={() => {
+                                        // 🔥 UX FIX: Wipe all old terminal streams so the new execution starts on a clean slate!
+                                        setTerminalStreams({}); 
                                         vscode.postMessage({ type: 'approveCommand', command: pendingCommand.command });
                                         setPendingCommand(null);
                                     }}>Allow</button>
                                     <button className="btn-secondary" style={{ flex: 1, borderColor: 'var(--nexus-error)', color: 'var(--nexus-error)' }} onClick={() => {
                                         setPendingCommand(null);
                                         setAgentStatus("🛑 Command blocked by user.");
+                                        vscode.postMessage({ type: 'rejectCommand' });
                                     }}>Block</button>
                                 </div>
                             </div>

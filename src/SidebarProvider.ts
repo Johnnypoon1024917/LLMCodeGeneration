@@ -135,7 +135,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _lastActiveFile?: string;
     private _isMetaMode: boolean = false;
     private _undoStack = new Map<string, { filepath: string, originalContent: string }>();
-
+    private _pendingCommandResolver?: (approved: boolean) => void;
     constructor(private readonly _extensionUri: vscode.Uri) { }
 
     public setTerminalManager(manager: TerminalManager) { this._terminalManager = manager; }
@@ -169,46 +169,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async confirmAndRunCommand(
-        command: string,
-        workspacePath: string,
-        progressMessage: string,
+        command: string, 
+        workspacePath: string, 
+        progressMessage: string, 
         isAutopilot: boolean = false,
         onStream?: (chunk: string) => void
     ): Promise<{ success: boolean, output: string } | undefined> {
 
-        // 🛡️ Step 1: Automated Security Check
         this._view?.webview.postMessage({ type: 'statusUpdate', message: `🛡️ Security Monitor inspecting command...` });
         const isMalicious = await askSecurityMonitor(command);
 
         if (isMalicious) {
             vscode.window.showErrorMessage(`🚨 Nexus Security Firewall BLOCKED a malicious command: ${command}`);
-            this._view?.webview.postMessage({
-                type: 'agentStep',
-                task: 'Security',
-                stepType: 'error',
-                description: 'Command Blocked',
-                details: `The security monitor flagged this command as high-risk: ${command}`
-            });
+            this._view?.webview.postMessage({ type: 'statusUpdate', message: `🚨 Command Blocked by Security Monitor.` });
             return { success: false, output: "SECURITY_BLOCK" };
         }
 
-        // 🤖 Step 2: Handle Autopilot / Meta-Mode
         if (isAutopilot || this._isMetaMode) {
             this._view?.webview.postMessage({ type: 'statusUpdate', message: `🤖 Autopilot Executing: ${command}` });
-            return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream);
+            return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream); 
         }
 
-        // 👤 Step 3: Interactive User Firewall
-        // We send a message to the Webview to render the specific "Command Approval" card
-        this._view?.webview.postMessage({
-            type: 'requestCommandApproval',
-            command: command,
-            message: progressMessage
+        // 🔥 THE PROMISE LOCK: Halt Node.js execution until the human clicks Allow or Block!
+        const isApproved = await new Promise<boolean>((resolve) => {
+            this._pendingCommandResolver = resolve;
+            this._view?.webview.postMessage({ 
+                type: 'requestCommandApproval', 
+                command: command, 
+                message: progressMessage 
+            });
         });
 
-        // We return a pending state; the actual execution will be triggered 
-        // by the 'approveCommand' message coming BACK from the Webview.
-        return { success: true, output: "PENDING_USER_APPROVAL" };
+        this._pendingCommandResolver = undefined; // Clear the lock
+
+        if (isApproved) {
+            this._view?.webview.postMessage({ type: 'statusUpdate', message: progressMessage });
+            return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream); 
+        } else {
+            vscode.window.showInformationMessage("Command execution blocked by user.");
+            return { success: false, output: "USER_BLOCKED" };
+        }
     }
 
     public async handlePostApproval(uri: vscode.Uri) {
@@ -427,7 +427,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
-                //  NEW: Save Skills / Nexus Rules
                 case "saveNexusRules": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders) {
@@ -856,7 +855,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             this._view?.webview.postMessage({ type: "structureResponse", value: result.plan });
 
-                        } else {
+                        } else if (intent === 'explore'){
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "🔍 Agentic Exploration: Investigating..." });
+                            
+                            // 🔥 Create a dummy task ID so the UI renders the beautiful Swarm Logs
+                            const exploreTaskId = "Exploration-" + Date.now();
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: exploreTaskId, status: 'reviewing', summary: 'Gathering forensic evidence...' });
+
+                            const workspacePath = await this.getTargetContext();
+                            
+                            // 🤖 THE CLAUDE CODE LOOP: It will now use grep and read_file autonomously!
+                            const explorationContext = await runAgenticExploration(
+                                data.text, 
+                                workspacePath, 
+                                (stepType, desc, details) => {
+                                    this._view?.webview.postMessage({
+                                        type: 'agentStep',
+                                        task: exploreTaskId,
+                                        stepType: stepType,
+                                        description: desc,
+                                        details: details
+                                    });
+                                }
+                            );
+
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing evidence..." });
+                            this._view?.webview.postMessage({ type: 'startChatStream' });
+
+                            const fullContext = `--- FORENSIC EVIDENCE GATHERED BY TOOLS ---\n${explorationContext}\n\nBased on this evidence, explain exactly what went wrong and how we should fix it.`;
+
+                            // Stream the final analysis back to the chat window
+                            await streamQwenChat(
+                                data.text, 
+                                fullContext,
+                                data.history || [], 
+                                (token) => { this._view?.webview.postMessage({ type: 'chatToken', token: token }); },
+                                this._activeTaskController.signal
+                            );
+                            
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: exploreTaskId, status: 'approved', summary: 'Exploration Complete' });
+                        }else {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Gathering context..." });
 
                             const workspacePath = await this.getTargetContext();
@@ -890,6 +928,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             await streamQwenChat(
                                 fullPrompt, fullContext,
+                                data.history || [],
                                 (token) => { this._view?.webview.postMessage({ type: 'chatToken', token: token }); },
                                 this._activeTaskController.signal
                             );
@@ -1400,6 +1439,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         cancellable: false
                     }, async () => {
                         try {
+                            this._view?.webview.postMessage({ type: 'clearTerminalStream', task: "Auto-Test Setup" });
+                            this._view?.webview.postMessage({ type: 'clearTerminalStream', task: "Auto-Test Execution" });
                             const relativeFileName = vscode.workspace.asRelativePath(activeEditor.document.uri);
                             let customRules = "";
                             try {
@@ -1603,9 +1644,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     });
                     break;
                 }
+
                 case "setModel": {
                     await vscode.workspace.getConfiguration('nexuscode').update('model', data.value, vscode.ConfigurationTarget.Global);
                     vscode.window.setStatusBarMessage(`NexusCode: Model set to ${data.value}`, 3000);
+                    break;
+                }
+
+                case "approveCommand": {
+                    if (this._pendingCommandResolver) this._pendingCommandResolver(true);
+                    break;
+                }
+
+                case "rejectCommand": {
+                    if (this._pendingCommandResolver) this._pendingCommandResolver(false);
                     break;
                 }
             }
