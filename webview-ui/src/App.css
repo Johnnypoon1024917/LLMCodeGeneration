@@ -1,670 +1,281 @@
 /* webview-ui/src/App.css */
+
+/* --- RESET & BASE --- */
 :root {
-  --nexus-border: var(--vscode-focusBorder, #007fd4);
-  --nexus-bg: var(--vscode-sideBar-background, #252526);
-  --nexus-text: var(--vscode-foreground, #cccccc);
-  --nexus-subtext: var(--vscode-descriptionForeground, #8a8a8a);
-  --nexus-card-bg: var(--vscode-editorWidget-background, #2d2d2d);
-  --nexus-card-border: var(--vscode-editorWidget-border, #454545);
-  --nexus-input-bg: var(--vscode-input-background, #3c3c3c);
-  --nexus-success: var(--vscode-testing-iconPassed, #73c991);
-  --nexus-warning: var(--vscode-testing-iconQueued, #cca700);
-  --nexus-error: var(--vscode-testing-iconFailed, #f14c4c);
+    --nexus-subtext: var(--vscode-descriptionForeground);
+    --nexus-border: var(--vscode-widget-border);
+    --nexus-card-bg: var(--vscode-editor-background);
+    --nexus-error: var(--vscode-testing-iconFailed);
+    --nexus-success: var(--vscode-testing-iconPassed);
+    --nexus-warning: var(--vscode-charts-orange);
 }
 
 body, html, #root {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  width: 100%;
-  font-family: var(--vscode-font-family), sans-serif;
-  background-color: var(--nexus-bg);
-  color: var(--nexus-text);
-  overflow: hidden;
+    margin: 0;
+    padding: 0;
+    height: 100vh;
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+    background-color: var(--vscode-sideBar-background);
+    overflow: hidden;
 }
 
 .app-wrapper {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  position: relative;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
 }
 
-/* HEADER */
+.flex-col-h100 { display: flex; flexDirection: column; height: 100%; overflow: hidden; }
+.flex-gap-8 { display: flex; align-items: center; gap: 8px; }
+.mt-10 { margin-top: 10px; }
+
+/* --- HEADERS & TABS --- */
 .tiny-header {
-  padding: 10px 16px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--nexus-subtext);
-  border-bottom: 1px solid var(--nexus-card-border);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--nexus-bg);
-  z-index: 10;
+    font-size: 10px;
+    padding: 4px 8px;
+    background: var(--vscode-editorGroupHeader-tabsBackground);
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
 }
 
-/* CHAT CONTAINER */
+.tabs-header {
+    display: flex;
+    background: var(--vscode-editorGroupHeader-tabsBackground);
+}
+
+.tab-btn {
+    border: none;
+    background: transparent;
+    color: var(--nexus-subtext);
+    padding: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    border-bottom: 2px solid transparent;
+    transition: 0.2s;
+}
+.tab-btn.active {
+    color: var(--vscode-tab-activeForeground);
+    border-bottom: 2px solid var(--vscode-activityBarBadge-background);
+    font-weight: bold;
+}
+
+.tab-content-area {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+}
+
+/* --- CHAT AREA --- */
 .chat-container {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
 }
 
-/* MESSAGES (FLUSH LAYOUT) */
+.empty-chat {
+    text-align: center;
+    color: var(--nexus-subtext);
+    margin-top: 2rem;
+    font-size: 13px;
+}
+
 .message {
-  padding: 0 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
 }
 
 .message-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-  font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-weight: bold;
+    text-transform: uppercase;
 }
 
-.message-header.user { color: var(--nexus-text); }
-.message-header.assistant { color: var(--nexus-border); }
+.message-header.user { color: var(--vscode-textLink-foreground); }
+.message-header.assistant { color: var(--vscode-symbolIcon-propertyForeground); }
 
-.message-content {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--nexus-text);
-  white-space: pre-wrap;
-  word-wrap: break-word;
+.compacted-msg summary {
+    font-size: 11px;
+    color: var(--nexus-subtext);
+    cursor: pointer;
+    background: var(--vscode-badge-background);
+    padding: 4px 8px;
+    border-radius: 4px;
 }
 
-/* IMPLEMENTATION PLAN CARD */
+/* --- MARKDOWN --- */
+.markdown-body {
+    font-size: 13px;
+    line-height: 1.5;
+}
+.markdown-body p { margin-top: 0; }
+.markdown-body pre {
+    background: var(--vscode-textCodeBlock-background);
+    padding: 10px;
+    border-radius: 6px;
+    overflow-x: auto;
+    border: 1px solid var(--nexus-border);
+}
+.markdown-body code {
+    font-family: var(--vscode-editor-font-family);
+    font-size: 12px;
+}
+
+/* --- PLAN CARDS --- */
 .plan-card {
-  margin-top: 8px;
-  border: 1px solid var(--nexus-card-border);
-  background: var(--nexus-card-bg);
-  border-radius: 6px;
-  overflow: hidden;
+    background: var(--nexus-card-bg);
+    border: 1px solid var(--nexus-border);
+    border-radius: 6px;
+    overflow: hidden;
 }
-
 .plan-card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  background: rgba(0,0,0,0.1);
-  border-bottom: 1px solid var(--nexus-card-border);
-  font-size: 12px;
-  font-weight: 600;
+    background: var(--vscode-editorGroupHeader-tabsBackground);
+    padding: 10px;
+    font-weight: bold;
+    cursor: pointer;
+    font-size: 12px;
+    display: flex;
+    justify-content: space-between;
 }
 
-.btn-execute-all {
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
-  border: none;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
+.task-item-accordion {
+    border-top: 1px solid var(--nexus-border);
 }
-.btn-execute-all:hover { background: var(--vscode-button-hoverBackground); }
-
-.task-list {
-  display: flex;
-  flex-direction: column;
+.task-summary {
+    padding: 8px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
 }
-
-.task-item {
-  display: flex;
-  align-items: flex-start;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--nexus-card-border);
-  font-size: 12px;
-  gap: 10px;
+.task-body {
+    padding: 10px;
+    background: var(--vscode-editor-inactiveSelectionBackground);
+    font-size: 11px;
 }
-.task-item:last-child { border-bottom: none; }
-
-.task-desc { flex: 1; line-height: 1.4; }
-.task-summary { font-size: 11px; color: var(--nexus-subtext); margin-top: 4px; font-style: italic; }
-
-.task-status {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-.status-pending { color: var(--nexus-warning); }
-.status-approved { color: var(--nexus-success); }
-.status-error { color: var(--nexus-error); }
-
-/* REVIEW DOCK (BOTTOM SHEET) */
-.review-dock {
-  border-top: 1px solid var(--nexus-card-border);
-  background: var(--nexus-card-bg);
-  padding: 12px 16px;
-  box-shadow: 0 -4px 12px rgba(0,0,0,0.2);
-  z-index: 20;
+.agent-step-card {
+    border-left: 2px solid var(--vscode-button-background);
+    padding-left: 8px;
+    margin-bottom: 6px;
 }
 
-.review-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.review-file {
-  font-size: 11px;
-  color: var(--nexus-text);
-  padding: 4px 0;
-  display: flex;
-  justify-content: space-between;
-}
-
-.review-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-}
-.btn-primary, .btn-secondary {
-  flex: 1;
-  padding: 6px 0;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  border: none;
-  font-weight: 600;
-}
-.btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-.btn-secondary { background: transparent; border: 1px solid var(--nexus-card-border); color: var(--nexus-text); }
-
-/* INPUT AREA & TOOLBAR */
+/* --- INPUT AREA --- */
 .bottom-area {
-  padding: 12px 16px;
-  background: var(--nexus-bg);
-  border-top: 1px solid var(--nexus-card-border);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  z-index: 10;
+    padding: 10px;
+    background: var(--vscode-sideBar-background);
+    border-top: 1px solid var(--nexus-border);
 }
 
 .input-wrapper {
-  position: relative;
-  background: var(--nexus-input-bg);
-  border: 1px solid var(--nexus-card-border);
-  border-radius: 6px;
-  display: flex;
-  flex-direction: column;
+    display: flex;
+    flex-direction: column;
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 6px;
+    padding: 2px;
 }
-.input-wrapper:focus-within { border-color: var(--nexus-border); }
 
 .input-wrapper textarea {
-  width: 100%;
-  background: transparent;
-  border: none;
-  color: var(--nexus-text);
-  padding: 10px 40px 10px 12px;
-  font-family: inherit;
-  font-size: 13px;
-  resize: none;
-  outline: none;
-  box-sizing: border-box;
-  max-height: 150px;
+    background: transparent;
+    border: none;
+    color: var(--vscode-input-foreground);
+    padding: 8px;
+    resize: none;
+    font-family: var(--vscode-font-family);
+    outline: none;
 }
 
 .send-btn {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
-  width: 24px;
-  height: 24px;
-  background: var(--nexus-text);
-  color: var(--nexus-bg);
-  border: none;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: opacity 0.2s;
+    align-self: flex-end;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    border-radius: 4px;
+    padding: 4px 12px;
+    margin: 4px;
+    cursor: pointer;
 }
-.send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.stop-btn { background: var(--nexus-error); }
 
-/* MICRO TOOLBAR */
+.context-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 8px;
+}
+.context-chip {
+    background: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* --- MICRO TOOLBAR --- */
 .micro-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+}
+.micro-btn {
+    background: transparent;
+    border: none;
+    color: var(--nexus-subtext);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 4px 6px;
+}
+.micro-btn:hover { color: var(--vscode-foreground); }
+.micro-select {
+    background: transparent;
+    border: 1px solid var(--nexus-border);
+    color: var(--nexus-subtext);
+    font-size: 10px;
+    border-radius: 4px;
 }
 
-.toolbar-group {
-  display: flex;
-  gap: 6px;
-  align-items: center;
+/* --- BUTTONS --- */
+.btn-primary {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.btn-error {
+    background: transparent;
+    border: 1px solid var(--nexus-error);
+    color: var(--nexus-error);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
 }
 
-.micro-select, .micro-btn {
-  background: transparent;
-  color: var(--nexus-subtext);
-  border: 1px solid transparent;
-  padding: 4px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-  cursor: pointer;
-  outline: none;
-}
-.micro-select:hover, .micro-btn:hover {
-  background: rgba(255,255,255,0.05);
-  border-color: var(--nexus-card-border);
-  color: var(--nexus-text);
-}
-
-.meta-active { border-color: var(--nexus-error) !important; color: var(--nexus-error) !important; }
-
-/* STATUS SPINNER */
-.agent-status {
-  font-size: 11px;
-  color: var(--nexus-subtext);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 16px;
-}
+/* --- MISC UI --- */
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { 100% { transform: rotate(360deg); } }
 
-.reasoning-container {
-  margin-top: 10px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid var(--nexus-card-border);
-  border-radius: 6px;
-  font-size: 11px;
-  width: 100%;
-  box-sizing: border-box;
-}
+.padded-tab { padding: 15px; overflow-y: auto; }
+.rules-textarea { flex: 1; resize: none; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
 
-.reasoning-summary {
-  padding: 6px 10px;
-  cursor: pointer;
-  color: var(--nexus-subtext);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  user-select: none;
-  list-style: none; /* Removes the default HTML triangle */
-  font-weight: 500;
-  transition: background 0.2s;
-}
+.map-container { display: flex; flex-direction: column; background: #0d1117; }
+.map-header { padding: 10px; border-bottom: 1px solid #30363d; display: flex; justify-content: space-between; }
+.map-body { flex: 1; position: relative; }
+.active-map-btn { background: #007acc; color: white; }
 
-.reasoning-summary::-webkit-details-marker {
-  display: none;
-}
-
-.reasoning-summary:hover {
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.reasoning-content {
-  padding: 8px 10px;
-  border-top: 1px solid var(--nexus-card-border);
-  color: var(--nexus-subtext);
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  font-style: italic;
-  background: rgba(0, 0, 0, 0.15);
-  line-height: 1.4;
-}
-
-.markdown-body h1, 
-.markdown-body h2, 
-.markdown-body h3 {
-  margin-top: 16px;
-  margin-bottom: 8px;
-  font-weight: 600;
-  color: var(--vscode-editor-foreground);
-}
-
-.markdown-body h1 { font-size: 1.4em; }
-.markdown-body h2 { 
-  font-size: 1.2em; 
-  border-bottom: 1px solid var(--nexus-card-border);
-  padding-bottom: 4px;
-}
-.markdown-body h3 { font-size: 1.1em; }
-
-/* Beautiful Lists */
-.markdown-body ul, 
-.markdown-body ol {
-  margin-top: 0;
-  margin-bottom: 12px;
-  padding-left: 20px;
-}
-.markdown-body li { margin-bottom: 4px; }
-
-/* Inline Code (e.g., `variableName`) */
-.markdown-body code {
-  background-color: var(--vscode-textCodeBlock-background, rgba(0, 0, 0, 0.2));
-  color: var(--vscode-textPreformat-foreground, #ce9178);
-  padding: 2px 4px;
-  border-radius: 4px;
-  font-family: var(--vscode-editor-font-family), Consolas, monospace;
-  font-size: 0.9em;
-}
-
-/* Code Blocks (e.g., ```javascript ... ```) */
-.markdown-body pre {
-  background-color: var(--nexus-card-bg);
-  border: 1px solid var(--nexus-card-border);
-  padding: 12px;
-  border-radius: 6px;
-  overflow-x: auto;
-  margin-bottom: 12px;
-}
-
-.markdown-body pre code {
-  background-color: transparent;
-  color: var(--vscode-editor-foreground);
-  padding: 0;
-  border-radius: 0;
-  font-size: 12px;
-}
-
-/* --- MARKDOWN STYLING (KIRO/CURSOR STYLE) --- */
-.markdown-body {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--nexus-text);
-  white-space: normal; /*  THE FIX: Turns off pre-wrap so HTML elements stack normally */
-}
-
-/* Also, ensure paragraphs don't have excessive bottom margins */
-.markdown-body p {
-  margin-top: 0;
-  margin-bottom: 10px; /* Keep this tight */
-}
-
-.markdown-body p:last-child {
-  margin-bottom: 0; /* Removes the gap at the very bottom of the chat */
-}
-
-.auth-screen {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
-  padding: 24px;
-  text-align: center;
-  background: var(--nexus-bg);
-}
-
-.auth-screen h2 { color: var(--nexus-text); margin-bottom: 8px; }
-.auth-screen p { color: var(--nexus-subtext); font-size: 13px; margin-bottom: 24px; }
-
-.auth-screen input {
-  width: 100%;
-  padding: 10px;
-  margin-bottom: 12px;
-  border-radius: 4px;
-  border: 1px solid var(--nexus-card-border);
-  background: var(--nexus-input-bg);
-  color: var(--nexus-text);
-  outline: none;
-}
-.auth-screen input:focus { border-color: var(--nexus-border); }
-
-.auth-btn {
-  width: 100%;
-  padding: 10px;
-  margin-bottom: 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: bold;
-  border: none;
-}
-.auth-btn.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-.auth-btn.primary:hover { background: var(--vscode-button-hoverBackground); }
-.auth-btn.secondary { background: transparent; border: 1px solid var(--nexus-card-border); color: var(--nexus-text); }
-
-.context-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 10px 2px 10px;
-  background: transparent;
-}
-
-.context-chip {
-  display: flex;
-  align-items: center;
-  background: var(--vscode-editor-background);
-  border: 1px solid var(--nexus-card-border);
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: 11px;
-  color: var(--nexus-text);
-  max-width: 100%;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-  transition: border-color 0.2s;
-}
-
-.context-chip:hover {
-  border-color: var(--nexus-border);
-}
-
-.chip-icon {
-  margin-right: 4px;
-  opacity: 0.8;
-}
-
-.chip-label {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 160px;
-  font-family: var(--vscode-editor-font-family), Consolas, monospace;
-}
-
-.chip-close {
-  margin-left: 6px;
-  cursor: pointer;
-  color: var(--nexus-subtext);
-  font-size: 14px;
-  line-height: 1;
-  border-radius: 2px;
-}
-
-.chip-close:hover {
-  color: var(--nexus-error);
-}
-
-.message-attachments {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.attachment-details {
-  background: var(--vscode-editor-background);
-  border: 1px solid var(--nexus-card-border);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.attachment-details summary {
-  padding: 6px 10px;
-  font-size: 11px;
-  font-family: var(--vscode-editor-font-family), Consolas, monospace;
-  cursor: pointer;
-  background: rgba(255,255,255,0.02);
-  color: var(--nexus-text);
-  outline: none;
-  user-select: none;
-  list-style: none; /* Hide default arrow */
-}
-
-.attachment-details summary::-webkit-details-marker { display: none; }
-.attachment-details summary:hover { background: rgba(255,255,255,0.05); }
-
-.attachment-details .markdown-body {
-  border-top: 1px solid var(--nexus-card-border);
-  padding: 0;
-}
-
-.attachment-details pre {
-  margin: 0 !important;
-  border: none !important;
-  border-radius: 0 !important;
-}
-
-.agent-steps-container {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 10px;
-  width: 100%;
-}
-
-.agent-step-card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--nexus-card-border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-}
-
-.agent-step-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--nexus-text);
-  font-weight: 500;
-}
-
-.step-icon {
-  font-size: 13px;
-  opacity: 0.8;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-}
-
-.agent-step-details {
-  padding-left: 24px; /* Align with text, bypassing icon */
-}
-
-.detail-pill {
-  display: inline-block;
-  background: rgba(255,255,255,0.06);
-  color: var(--nexus-subtext);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-family: var(--vscode-editor-font-family), Consolas, monospace;
-  word-break: break-all;
-}
-
-/* --- @-MENTION MENU --- */
-.mention-menu {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  right: 0;
-  background: var(--nexus-card-bg);
-  border: 1px solid var(--nexus-border);
-  border-radius: 6px;
-  margin-bottom: 8px;
-  box-shadow: 0 -4px 12px rgba(0,0,0,0.3);
-  z-index: 50;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.mention-header {
-  padding: 6px 12px;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--nexus-subtext);
-  border-bottom: 1px solid var(--nexus-card-border);
-  text-transform: uppercase;
-}
-
-.mention-item {
-  padding: 8px 12px;
-  font-size: 12px;
-  color: var(--nexus-text);
-  cursor: pointer;
-  font-family: var(--vscode-editor-font-family), Consolas, monospace;
-}
-
-.mention-item:hover {
-  background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.1));
-}
-
-.glass-brain-container {
-  margin: 10px 16px;
-  background: rgba(88, 166, 255, 0.03); /* Subtle blue tint for "intelligence" */
-  border: 1px solid rgba(88, 166, 255, 0.2);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.glass-brain-details summary {
-  padding: 8px 12px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #58a6ff;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  list-style: none;
-  transition: background 0.2s;
-}
-
-.glass-brain-details summary:hover {
-  background: rgba(88, 166, 255, 0.08);
-}
-
-.glass-brain-details summary::-webkit-details-marker {
-  display: none;
-}
-
-.glass-brain-content {
-  padding: 10px;
-  border-top: 1px solid rgba(88, 166, 255, 0.1);
-  font-family: var(--vscode-editor-font-family), monospace;
-  font-size: 10px;
-  color: var(--nexus-subtext);
-  white-space: pre-wrap;
-  max-height: 250px;
-  overflow-y: auto;
-  background: rgba(0, 0, 0, 0.2);
-  line-height: 1.4;
-}
-
-.glass-brain-score {
-  color: var(--nexus-success);
-  font-weight: bold;
-  margin-right: 4px;
-}
+.auth-screen { padding: 20px; text-align: center; }
+.auth-screen input { padding: 8px; margin-bottom: 10px; width: 80%; background: var(--vscode-input-background); border: 1px solid var(--nexus-border); color: white; }

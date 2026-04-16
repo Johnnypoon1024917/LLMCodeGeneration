@@ -130,6 +130,7 @@
     "test": "vscode-test"
   },
   "dependencies": {
+    "@xenova/transformers": "^2.17.2",
     "web-tree-sitter": "^0.26.8"
   },
   "devDependencies": {
