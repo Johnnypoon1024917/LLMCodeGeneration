@@ -25,12 +25,15 @@ function hashString(str: string): string {
  * Tokenizes text and converts it into a high-dimensional mathematical vector
  */
 function vectorizeText(text: string): Map<string, number> {
-    // Convert to lowercase and extract word tokens (ignoring short words and symbols)
-    const words = text.toLowerCase().match(/\b[a-z]{3,}\b/g) || [];
+    // 1. 🔥 FIX: Split CamelCase/PascalCase (e.g., "UserAuth" -> "User Auth")
+    const spacedText = text.replace(/([a-z])([A-Z])/g, '$1 $2');
+    
+    // 2. 🔥 FIX: Extract alphanumeric words (2 chars or longer to catch 'ui', 'db', 'ts')
+    const words = spacedText.toLowerCase().match(/[a-z0-9]{2,}/g) || [];
     const vector = new Map<string, number>();
     
-    // Stop words to ignore (so 'the' doesn't cause false positives)
-    const stopWords = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'user']);
+    // 3. 🔥 FIX: Removed "user" from stopwords. Added generic code/PRD terms.
+    const stopWords = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'src', 'epic', 'story', 'task']);
 
     for (const w of words) {
         if (stopWords.has(w)) continue;
@@ -118,6 +121,10 @@ export async function parseRequirementGraph(prdContent: string): Promise<GraphDa
         
         const jsonStr = fullText.replace(/```json\n?/g, '').replace(/```/g, '').trim();
         const graphData = safeParseJSON<GraphData>(jsonStr);
+
+        if (!graphData.nodes) graphData.nodes = [];
+        if (!graphData.edges) graphData.edges = [];
+
         cachedPrdHash = currentHash;
         cachedReqGraph = graphData;
         return graphData;
@@ -175,6 +182,10 @@ export async function parseDesignGraph(designContent: string): Promise<GraphData
         
         const jsonStr = fullText.replace(/```json\n?/g, '').replace(/```/g, '').trim();
         const graphData = safeParseJSON<GraphData>(jsonStr);
+
+        if (!graphData.nodes) graphData.nodes = [];
+        if (!graphData.edges) graphData.edges = [];
+
         cachedDesignHash = currentHash;
         cachedDesignGraph = graphData;
         return graphData;
@@ -218,7 +229,7 @@ export function buildCombinedGraph(codeGraph: GraphData, reqGraph: GraphData, de
 
     // Because this is a localized Term Frequency vector space rather than a deep LLM embedding, 
     // a score of > 0.15 indicates highly significant semantic overlap.
-    const SEMANTIC_THRESHOLD = 0.15; 
+    const SEMANTIC_THRESHOLD = 0.05; 
 
     for (const req of reqNodes) {
         for (const code of codeNodes) {

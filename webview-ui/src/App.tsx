@@ -160,30 +160,38 @@ export default function App() {
 
         // FORMAT 1: New Tracability Map (Array Form)
         if (Array.isArray(graphData.nodes) && Array.isArray(graphData.edges)) {
+            const validNodeIds = new Set<string>();
+
             graphData.nodes.forEach((n: any) => {
                 let val = 5;
-                //  THE FIX: Check both group AND type!
                 const nodeGroup = (n.group || n.type || 'file').toLowerCase();
 
                 if (nodeGroup === 'epic') val = 8;
                 if (nodeGroup === 'story') val = 6;
                 if (nodeGroup === 'criteria') val = 4;
+                if (nodeGroup === 'task') val = 7;
 
+                validNodeIds.add(n.id); // Register the node ID
                 nodes.push({ id: n.id, name: n.label || n.id, group: nodeGroup, val });
             });
+
             graphData.edges.forEach((e: any) => {
-                //  THE FIX: Safely extract the ID string whether it's a raw string OR a WebGL-mutated Object!
+                // 🔥 FIX 2: Safely extract string IDs from mutated WebGL objects
                 const sourceId = typeof e.source === 'object' ? e.source.id : String(e.source || '');
                 const targetId = typeof e.target === 'object' ? e.target.id : String(e.target || '');
 
-                links.push({
-                    source: e.source,
-                    target: e.target,
-                    // Now safely check the extracted string!
-                    color: e.color ? e.color : (sourceId.includes('Epic') || sourceId.includes('Story') || sourceId.includes('EPIC') || sourceId.includes('STORY')) ? 'rgba(245, 66, 141, 0.8)' : 'rgba(51, 154, 240, 0.9)',
-                    isSemantic: e.isSemantic,
-                    weight: e.weight
-                });
+                // 🔥 FIX 3: FIREWALL - Only push the link if BOTH nodes actually exist!
+                if (validNodeIds.has(sourceId) && validNodeIds.has(targetId)) {
+                    links.push({
+                        source: sourceId,
+                        target: targetId,
+                        color: e.color ? e.color : (sourceId.includes('Epic') || sourceId.includes('Story') || sourceId.includes('EPIC') || sourceId.includes('STORY')) ? 'rgba(245, 66, 141, 0.8)' : 'rgba(51, 154, 240, 0.9)',
+                        isSemantic: e.isSemantic,
+                        weight: e.weight
+                    });
+                } else {
+                    console.warn(`[Graph Firewall] Dropped hallucinated link: ${sourceId} -> ${targetId}`);
+                }
             });
 
             return { nodes, links };
@@ -1639,9 +1647,9 @@ export default function App() {
 
                                                                 return (
                                                                     <div key={idx} style={{ fontSize: '11px', color: 'var(--vscode-textLink-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(255,255,255,0.03)', padding: '4px 6px', borderRadius: '4px' }}>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
-                                                                            <span style={{ color: 'var(--nexus-subtext)' }}>{isOutgoing ? '→' : '←'}</span>
-                                                                            <span title={connectedId}>{connectedId}</span>
+                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', flex: 1, minWidth: 0 }}>
+                                                                            <span style={{ color: 'var(--nexus-subtext)', flexShrink: 0 }}>{isOutgoing ? '→' : '←'}</span>
+                                                                            <span title={connectedId} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{connectedId}</span>
                                                                         </div>
 
                                                                         {/* Render the Mathematical Cosine Similarity Score */}
