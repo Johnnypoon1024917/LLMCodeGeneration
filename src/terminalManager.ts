@@ -10,38 +10,62 @@ export class TerminalManager {
     }
 
     /**
-     * Executes a shell command in the specified directory and captures the output.
-     * @param command The shell command to run (e.g., 'npm install').
-     * @param workspacePath The working directory for the command.
+     * Executes a shell command using cp.spawn for live streaming to the UI.
+     * Strips ANSI codes for safe LLM ingestion.
      */
-    public async runCommandWithCapture(command: string, workspacePath: string): Promise<{ success: boolean, output: string }> {
+    public async runCommandWithCapture(
+        command: string, 
+        workspacePath: string, 
+        onStream?: (chunk: string) => void
+    ): Promise<{ success: boolean; output: string; code: number | null }> {
+        
         this.outputChannel.show(true);
         this.outputChannel.appendLine(`\n[NexusCode] Executing: ${command}`);
         this.outputChannel.appendLine(`[NexusCode] CWD: ${workspacePath}`);
 
         return new Promise((resolve) => {
-            // FIX: Inject the workspace path into the execution environment
-            // This ensures tools like 'python' or 'node' can find local modules
             const envVars = { 
                 ...process.env, 
                 PYTHONPATH: workspacePath, 
                 NODE_PATH: workspacePath 
             };
 
-            cp.exec(command, { cwd: workspacePath, env: envVars }, (error, stdout, stderr) => {
-                const fullOutput = `${stdout}\n${stderr}`.trim();
-                
-                if (fullOutput) {
-                    this.outputChannel.appendLine(fullOutput);
-                }
+            const isWin = process.platform === 'win32';
+            const shell = isWin ? 'cmd.exe' : '/bin/sh';
+            const args = isWin ? ['/c', command] : ['-c', command];
 
-                if (error) {
-                    this.outputChannel.appendLine(`[NexusCode] ⚠️ Command failed with error code: ${error.code}`);
-                    resolve({ success: false, output: fullOutput || error.message });
+            // Spawn allows us to stream data live!
+            const child = cp.spawn(shell, args, { cwd: workspacePath, env: envVars, shell: false });
+
+            let fullOutput = '';
+
+            const handleChunk = (data: Buffer) => {
+                const rawText = data.toString();
+                this.outputChannel.append(rawText); // Send to VS Code Output tab
+
+                // Strip ANSI Color Codes so the LLM doesn't choke on formatting garbage
+                const cleanText = rawText.replace(/\x1b\[[0-9;]*m/g, '');
+                fullOutput += cleanText;
+                
+                // Stream to the React UI!
+                if (onStream) { onStream(cleanText); }
+            };
+
+            child.stdout.on('data', handleChunk);
+            child.stderr.on('data', handleChunk);
+
+            child.on('error', (error) => {
+                this.outputChannel.appendLine(`[NexusCode] ⚠️ Process Error: ${error.message}`);
+                resolve({ success: false, output: fullOutput + `\nPROCESS ERROR: ${error.message}`, code: -1 });
+            });
+
+            child.on('close', (code) => {
+                if (code === 0) {
+                    this.outputChannel.appendLine(`\n[NexusCode] ✅ Command succeeded.`);
                 } else {
-                    this.outputChannel.appendLine(`[NexusCode] ✅ Command succeeded.`);
-                    resolve({ success: true, output: fullOutput });
+                    this.outputChannel.appendLine(`\n[NexusCode] ⚠️ Command failed with code: ${code}`);
                 }
+                resolve({ success: code === 0, output: fullOutput, code });
             });
         });
     }
@@ -49,17 +73,10 @@ export class TerminalManager {
     /**
      * NEW: Self-Evolution Trigger
      * Recompiles the extension source code and reloads the VS Code window.
-     * Use this when the Agent edits its own source code.
-     * @param extensionRoot The root directory of the extension (usually context.extensionUri.fsPath)
      */
     public async rebuildAndReload(extensionRoot: string): Promise<void> {
         this.outputChannel.appendLine(`\n[NexusCode] 🔄 STARTING SELF-EVOLUTION SEQUENCE...`);
         
-        // 1. Install dependencies (just in case new packages were added)
-        // this.outputChannel.appendLine(`[NexusCode] Step 1: Installing dependencies...`);
-        // await this.runCommandWithCapture("npm install", extensionRoot);
-
-        // 2. Compile the TypeScript source
         this.outputChannel.appendLine(`[NexusCode] Step 1: Recompiling Extension...`);
         const compileResult = await this.runCommandWithCapture("npm run compile", extensionRoot);
 
@@ -69,11 +86,9 @@ export class TerminalManager {
             return;
         }
 
-        // 3. Reload the Window
         this.outputChannel.appendLine(`[NexusCode] Step 2: Reloading Window...`);
         vscode.window.showInformationMessage("Extension updated successfully. Reloading...");
         
-        // Give the user a moment to see the message
         setTimeout(() => {
             vscode.commands.executeCommand("workbench.action.reloadWindow");
         }, 1500);

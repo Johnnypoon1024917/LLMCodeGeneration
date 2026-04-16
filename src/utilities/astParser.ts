@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 export class ASTParser {
     public static async init(context: vscode.ExtensionContext) {
-        // 🔥 We have stripped out the fragile WebAssembly Tree-Sitter dependency.
+        //  We have stripped out the fragile WebAssembly Tree-Sitter dependency.
         // The AST Engine is now powered by a bulletproof, zero-dependency RegExp engine.
         console.log("AST Regex Engine initialized successfully.");
     }

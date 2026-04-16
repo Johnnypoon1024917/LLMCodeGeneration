@@ -388,7 +388,7 @@ body, html, #root {
   font-size: 13px;
   line-height: 1.6;
   color: var(--nexus-text);
-  white-space: normal; /* 🔥 THE FIX: Turns off pre-wrap so HTML elements stack normally */
+  white-space: normal; /*  THE FIX: Turns off pre-wrap so HTML elements stack normally */
 }
 
 /* Also, ensure paragraphs don't have excessive bottom margins */
@@ -619,4 +619,52 @@ body, html, #root {
 
 .mention-item:hover {
   background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.1));
+}
+
+.glass-brain-container {
+  margin: 10px 16px;
+  background: rgba(88, 166, 255, 0.03); /* Subtle blue tint for "intelligence" */
+  border: 1px solid rgba(88, 166, 255, 0.2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.glass-brain-details summary {
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #58a6ff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  transition: background 0.2s;
+}
+
+.glass-brain-details summary:hover {
+  background: rgba(88, 166, 255, 0.08);
+}
+
+.glass-brain-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.glass-brain-content {
+  padding: 10px;
+  border-top: 1px solid rgba(88, 166, 255, 0.1);
+  font-family: var(--vscode-editor-font-family), monospace;
+  font-size: 10px;
+  color: var(--nexus-subtext);
+  white-space: pre-wrap;
+  max-height: 250px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.2);
+  line-height: 1.4;
+}
+
+.glass-brain-score {
+  color: var(--nexus-success);
+  font-weight: bold;
+  margin-right: 4px;
 }

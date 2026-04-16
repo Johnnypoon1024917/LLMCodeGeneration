@@ -7,6 +7,7 @@ export interface AgileUserStory {
     epic: string;
     story: string;
     acceptanceCriteria: string[];
+    edgeCases: string[];
 }
 
 export interface RequirementPlan {
@@ -15,6 +16,7 @@ export interface RequirementPlan {
     targetAudience: string;
     userStories: AgileUserStory[];
     nonFunctionalRequirements: string[];
+    outOfScope: string[];
 }
 
 function decodeHTMLEntities(text: string): string {
@@ -57,7 +59,7 @@ export function safeParseJSON<T>(jsonString: string): T {
 
         let extract = jsonString.substring(firstChar, lastChar + 1);
 
-        // 🔥 THE ENTERPRISE HEALER
+        //  THE ENTERPRISE HEALER
         let healed = "";
         const stack: ('{' | '[')[] = [];
         let inString = false;
@@ -239,7 +241,7 @@ export async function streamQwenChat(
 You are having a conversation with the developer about their codebase. 
 Use the provided codebase context (Directory Tree, Open Files, and Vector DB results) to accurately answer their questions.
 
-🔥 ANTI-HALLUCINATION PROTOCOL 🔥
+ ANTI-HALLUCINATION PROTOCOL 
 The Vector DB Context may be polluted with old data from entirely different projects. 
 You MUST prioritize the "Currently Open Files" and "Directory Tree". 
 If the Vector search results (like C, Python, or FFmpeg scripts) completely clash with the open files (like a React/HTML project), IGNORE the Vector results entirely and ONLY explain the actual project files provided.
@@ -314,32 +316,33 @@ Always format your response in clean, highly readable Markdown. Use bullet point
 }
 
 export async function askQwenForRequirements(rawIdea: string, contextStr: string = "", abortSignal?: AbortSignal): Promise<RequirementPlan> {
-    const systemPrompt = `You are an elite Enterprise Business Analyst and Product Manager. 
-    The user will give you a raw, brief idea for a software application.
-    Your job is to expand this into a strict, Agile Product Requirements Document (PRD).
+    const systemPrompt = `You are an elite Staff Product Manager. 
+    The user will give you a raw idea. Expand this into a strict, Agile Product Requirements Document (PRD).
     
     Return ONLY valid JSON matching this exact schema:
     {
-        "projectName": "Catchy Name",
-        "domain": "e.g., Travel & Hospitality",
-        "targetAudience": "e.g., Budget backpackers and solo travelers",
+        "projectName": "Name",
+        "domain": "Domain",
+        "targetAudience": "Audience",
+        "outOfScope": ["Do not build an admin panel", "Do not implement password reset yet"],
         "userStories": [
             { 
                 "epic": "Authentication", 
-                "story": "As a user, I want to sign up using my email so that I can save my bookings.", 
-                "acceptanceCriteria": ["Must validate email format", "Passwords must be hashed", "Return 400 on duplicate email"] 
+                "story": "As a user...", 
+                "acceptanceCriteria": ["Must validate email format", "Return 400 on duplicate"],
+                "edgeCases": ["Network timeout during DB write", "Malformed JSON payload"]
             }
         ],
-        "nonFunctionalRequirements": ["99.9% Uptime", "Mobile Responsive UI", "GDPR Compliant Data Storage"]
+        "nonFunctionalRequirements": ["99.9% Uptime", "Sub-200ms latency"]
     }
     
-    🔥 CRITICAL RULES:
+    CRITICAL RULES:
     1. Extract exactly 5 to 8 core Epics.
-    2. Write strict, highly technical Acceptance Criteria for every user story.
-    ${contextStr ? `3. 🔥 SUPPLEMENTARY DOCUMENTATION PROVIDED 🔥\nYou MUST extract the specific API endpoints, JSON payloads, and business logic from the provided documentation and embed them directly into the Acceptance Criteria!` : '3. Include critical Non-Functional Requirements (NFRs).'}
-    4. ⚠️ THE SINGLE QUOTE PROTOCOL ⚠️: You are generating a JSON response. Therefore, inside your string values (like the Acceptance Criteria), you MUST NOT use double quotes. If you need to write a JSON payload, use SINGLE QUOTES (e.g., "Must send payload {'userId': 123}").
-    5. ⚠️ NO COMMENTS ⚠️: Do not write ANY comments (like // or /*) inside your JSON output.
-    6. ⚠️ PERFECT JSON SYNTAX ⚠️: You MUST perfectly close all strings with a double quote (") and all arrays with a closing bracket (]). DO NOT output broken arrays like '["a", "b", }. You MUST properly close it like '["a", "b"]}'.`;
+    2. Think ruthlessly about EDGE CASES for every story. What happens when the database drops? What if the user sends a 10GB payload?
+    3. Be explicitly clear in the "outOfScope" array about what we are NOT building.
+    4. THE SINGLE QUOTE PROTOCOL: Use single quotes inside your JSON values to avoid breaking the parser.
+    5. PERFECT JSON SYNTAX: Properly close all arrays and strings.`;
+
 
     const userPrompt = contextStr ? `--- ATTACHED DOCUMENTATION CONTEXT ---\n${contextStr}\n\n--- RAW IDEA ---\n${rawIdea}` : `Raw Idea: ${rawIdea}`;
 
@@ -352,7 +355,7 @@ export async function askQwenForRequirements(rawIdea: string, contextStr: string
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
             temperature: 0.2
         }),
-        signal: abortSignal // 🔥 NEW: Wire the kill switch
+        signal: abortSignal //  NEW: Wire the kill switch
     });
 
     const data = await response.json() as { error?: { message: string }, choices: { message: { content: string } }[] };
@@ -360,7 +363,7 @@ export async function askQwenForRequirements(rawIdea: string, contextStr: string
 
     const content = data.choices[0].message.content;
 
-    // 🔥 DEBUG LOG: See exactly what the AI PM wrote
+    //  DEBUG LOG: See exactly what the AI PM wrote
     console.log("[DEBUG-PM-AGENT] Raw AI Output:\n", content);
 
     const jsonStart = content.indexOf('{');
@@ -368,10 +371,21 @@ export async function askQwenForRequirements(rawIdea: string, contextStr: string
     return safeParseJSON<RequirementPlan>(content.substring(jsonStart, jsonEnd + 1));
 }
 
-// 🔥 ENHANCEMENT A: Added "relatedRequirement" to bridge Code and PRD
-export interface ProjectTask { step: string; file: string; detailedInstructions: string; relatedRequirement: string; }
-export interface AIPlan { folderStructure: string[]; implementationTasks: (string | ProjectTask)[]; }
+//  ENHANCEMENT A: Added "relatedRequirement" to bridge Code and PRD
+export interface ProjectTask {
+    step: string;
+    file: string;
+    detailedInstructions: string;
+    relatedRequirement: string;
+    dependencies: string[];
+    verificationRules: string[];
+    testStrategy: string;
+}
 
+export interface AIPlan {
+    folderStructure: string[];
+    implementationTasks: (string | ProjectTask)[];
+}
 export interface TestSetupPlan { installCommand: string; testCommand: string; filepath: string; code: string; }
 export interface AtomicEdit { filepath: string; code: string; action: 'replace' | 'append'; }
 interface QwenResponse { choices: { message: { content: string; }; }[]; }
@@ -468,7 +482,7 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
 
     const explorePrompt = `You are the Explorer Agent. Your role is EXCLUSIVELY to search and analyze the codebase dynamically using tools.
     
-    🔥 CRITICAL RULES 🔥
+     CRITICAL RULES 
     1. YOU ARE STRICTLY PROHIBITED FROM: Creating new files, modifying files, or writing code.
     2. Use 'grep_search' to find where specific functions, classes, or variables are defined and used across the whole project.
     3. Use 'read_file' to extract the exact implementation logic.
@@ -479,7 +493,7 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
         { role: "user", content: `Task: ${taskDescription}\nHunt down the required context.` }
     ];
 
-    // 🔥 Inject the Claude-Style Dynamic Grep Tool
+    //  Inject the Claude-Style Dynamic Grep Tool
     const dynamicTools = [
         {
             type: "function",
@@ -518,17 +532,17 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
                     const funcArgs = JSON.parse(toolCall.function.arguments);
                     let toolResult = "";
 
-                    // 🔥 Execute Native VS Code Grep
+                    //  Execute Native VS Code Grep
                     if (funcName === 'grep_search') {
                         statusCallback('search', 'Grep Search', `Pattern: ${funcArgs.pattern}`);
                         try {
                             // Search code files, explicitly ignoring heavy build directories
                             const files = await vscode.workspace.findFiles(
-                                '**/*.{ts,tsx,js,jsx,json,html,css,py,java,cpp,c,go,rs,rb}', 
-                                '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/out/**}', 
+                                '**/*.{ts,tsx,js,jsx,json,html,css,py,java,cpp,c,go,rs,rb}',
+                                '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/out/**}',
                                 300 // Max files to scan for performance
                             );
-                            
+
                             // Safely parse the regex to avoid crash loops on bad AI payloads
                             const regex = new RegExp(funcArgs.pattern, 'i');
                             let matchCount = 0;
@@ -539,7 +553,7 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
                                     const fileData = await vscode.workspace.fs.readFile(file);
                                     const content = Buffer.from(fileData).toString('utf8');
                                     const lines = content.split('\n');
-                                    
+
                                     for (let i = 0; i < lines.length; i++) {
                                         if (regex.test(lines[i])) {
                                             const relativePath = vscode.workspace.asRelativePath(file);
@@ -549,15 +563,15 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
                                             if (matchCount >= 30) break;
                                         }
                                     }
-                                } catch (err) { 
+                                } catch (err) {
                                     // Silently skip unreadable or binary files
                                 }
                             }
                             toolResult = toolResult ? toolResult : "No matches found.";
-                        } catch (e) { 
-                            toolResult = "Grep failed due to invalid regex or file permissions."; 
+                        } catch (e) {
+                            toolResult = "Grep failed due to invalid regex or file permissions.";
                         }
-                    }else {
+                    } else {
                         if (funcName === 'read_file') statusCallback('read', 'Read file(s)', funcArgs.filepath);
                         toolResult = await executeAgentTool(toolCall, workspaceRoot);
                     }
@@ -573,9 +587,32 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
     return gatheredContext;
 }
 
-export async function askQwenForTests(fileName: string, fileContent: string): Promise<TestSetupPlan> {
-    const systemPrompt = `You are an expert QA Engineer. Generate a comprehensive unit test file.
+export async function askQwenForTests(fileName: string, fileContent: string, projectRules: string = ""): Promise<TestSetupPlan> {
+    const systemPrompt = `You are an expert QA Engineer. Generate a comprehensive pure unit test file.
+    
+    ${projectRules ? `🔥 STRICT CUSTOM PROJECT RULES 🔥\n${projectRules}\n\n` : ''}
+    
+    🔥 DIRECTORY RULES:
+    You MUST place the test file in a dedicated 'tests/' directory at the root of the project, mirroring the original path. 
+    For example: 
+    - If source is 'src/routes/auth.ts', filepath MUST be 'tests/routes/auth.test.ts'
+
+    EXECUTION & SYNTAX RULES (CRITICAL):
+    1. DYNAMIC FRAMEWORK: You must use the industry-standard test framework for the target file's language:
+       - .ts / .js -> Jest (Command: "npx jest --preset ts-jest")
+       - .py -> PyTest (Command: "pytest")
+       - .go -> Go Test (Command: "go test ./...")
+       - .rs -> Cargo (Command: "cargo test")
+    2. TYPESCRIPT/JEST SPECIFIC: If using Jest, you MUST import globals: import { describe, it, expect, jest } from '@jest/globals';
+    3. STRICT UNIT TESTING: You are strictly forbidden from establishing database connections. Do not import or start any memory servers.
+    4. MONGOOSE SCHEMA TESTING: Test schema validation synchronously using \`const err = new Model(data).validateSync();\`.
+    5. THE UNIQUE CONSTRAINT RULE: validateSync() CANNOT test "unique" constraints because uniqueness requires a database. DO NOT write tests for unique emails or usernames.
+    6. TYPESCRIPT STRICT MODE SAFEGUARDS: 
+       - \`validateSync()\` can return null. ALWAYS use optional chaining (e.g., \`expect(err?.errors?.username).toBeDefined();\`) to avoid TS18047 "possibly null" errors.
+       - NEVER access deep Mongoose properties like \`.properties.message\` on errors. Just assert the field error exists: \`expect(err?.errors?.email).toBeDefined();\`.
+    
     Return valid JSON: { "installCommand": "...", "testCommand": "...", "filepath": "...", "code": "..." }`;
+
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await fetch(endpoint, {
         method: 'POST',
@@ -586,9 +623,22 @@ export async function askQwenForTests(fileName: string, fileContent: string): Pr
             temperature: 0.1
         })
     });
+
     const data = await response.json() as QwenResponse;
-    let content = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    return safeParseJSON<TestSetupPlan>(content);
+    let jsonStr = data.choices[0].message.content;
+
+    // 1. Strip markdown code blocks if the LLM used them
+    jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```/g, '').trim();
+
+    // 2. Surgically extract ONLY the JSON object using Regex
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+
+    if (!jsonMatch) {
+        throw new Error("Failed to extract JSON object from the AI response.");
+    }
+
+    // 3. Pass the strictly extracted JSON to our Enterprise Healer
+    return safeParseJSON<TestSetupPlan>(jsonMatch[0]);
 }
 
 export async function askQwenToFixError(errorOutput: string, sourceFilePath: string, sourceCode: string, testFilePath: string, testCode: string): Promise<{ filepath: string, code: string }> {
@@ -644,7 +694,7 @@ export async function streamQwenForCode(
         onFileComplete?: () => Promise<void>
     },
     abortSignal?: AbortSignal,
-    agentMode: 'creator' | 'healer' | 'rewriter' = 'creator' // 🔥 THE SPLIT
+    agentMode: 'creator' | 'healer' | 'rewriter' = 'creator' //  THE SPLIT
 ): Promise<void> {
     const { endpoint, model, apiKey } = await getLLMConfig();
 
@@ -658,24 +708,23 @@ export async function streamQwenForCode(
         personaBrain = `You are the Redemption Agent. Your previous implementation was REJECTED by the Principal Engineer. You must read their critique and fix the logic completely. Do not repeat your previous mistakes.`;
     }
 
-    const lineCount = currentFileContent.trim() ? currentFileContent.split('\n').length : 0;
+    const lineCount = agentMode === 'rewriter' ? 0 : (currentFileContent.trim() ? currentFileContent.split('\n').length : 0);
 
-    // 🔥 THE FIX: Zero-Trust Replace Policy. If the file exists, FORCE the AST Splicer.
-    const hasExistingCode = lineCount > 0;
+    const forceReplace = lineCount === 0;
 
-    const chunkingRules = hasExistingCode
+    const chunkingRules = !forceReplace
         ? `PRECISE EDITING PROTOCOL:
     This file already exists. You MUST NOT use 'replace'. 
     Use <action>insert_before</action> to add new routes/logic. Target the EXACT LINE of code where the new code should be inserted above.
     Output ONLY the specific new code to be inserted.`
         : `<action> rules: 
-    - 'replace': Creates a brand new file from scratch.`;
+    - 'replace': Overwrites the file completely from scratch. You MUST output the ENTIRE file content.`;
 
     const systemPrompt = `${personaBrain}
     
     CRITICAL RULE: ATOMIC SINGLE-FILE MODE. You are executing exactly ONE atomic task.
     
-    🔥 MULTI-FILE EDITING IS STRICTLY FORBIDDEN 🔥
+     MULTI-FILE EDITING IS STRICTLY FORBIDDEN 
     Output exactly ONE block of code.
     
     ZERO CONVERSATIONAL FILLER ALLOWED. Go straight to the point.
@@ -696,9 +745,10 @@ export async function streamQwenForCode(
     
     EXAMPLE EXACT OUTPUT:
     <plan>1 sentence explaining what you will do.</plan>
-    <action>${hasExistingCode ? 'insert_before' : 'replace'}</action>
-    ${hasExistingCode ? '<target>exact line of code to insert above</target>\n' : ''}<self_critique>Briefly critique your own plan. Did you follow the NO STUBS rule? Did you match the project's existing style? Are there any logical flaws?</self_critique>
-    \`\`\`javascript
+    <filepath>src/exact/path/to/file.ext</filepath>
+    <action>${forceReplace ? 'replace' : 'insert_before'}</action>
+    ${!forceReplace ? '<target>line</target>' : ''}<self_critique>Briefly critique your own plan. Did you follow the NO STUBS rule? Did you match the project's existing style?</self_critique>
+    \`\`\`typescript
     // YOUR CODE GOES HERE. TRIPLE BACKTICKS ARE MANDATORY!
     \`\`\`
     <command></command>`;
@@ -739,7 +789,7 @@ export async function streamQwenForCode(
                     const token = data.choices[0]?.delta?.content || "";
                     buffer += token;
 
-                    // 🔥 1. GLOBAL COMMAND EXTRACTOR (Routes purely to onCommand)
+                    //  1. GLOBAL COMMAND EXTRACTOR (Routes purely to onCommand)
                     const cmdRegex = /<command>\s*(.*?)\s*<\/command>/is;
                     let cmdMatch;
                     while ((cmdMatch = buffer.match(cmdRegex)) !== null) {
@@ -748,56 +798,36 @@ export async function streamQwenForCode(
                     }
 
                     if (!isStreamingCode) {
-                        if (buffer.match(/<\/reason/i) || buffer.includes('<filepath>')) {
-                            isReasoningCompleted = true;
-                        }
-
-                        if (callbacks.onReasoning && !isReasoningCompleted) {
-                            // Add self_critique to the regex
-                            let cleanToken = token.replace(/<\/?(plan|reasoning|filepath|action|target|command|typescript|self_critique)[^>]*>/gi, '');
-                            if (cleanToken && !buffer.includes('###')) {
+                        // Stream the AI's internal thoughts to the UI, stripping out the XML tags
+                        if (callbacks.onReasoning) {
+                            let cleanToken = token.replace(/<\/?(plan|filepath|action|target|command|self_critique)[^>]*>/gi, '');
+                            if (cleanToken) {
                                 await callbacks.onReasoning(cleanToken);
                             }
                         }
 
+                        //  THE STRICT XML TRANSITION FIX
                         const fpMatch = buffer.match(/<filepath>\s*(.*?)\s*<\/filepath>/i);
                         const acMatch = buffer.match(/<action>\s*(.*?)\s*<\/action>/i);
                         const targetMatch = buffer.match(/<target>\s*(.*?)\s*<\/target>/i);
-                        const codeStartIdx = Math.max(buffer.lastIndexOf('```'), buffer.lastIndexOf('<code>'));
-                        const ultraFallbackMatch = buffer.match(/<\/?[a-z]+>\s*(?:(?:typescript|javascript|tsx|jsx|ts|js|html|css|json)\s*)?(import |const |let |var |export |class |function )/i);
 
-                        if ((fpMatch && acMatch && (codeStartIdx !== -1 || buffer.length - (acMatch.index! + acMatch[0].length) > 25)) ||
-                            codeStartIdx !== -1 ||
-                            ultraFallbackMatch) {
+                        // 🛑 NO MORE GUESSWORK. WE STRICTLY WAIT FOR THE TRIPLE BACKTICKS!
+                        const codeStartRegex = /```[a-zA-Z]*\n|<code>/i;
+                        const codeStartMatch = buffer.match(codeStartRegex);
 
-                            const filepath = fpMatch ? fpMatch[1].trim() : "unknown";
-                            const action = acMatch ? acMatch[1].trim().toLowerCase() : "replace";
+                        if (fpMatch && acMatch && codeStartMatch) {
+                            const filepath = fpMatch[1].trim();
+                            const action = acMatch[1].trim().toLowerCase();
                             const target = targetMatch ? targetMatch[1].trim() : undefined;
 
                             await callbacks.onSetup(action, filepath, target);
 
-                            let cutIndex = 0;
-                            if (codeStartIdx !== -1) {
-                                const nl = buffer.indexOf('\n', codeStartIdx);
-                                cutIndex = nl !== -1 ? nl + 1 : codeStartIdx + 3;
-                            } else if (ultraFallbackMatch) {
-                                cutIndex = ultraFallbackMatch.index! + ultraFallbackMatch[0].indexOf(ultraFallbackMatch[1]);
-                            } else if (targetMatch) {
-                                cutIndex = targetMatch.index! + targetMatch[0].length;
-                            } else if (acMatch) {
-                                cutIndex = acMatch.index! + acMatch[0].length;
-                            }
+                            // Slice the buffer exactly after the backticks finish
+                            const cutIndex = codeStartMatch.index! + codeStartMatch[0].length;
+                            buffer = buffer.substring(cutIndex);
 
-                            let codeBuffer = buffer.substring(cutIndex);
-
-                            codeBuffer = codeBuffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s*\n/i, '');
-                            // Add self_critique to the regex
-                            codeBuffer = codeBuffer.replace(/<\/?(plan|filepath|action|target|reasoning|reason|typescript|javascript|self_critique)[^>]*>/gi, '');
-
-                            buffer = codeBuffer;
                             isStreamingCode = true;
                             isFirstCodeChunk = true;
-                            isReasoningCompleted = false;
                         }
                     } else {
                         if (isFirstCodeChunk) {
@@ -806,7 +836,7 @@ export async function streamQwenForCode(
                             buffer = buffer.replace(/^\s*```[a-z]*\s*\n?/i, '');
                             // Strip raw language words
                             buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s*\n?/i, '');
-                            // 🔥 STRIP MALFORMED TAGS (e.g., </javascript)
+                            //  STRIP MALFORMED TAGS (e.g., </javascript)
                             buffer = buffer.replace(/^\s*<\/[a-z]+>\s*\n?/i, '');
                             // Strip language words colliding with code
                             buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json)\s+(import |const |let |var |export |class |function |router)/i, '$2');
@@ -870,21 +900,37 @@ export async function getAvailableModels(): Promise<string[]> {
 }
 
 export async function askQwenForDesign(requirements: string, abortSignal?: AbortSignal): Promise<string> {
-    const systemPrompt = `You are an elite Principal System Architect at a top FAANG company. 
-    The user has provided a Product Requirements Document (PRD).
-    Your job is to generate a massive, highly detailed Technical Design Document (TDD) based strictly on these requirements.
-    
-    The document MUST include:
-    1. High-Level Architecture: System context, data flow, scaling strategy, and tech stack justifications.
-    2. Database Schema: Detailed tables, fields, data types, and relationships.
-    3. API Design: Core REST/GraphQL routes, payload structures, and HTTP status codes.
-    4. Enterprise ASCII Diagrams: You MUST draw extremely detailed, professional ASCII diagrams. You must include:
-       - A complex Network/Architecture Diagram (including Gateways, Load Balancers, Microservices, DB clusters).
-       - An Entity-Relationship (ER) Diagram showing tables and foreign keys.
-       - A Sequence Diagram illustrating the core critical-path data flow (e.g., authentication or checkout).
-    
-    Do NOT generate simple, tiny boxes. Use professional spacing, comprehensive labels, and detailed ASCII connectors.
-    Format the output in clean, highly readable Markdown. Return ONLY the Markdown text.`;
+    const systemPrompt = `You are an elite FAANG Software Architect.
+Analyze the provided PRD and design a highly scalable System Architecture.
+
+CRITICAL INSTRUCTION - AGENT-NATIVE FORMATTING:
+You must wrap your output in XML structural tags so that other AI agents can parse it deterministically.
+Use YAML frontmatter at the very top.
+
+Follow this exact format:
+---
+version: 1.0.0
+type: architecture_design
+---
+
+# System Architecture
+
+<architecture_components>
+## Core Components
+(Detail your frontend, backend, database layers here)
+</architecture_components>
+
+<data_models>
+## Data Models
+(Detail your schemas, e.g., <model id="User">...</model>)
+</data_models>
+
+<api_routes>
+## API Specs
+(Detail your endpoints, e.g., <api method="POST" route="/login">...</api>)
+</api_routes>`;
+
+
 
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await fetch(endpoint, {
@@ -896,7 +942,7 @@ export async function askQwenForDesign(requirements: string, abortSignal?: Abort
             temperature: 0.2,
             stream: true
         }),
-        signal: abortSignal // 🔥 NEW: Wire the kill switch
+        signal: abortSignal //  NEW: Wire the kill switch
     });
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -953,29 +999,31 @@ export async function askQwenForDesign(requirements: string, abortSignal?: Abort
     return fullDesign.trim();
 }
 
-export async function askQwenForProjectTasks(requirements: string, design: string, abortSignal?: AbortSignal): Promise<AIPlan> {
-    const systemPrompt = `You are the Coordinator Agent (Lead Staff Engineer). 
-    The user has provided a PRD and a Technical Design Document.
-    YOU DO NOT WRITE CODE. Your job is to break the entire project down into an actionable, exhaustive implementation plan for the Coder Agents.
+export async function askQwenForProjectTasks(requirements: string, design: string, existingStructure: string, abortSignal?: AbortSignal): Promise<AIPlan> {
+    const systemPrompt = `You are the Principal Orchestrator Agent.
+    The user has provided a PRD, a Technical Design Document, and the existing Directory Structure.
+    YOU DO NOT WRITE CODE. Break the project down into an actionable, exhaustive implementation plan.
+    
+     CRITICAL ENGINEERING RULES 
+    1. TOPOLOGICAL SORTING: You MUST order tasks logically. DB Models -> API Routes -> UI Components.
+    2. ATOMIC FILES: Each task MUST target exactly ONE primary 'file'.
+    3. EXISTING CONTEXT: Map tasks to the provided EXISTING DIRECTORY STRUCTURE.
     
     Return ONLY valid JSON matching this exact schema:
     {
-      "folderStructure": ["src/index.ts", "src/routes/auth.ts"],
+      "folderStructure": ["src/index.ts", "src/models/user.ts"],
       "implementationTasks": [
         {
-          "step": "Setup Express server and middleware",
-          "file": "src/index.ts",
-          "detailedInstructions": "Initialize Express. Configure CORS, Helmet, and Morgan middleware.",
-          "relatedRequirement": "Epic: Authentication - Core Server Setup"
+          "step": "Define User Model",
+          "file": "src/models/user.ts",
+          "detailedInstructions": "Export a Mongoose schema matching the Design Doc Interface. Do not write the API yet.",
+          "relatedRequirement": "Epic: Authentication",
+          "dependencies": [],
+          "verificationRules": ["Must export 'User'", "Must contain email field"],
+          "testStrategy": "Write a unit test verifying the schema validates a correct email and rejects an invalid one."
         }
       ]
-    }
-    
-    🔥 CRITICAL RULES 🔥:
-    1. You MUST output an array of OBJECTS for 'implementationTasks'.
-    2. EXHAUSTIVE TASKS: 'detailedInstructions' must be a massive paragraph detailing EXACTLY what libraries to use, what methods to write, and the expected business logic from the PRD.
-    3. ATOMIC EXECUTION: Each task MUST target exactly 1 primary 'file'.
-    4. TRACEABILITY: 'relatedRequirement' MUST reference the exact Epic/Story from the PRD.`;
+    }`;
 
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await fetch(endpoint, {
@@ -983,11 +1031,14 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
             model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `PRD:\n${requirements}\n\nDESIGN:\n${design}` }],
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
+            ],
             temperature: 0.1,
             stream: true
         }),
-        signal: abortSignal // 🔥 NEW: Wire the kill switch
+        signal: abortSignal
     });
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1053,7 +1104,9 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
                     step: task,
                     file: "unknown",
                     detailedInstructions: task,
-                    relatedRequirement: "General/Infrastructure"
+                    relatedRequirement: "General",
+                    dependencies: [],
+                    verificationRules: []
                 };
             }
             return task;
@@ -1098,7 +1151,7 @@ export async function askQwenToVerifyTask(taskDescription: string, requirements:
     return safeParseJSON<{ verified: boolean, reasoning: string }>(content.substring(jsonStart, jsonEnd + 1));
 }
 
-// 🔥 ENHANCEMENT A: The Living PRD QA Agent
+//  ENHANCEMENT A: The Living PRD QA Agent
 export async function askQwenToUpdatePRD(prdContext: string, taskDescription: string, filepath: string, newCode: string): Promise<{ original: string, updated: string }[]> {
     const systemPrompt = `You are an elite QA Agent maintaining a "Living PRD".
     The developer just completed a task. You must read the new code and the PRD.
@@ -1146,7 +1199,7 @@ export async function askQwenToUpdatePRD(prdContext: string, taskDescription: st
     }
 }
 
-// 🔥 PILLAR 3: The Completeness Reviewer
+//  PILLAR 3: The Completeness Reviewer
 export async function reviewCodeCompleteness(taskDescription: string, prdContext: string, generatedCode: string): Promise<{ isComplete: boolean, critique: string }> {
     const systemPrompt = `You are a ruthless Principal Software Engineer. Your job is to review code written by a Junior AI.
     You are checking for FUNCTIONAL COMPLETENESS. 
@@ -1189,7 +1242,7 @@ export async function reviewCodeCompleteness(taskDescription: string, prdContext
     }
 }
 
-// 🔥 STEP 4: The Global Build-Healer Agent
+//  STEP 4: The Global Build-Healer Agent
 export async function askQwenToHealGlobalBuild(buildErrors: string, filesContext: string, codingStyle: string): Promise<AtomicEdit[]> {
     const systemPrompt = `You are an elite Principal DevOps Engineer. The global project build just failed.
     You will be provided with the raw compiler error log and the contents of the files mentioned in the errors.
@@ -1205,7 +1258,7 @@ export async function askQwenToHealGlobalBuild(buildErrors: string, filesContext
         }
     ]
     
-    🔥 CRITICAL RULES:
+     CRITICAL RULES:
     1. Only fix the exact lines causing the compilation errors.
     2. Output the FULL file content for the "replace" action so we don't lose any existing logic.
     3. Do NOT output markdown outside of the JSON array.`;
@@ -1233,7 +1286,7 @@ export async function askQwenToHealGlobalBuild(buildErrors: string, filesContext
     }
 }
 
-// 🔥 PHASE 4: ZERO-TRUST SECURITY FIREWALL
+//  PHASE 4: ZERO-TRUST SECURITY FIREWALL
 export async function askSecurityMonitor(command: string): Promise<boolean> {
     const systemPrompt = `You are an elite Security Monitor for an autonomous coding agent.
     Your ONLY job is to evaluate bash/terminal commands before they are executed.
@@ -1267,7 +1320,7 @@ export async function askSecurityMonitor(command: string): Promise<boolean> {
     }
 }
 
-// 🔥 PHASE 4: ADVERSARIAL VERIFICATION SPECIALIST
+//  PHASE 4: ADVERSARIAL VERIFICATION SPECIALIST
 export async function generateAdversarialTest(task: string, filepath: string, code: string): Promise<string> {
     const systemPrompt = `You are a hostile Verification Specialist. You do not trust the Coder Agent.
     Your job is to write a temporary Node.js script to aggressively test the code they just wrote.
@@ -1292,7 +1345,7 @@ export async function generateAdversarialTest(task: string, filepath: string, co
     return script.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').trim();
 }
 
-// 🔥 PHASE 2: THE COMPACTOR DAEMON
+//  PHASE 2: THE COMPACTOR DAEMON
 export async function compactConversationHistory(messages: any[]): Promise<string> {
     const systemPrompt = `You are a background Context Compactor AI. 
     Your ONLY job is to read a long conversation history and summarize it into a highly dense, structured memory block.
@@ -1328,7 +1381,7 @@ export async function compactConversationHistory(messages: any[]): Promise<strin
     return data.choices[0].message.content.trim();
 }
 
-// 🔥 PHASE 4: MONTE CARLO TREE SEARCH (MCTS) PLANNER
+//  PHASE 4: MONTE CARLO TREE SEARCH (MCTS) PLANNER
 export async function generateMCTSApproaches(task: string, context: string): Promise<string[]> {
     const systemPrompt = `You are a Principal Software Architect. 
     The user has requested a feature/fix. Instead of providing one solution, you must provide THREE distinctly different implementation approaches.

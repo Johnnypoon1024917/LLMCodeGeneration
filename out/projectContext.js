@@ -61,7 +61,7 @@ async function getProjectContext(rootPath) {
     if (!rawRootDir)
         return "No workspace open.";
     const rootDir = normalizePath(rawRootDir);
-    // 🔥 FIX 1: Check the cache! If we already scanned this folder, return it instantly.
+    //  FIX 1: Check the cache! If we already scanned this folder, return it instantly.
     // This drops your TTFT (Time-To-First-Token) from ~3 seconds down to ~20 milliseconds!
     if (contextCache.has(rootDir)) {
         return contextCache.get(rootDir);
@@ -81,7 +81,7 @@ async function getProjectContext(rootPath) {
     filePaths.sort();
     const treeString = generateAsciiTree(filePaths);
     const finalContext = `CURRENT REPOSITORY STRUCTURE (${rootPath ? 'Meta-Mode' : 'User-Mode'}):\n${treeString}`;
-    // 🔥 FIX 2: Save the generated tree to the cache before returning it
+    //  FIX 2: Save the generated tree to the cache before returning it
     contextCache.set(rootDir, finalContext);
     return finalContext;
 }

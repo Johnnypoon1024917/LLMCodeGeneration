@@ -19,8 +19,8 @@ export class SkillsManager {
             const data = await vscode.workspace.fs.readFile(skillUri);
             const skillContent = Buffer.from(data).toString('utf8');
             
-            // 🔥 Inject the custom Markdown skill into a master directive
-            const skillPrompt = `🔥 CUSTOM ENTERPRISE SKILL ACTIVATED: /${skillName} 🔥\n\nYou MUST strictly follow these workflow instructions defined by the user:\n\n---\n${skillContent}\n---\n\nUser's Target Request:\n${restOfQuery}`;
+            //  Inject the custom Markdown skill into a master directive
+            const skillPrompt = ` CUSTOM ENTERPRISE SKILL ACTIVATED: /${skillName} \n\nYou MUST strictly follow these workflow instructions defined by the user:\n\n---\n${skillContent}\n---\n\nUser's Target Request:\n${restOfQuery}`;
             
             return { isSkill: true, skillPrompt, originalQuery: restOfQuery };
         } catch (e) {

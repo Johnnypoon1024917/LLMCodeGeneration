@@ -58,13 +58,13 @@ async function activate(context) {
     const lensProvider = new AILensProvider_1.AILensProvider();
     const provenanceTracker = new provenanceTracker_1.ProvenanceTracker(lensProvider);
     const sidebarProvider = new SidebarProvider_1.SidebarProvider(context.extensionUri);
-    // 🔥 Boot the Terminal Auto-Debugger
+    //  Boot the Terminal Auto-Debugger
     (0, terminalInterceptor_1.activateTerminalInterceptor)(sidebarProvider, context);
     // 2. Wire them together
     sidebarProvider.setProvenanceTracker(provenanceTracker);
     sidebarProvider.setTerminalManager(terminalManager);
     const selector = [{ language: '*', scheme: '*' }];
-    // 🔥 ENTERPRISE UPGRADE: Group all registrations into a single, clean push block
+    //  ENTERPRISE UPGRADE: Group all registrations into a single, clean push block
     context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('nexus-original', diffProvider_1.originalContentProvider), 
     // --- PROVIDERS ---
     vscode.languages.registerCodeLensProvider(selector, lensProvider), vscode.window.registerWebviewViewProvider("qwen-sidebar", sidebarProvider, {
@@ -142,7 +142,7 @@ async function activate(context) {
         if (editor && !editor.selection.isEmpty) {
             const selection = editor.document.getText(editor.selection);
             const filename = vscode.workspace.asRelativePath(editor.document.uri);
-            // 🔥 ENTERPRISE UPGRADE: Send structured context instead of raw text
+            //  ENTERPRISE UPGRADE: Send structured context instead of raw text
             sidebarProvider.sendMessageToWebview({
                 type: 'addContext',
                 file: filename,
@@ -156,7 +156,7 @@ async function activate(context) {
         if (editor && !editor.selection.isEmpty) {
             const selection = editor.document.getText(editor.selection);
             const filename = vscode.workspace.asRelativePath(editor.document.uri);
-            // 🔥 Attach the context silently, then trigger an explain prompt
+            //  Attach the context silently, then trigger an explain prompt
             const contextStr = `\n\`\`\`${editor.document.languageId} title="${filename}"\n${selection}\n\`\`\`\n`;
             sidebarProvider.sendMessageToWebview({
                 type: 'addUserMessageAndSubmit',
@@ -170,7 +170,7 @@ async function activate(context) {
         if (editor && !editor.selection.isEmpty) {
             const selection = editor.document.getText(editor.selection);
             const filename = vscode.workspace.asRelativePath(editor.document.uri);
-            // 🔥 Attach the context silently, then pre-fill a modification request
+            //  Attach the context silently, then pre-fill a modification request
             sidebarProvider.sendMessageToWebview({ type: 'addContext', file: filename, code: selection, language: editor.document.languageId });
             sidebarProvider.sendMessageToWebview({ type: 'insertText', text: `I want to modify the selected code. Please change it to: ` });
             vscode.commands.executeCommand('qwen-sidebar.focus');

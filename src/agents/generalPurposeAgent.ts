@@ -17,7 +17,7 @@ export async function runCoderAgent(
 ): Promise<CodeDiff> {
     log("👨‍💻 Coder Agent: Translating spec into syntax...");
 
-    // 🔥 THE COMPLETE ENTERPRISE PROMPT
+    //  THE COMPLETE ENTERPRISE PROMPT
     const systemPrompt = `You are an expert Software Engineer. Your objective is to translate the provided Technical Specification into production-ready code.
 You must strictly adhere to the execution plan. Do not deviate, do not add unrequested features, and do not leave incomplete stubs (e.g., "// TODO").
 

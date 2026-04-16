@@ -61,7 +61,7 @@ async function getProjectStyleGuides() {
     }
     // If we found rules, we wrap them in a highly aggressive, undeniable prompt wrapper
     if (styleContext) {
-        return `\n\n🔥 CRITICAL ARCHITECTURE & STYLE RULES 🔥\nYou MUST strictly follow these project-specific rules when writing or modifying code. Disobeying these rules is a critical failure:\n${styleContext}`;
+        return `\n\n CRITICAL ARCHITECTURE & STYLE RULES \nYou MUST strictly follow these project-specific rules when writing or modifying code. Disobeying these rules is a critical failure:\n${styleContext}`;
     }
     return "";
 }

@@ -15,7 +15,7 @@ export class AILensProvider implements vscode.CodeLensProvider {
     private _refreshTimeout: NodeJS.Timeout | undefined;
 
     constructor() {
-        // 🔥 FIX 1: Listen for text changes to fix shifted or disappearing lenses
+        //  FIX 1: Listen for text changes to fix shifted or disappearing lenses
         vscode.workspace.onDidChangeTextDocument((e) => {
             const hasEditsInDoc = this.pendingEdits.some(edit => edit.uri.toString() === e.document.uri.toString());
             if (hasEditsInDoc) {

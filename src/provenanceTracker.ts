@@ -6,7 +6,7 @@ export class ProvenanceTracker {
     private reviewDecorationType: vscode.TextEditorDecorationType;
     private _view?: vscode.WebviewView;
 
-    // 🔥 FIX: Declare the Map to store original and proposed code snapshots
+    //  FIX: Declare the Map to store original and proposed code snapshots
     public pendingSnapshots = new Map<string, { original: string, proposed: string }>();
 
     constructor(private lensProvider: AILensProvider) {
@@ -43,7 +43,7 @@ export class ProvenanceTracker {
             range: new vscode.Range(startLine, 0, startLine, 0) 
         });
 
-        // 4. 🔥 Force VS Code to redraw the buttons AFTER the text buffer syncs
+        // 4.  Force VS Code to redraw the buttons AFTER the text buffer syncs
         setTimeout(() => {
             this.lensProvider.refresh();
         }, 500);

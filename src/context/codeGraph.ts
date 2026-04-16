@@ -130,7 +130,7 @@ export function getGraphJSON(): string {
 export function getSmartASTContext(query: string): string {
     const correlatedNodes = calculateGraphCorrelation(query);
     
-    // 🔥 THE FIX: Inject the [Score:] prefix so SidebarProvider.ts can parse it for the UI!
+    //  THE FIX: Inject the [Score:] prefix so SidebarProvider.ts can parse it for the UI!
     return correlatedNodes.slice(0, 5).map(c => 
         `[Score: ${c.score}] 📍 ${c.filepath} (${c.reasons.join(', ')})\nExports: ${c.node.exports.join(', ')}\nClasses: ${c.node.classes.join(', ')}\nFunctions: ${c.node.functions.join(', ')}`
     ).join('\n\n');

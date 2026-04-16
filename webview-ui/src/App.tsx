@@ -1,4 +1,3 @@
-// webview-ui/src/App.tsx
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import './App.css';
 import ReactMarkdown from 'react-markdown';
@@ -27,7 +26,7 @@ interface Message {
     content?: string;
     plan?: AIPlan;
     attachments?: AttachedContext[];
-    isCompacted?: boolean; // 🔥 Phase 2: Compactor UI Support
+    isCompacted?: boolean;
 }
 
 interface AttachedContext { file: string; code: string; language: string; }
@@ -58,6 +57,11 @@ const Icons = {
 export default function App() {
     const chatTokenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const reasoningTokenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    //  MAP & TRACEABILITY STATE
+    const [graphPayload, setGraphPayload] = useState<any>(null);
+    const [activeMapType, setActiveMapType] = useState<'codeMap' | 'reqMap' | 'combinedMap'>('combinedMap');
+    const [isGraphLoading, setIsGraphLoading] = useState<boolean>(false);
 
     const [taskSteps, setTaskSteps] = useState<Record<string, AgentStep[]>>({});
     const [input, setInput] = useState('');
@@ -92,13 +96,13 @@ export default function App() {
 
     const chatEndRef = useRef<HTMLDivElement>(null);
     const sessionStoreRef = useRef<Record<string, { messages: Message[], taskSteps: Record<string, AgentStep[]>, taskReasoning: Record<string, string> }>>({});
-    
+
     const currentStateRef = useRef({ messages, taskSteps, taskReasoning });
     useEffect(() => {
         currentStateRef.current = { messages, taskSteps, taskReasoning };
     }, [messages, taskSteps, taskReasoning]);
 
-    const [activeTab, setActiveTab] = useState<'coder' | 'builder' | 'rules'>('coder');
+    const [activeTab, setActiveTab] = useState<'coder' | 'builder' | 'rules' | 'Map'>('coder');
     const [nexusRules, setNexusRules] = useState<string>('');
     const [requirements, setRequirements] = useState<string>('');
     const [rawIdea, setRawIdea] = useState<string>('');
@@ -113,7 +117,6 @@ export default function App() {
 
     const [activePlan, setActivePlan] = useState<AIPlan | null>(null);
 
-    // 📊 Graph Visualizer State
     const [showGraph, setShowGraph] = useState(false);
     const [graphData, setGraphData] = useState<Record<string, any> | null>(null);
 
@@ -124,10 +127,15 @@ export default function App() {
     const [sessions, setSessions] = useState<{ id: string, name: string }[]>([{ id: '1', name: 'New Session' }]);
     const [activeSessionId, setActiveSessionId] = useState('1');
 
+    const [terminalStreams, setTerminalStreams] = useState<Record<string, string>>({});
+
+    const [glassBrainContext, setGlassBrainContext] = useState<string>("");
+    const [pendingCommand, setPendingCommand] = useState<{ command: string, message: string } | null>(null);
+
 
     useEffect(() => {
         if (!showGraph || !graphContainerRef.current) return;
-        
+
         const resizeObserver = new ResizeObserver(entries => {
             for (let entry of entries) {
                 setGraphDims({
@@ -136,11 +144,13 @@ export default function App() {
                 });
             }
         });
-        
+
         resizeObserver.observe(graphContainerRef.current);
         return () => resizeObserver.disconnect();
     }, [showGraph]);
 
+    //  DYNAMIC GRAPH MAPPER
+    // Gracefully handles both Old AST Dictionary and New Array [{nodes, edges}] formats
     const visualGraphData = useMemo(() => {
         if (!graphData) return { nodes: [], links: [] };
 
@@ -148,38 +158,65 @@ export default function App() {
         const links: any[] = [];
         const nodeSet = new Set<string>();
 
+        // FORMAT 1: New Tracability Map (Array Form)
+        if (Array.isArray(graphData.nodes) && Array.isArray(graphData.edges)) {
+            graphData.nodes.forEach((n: any) => {
+                let val = 5;
+                //  THE FIX: Check both group AND type!
+                const nodeGroup = (n.group || n.type || 'file').toLowerCase();
+
+                if (nodeGroup === 'epic') val = 8;
+                if (nodeGroup === 'story') val = 6;
+                if (nodeGroup === 'criteria') val = 4;
+
+                nodes.push({ id: n.id, name: n.label || n.id, group: nodeGroup, val });
+            });
+            graphData.edges.forEach((e: any) => {
+                //  THE FIX: Safely extract the ID string whether it's a raw string OR a WebGL-mutated Object!
+                const sourceId = typeof e.source === 'object' ? e.source.id : String(e.source || '');
+                const targetId = typeof e.target === 'object' ? e.target.id : String(e.target || '');
+
+                links.push({
+                    source: e.source,
+                    target: e.target,
+                    // Now safely check the extracted string!
+                    color: e.color ? e.color : (sourceId.includes('Epic') || sourceId.includes('Story') || sourceId.includes('EPIC') || sourceId.includes('STORY')) ? 'rgba(245, 66, 141, 0.8)' : 'rgba(51, 154, 240, 0.9)',
+                    isSemantic: e.isSemantic,
+                    weight: e.weight
+                });
+            });
+
+            return { nodes, links };
+        }
+
+        // FORMAT 2: Fallback for Pure AST Code Map (Dictionary Form)
         Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
+            if (filepath === 'nodes' || filepath === 'edges') return; // Guard clause
+
             const folder = filepath.split('/')[0] || 'root';
             const filename = filepath.split('/').pop() || '';
 
-            // 1. Core File Node (Central Hub)
             nodes.push({ id: filepath, name: `📄 ${filename}`, group: 'file', val: 5 });
             nodeSet.add(filepath);
 
-            // 2. 🔥 Explode Functions (INTRA-FILE)
             node.functions?.forEach((func: string) => {
                 const funcId = `${filepath}::${func}`;
                 nodes.push({ id: funcId, name: `ƒ ${func}()`, group: 'function', val: 3 });
-                // Bright Blue for functions within the file
                 links.push({ source: filepath, target: funcId, color: 'rgba(51, 154, 240, 0.9)' });
                 nodeSet.add(funcId);
             });
 
-            // 3. 🔥 Explode Classes (INTRA-FILE)
             node.classes?.forEach((cls: string) => {
                 const clsId = `${filepath}::${cls}`;
                 nodes.push({ id: clsId, name: `© ${cls}`, group: 'class', val: 4 });
-                // Bright Orange for classes within the file
                 links.push({ source: filepath, target: clsId, color: 'rgba(252, 163, 17, 0.9)' });
                 nodeSet.add(clsId);
             });
 
-            // 4. File-to-File Dependency Links (INTER-FILE)
             node.imports?.forEach((imp: string) => {
                 const cleanImp = imp.replace(/['"]/g, '');
                 let targetFile = Object.keys(graphData).find(k => k.includes(cleanImp.replace('./', '').replace('../', '')));
                 if (targetFile) {
-                    // 🔥 Neon Magenta/Pink for cross-file imports so they leap off the screen!
                     links.push({ source: filepath, target: targetFile, color: 'rgba(245, 66, 141, 0.8)' });
                 }
             });
@@ -190,7 +227,7 @@ export default function App() {
 
     useEffect(() => { codingStyleRef.current = codingStyle; }, [codingStyle]);
 
-    useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, agentStatus]);
+    useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
     useEffect(() => {
         vscode.postMessage({ type: 'webviewReady' });
@@ -214,12 +251,24 @@ export default function App() {
     };
 
     useEffect(() => {
+        if (graphPayload) {
+            setGraphData(graphPayload[activeMapType] || null);
+        }
+    }, [activeMapType, graphPayload]);
+
+    useEffect(() => {
         const messageHandler = (event: MessageEvent) => {
             const data = event.data;
 
-            // 🔥 Phase 2: Context Compaction Handlers
             if (data.type === 'historyCompacted') {
                 setMessages(data.messages);
+            }
+
+            if (data.type === 'streamTerminal') {
+                setTerminalStreams(prev => ({
+                    ...prev,
+                    [data.task]: (prev[data.task] || '') + data.text
+                }));
             }
 
             if (data.type === 'tasksGenerated') {
@@ -227,11 +276,31 @@ export default function App() {
                 setActiveTab('coder');
             }
 
+            //  TRACEABILITY PAYLOAD CAPTURE
+
             if (data.type === 'workspaceGraphData') {
-                // 🔥 THE FIX: Safely parse the JSON string into an object!
-                const parsedData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
-                setGraphData(parsedData);
-                setShowGraph(true);
+                console.log("[DEBUG-MAP-UI] 🟢 Received workspaceGraphData from backend!", data);
+            }
+
+            if (data.type === 'workspaceGraphData') {
+                try {
+                    const parsedPayload = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+                    console.log("[DEBUG-MAP-UI] 🟢 Successfully parsed payload:", parsedPayload);
+                    setGraphPayload(parsedPayload);
+                    setGraphData(parsedPayload.combinedMap || { nodes: [], edges: [] });
+                    if (parsedPayload.isGraphLoading) {
+                        // Force the UI to show the CodeMap while the others load
+                        setActiveMapType('codeMap');
+                        setGraphData(parsedPayload.codeMap || { nodes: [], edges: [] });
+                        setShowGraph(true);
+                    } else {
+                        // When finished, default back to Combined Map
+                        setActiveMapType('combinedMap');
+                        setGraphData(parsedPayload.combinedMap || { nodes: [], edges: [] });
+                    }
+                } catch (err) {
+                    console.error("[DEBUG-MAP-UI] 🔴 Failed to parse incoming graph payload:", err);
+                }
             }
 
             if (data.type === 'startRevision') {
@@ -340,6 +409,13 @@ export default function App() {
                 setTimeout(() => setIsLoaded(true), 100);
             }
 
+            if (data.type === 'requestCommandApproval') {
+                setPendingCommand({
+                    command: data.command,
+                    message: data.message
+                });
+            }
+
             if (data.type === 'requirementsUpdated' || data.type === 'requirementsGenerated') {
                 setRequirements(data.text);
                 if (data.type === 'requirementsGenerated') setIsGeneratingReqs(false);
@@ -370,6 +446,8 @@ export default function App() {
                 setActivePlan(data.value);
                 setMessages(prev => [...prev, { role: 'assistant', plan: data.value }]);
                 setLoading(false);
+                setIsGeneratingTasks(false);
+                setActiveTab('coder');
             }
 
             if (data.type === 'statusUpdate') setAgentStatus(data.message);
@@ -400,9 +478,14 @@ export default function App() {
                 }
             }
 
+            if (data.type === 'glassBrain') {
+                setGlassBrainContext(data.text);
+            }
+
             if (data.type === 'startChatStream') {
                 setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
                 setLoading(false);
+                setGlassBrainContext("");
             }
 
             if (data.type === 'chatToken') {
@@ -517,7 +600,7 @@ export default function App() {
 
     const handleClearHistory = () => {
         vscode.postMessage({ type: 'clearHistory' });
-        
+
         if (activePlan) {
             setMessages([{ role: 'assistant', content: "Conversation cleared. Active Implementation Plan preserved:", plan: activePlan }]);
         } else {
@@ -526,10 +609,10 @@ export default function App() {
 
         setTaskSteps({});
         setTaskReasoning({});
-        setTaskStatuses({}); 
-        setTaskSummaries({}); 
-        setTaskFiles({});    
-        
+        setTaskStatuses({});
+        setTaskSummaries({});
+        setTaskFiles({});
+
         sessionStoreRef.current = {};
         setSessions([{ id: '1', name: 'New Session' }]);
         setActiveSessionId('1');
@@ -558,7 +641,7 @@ export default function App() {
                 {metaMode ? '⚠️ SELF-EVOLUTION ACTIVE' : 'Andromeda'}
             </div>
 
-            {/* 🔥 TABS HEADER */}
+            {/*  TABS HEADER */}
             <div className="tabs-header" style={{ display: 'flex', borderBottom: '1px solid var(--vscode-widget-border)', flexShrink: 0, marginTop: '5px' }}>
                 <button
                     style={{ flex: 1, padding: '8px', background: activeTab === 'coder' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'coder' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'coder' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'coder' ? 'bold' : 'normal' }}
@@ -580,11 +663,19 @@ export default function App() {
                 </button>
 
                 <button
-                    style={{ flex: 1, padding: '8px', background: 'transparent', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: 'normal' }}
-                    onClick={() => vscode.postMessage({ type: 'requestWorkspaceGraph' })}
+                    style={{ flex: 1, padding: '8px', background: activeTab === 'Map' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'Map' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'Map' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'Map' ? 'bold' : 'normal' }}
+                    onClick={() => {
+                        setActiveTab('Map');
+
+                        //  THE FIX: Only auto-fetch if we have NEVER loaded the map before!
+                        // Otherwise, rely purely on the user clicking the manual Refresh button.
+                        if (!graphPayload) {
+                            vscode.postMessage({ type: 'requestWorkspaceGraph' });
+                        }
+                    }}
                     title="Visualize Workspace Context Graph"
                 >
-                    Code Map
+                    Map
                 </button>
             </div>
 
@@ -645,13 +736,12 @@ export default function App() {
                     )}
 
                     {messages.map((msg, idx) => {
-                        // 🔥 PHASE 2: COMPACTOR UI RENDERING
                         if (msg.isCompacted) {
                             return (
-                                <div key={idx} style={{ 
-                                    margin: '16px 8px', 
-                                    padding: '8px 12px', 
-                                    backgroundColor: 'var(--vscode-badge-background)', 
+                                <div key={idx} style={{
+                                    margin: '16px 8px',
+                                    padding: '8px 12px',
+                                    backgroundColor: 'var(--vscode-badge-background)',
                                     color: 'var(--vscode-badge-foreground)',
                                     borderRadius: '6px',
                                     fontSize: '11px',
@@ -664,14 +754,13 @@ export default function App() {
                                             🗜️ Context Compacted (Old messages summarized to save tokens)
                                         </summary>
                                         <div style={{ marginTop: '8px', padding: '8px', backgroundColor: 'var(--vscode-editor-background)', borderRadius: '4px', border: '1px solid var(--vscode-widget-border)' }}>
-                                             <ReactMarkdown>{msg.content || ''}</ReactMarkdown>
+                                            <ReactMarkdown>{msg.content || ''}</ReactMarkdown>
                                         </div>
                                     </details>
                                 </div>
                             );
                         }
 
-                        // Standard Chat Bubble Rendering
                         return (
                             <div key={idx} className="message">
                                 <div className={`message-header ${msg.role}`}>
@@ -699,11 +788,38 @@ export default function App() {
                                 )}
 
                                 {msg.plan && (
-                                    <div className="plan-card">
-                                        <div className="plan-card-header">
-                                            <span>Implementation Plan</span>
-                                        </div>
-                                        <div className="task-list">
+                                    <details
+                                        open
+                                        className="plan-card"
+                                        style={{
+                                            border: '1px solid var(--vscode-widget-border)',
+                                            borderRadius: '6px',
+                                            overflow: 'hidden',
+                                            marginTop: '10px',
+                                            background: 'var(--vscode-editor-background)'
+                                        }}
+                                    >
+                                        <summary
+                                            className="plan-card-header"
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'space-between',
+                                                padding: '10px 15px',
+                                                background: 'var(--vscode-editorGroupHeader-tabsBackground)',
+                                                cursor: 'pointer',
+                                                outline: 'none',
+                                                userSelect: 'none',
+                                                fontWeight: 'bold',
+                                                borderBottom: '1px solid var(--vscode-widget-border)'
+                                            }}
+                                        >
+                                            <span>📋 Master Implementation Plan</span>
+                                            <span style={{ fontSize: '11px', color: 'var(--nexus-subtext)', fontWeight: 'normal' }}>
+                                                {msg.plan.implementationTasks.length} Tasks (Click to fold)
+                                            </span>
+                                        </summary>
+                                        <div className="task-list" style={{ padding: '12px' }}>
                                             {msg.plan.implementationTasks.map((rawTask, tIdx) => {
                                                 const isObj = typeof rawTask !== 'string';
                                                 const taskObj = isObj ? (rawTask as ProjectTask) : null;
@@ -720,209 +836,182 @@ export default function App() {
                                                 const status = taskStatuses[taskKey];
 
                                                 return (
-                                                    <div key={tIdx} className="task-item" style={{ flexDirection: 'column' }}>
-                                                        <div style={{ display: 'flex', width: '100%', gap: '10px' }}>
-                                                            <div className="task-desc" style={{ flex: 1 }}>
-                                                                <div style={{ fontWeight: 'bold', fontSize: '13px', color: 'var(--vscode-foreground)' }}>{taskTitle}</div>
-                                                                {taskObj && <div style={{ fontSize: '11px', color: 'var(--vscode-descriptionForeground)', marginTop: '2px', fontFamily: 'monospace' }}>📄 {taskFile}</div>}
+                                                    <details
+                                                        key={tIdx}
+                                                        className="task-item-accordion"
+                                                        //  THE UX MAGIC: Auto-open if it hasn't started or is currently running!
+                                                        open={!status || status === 'reviewing' || status === 'error'}
+                                                        style={{
+                                                            marginBottom: '8px',
+                                                            border: '1px solid var(--vscode-widget-border)',
+                                                            borderRadius: '6px',
+                                                            background: 'var(--vscode-editor-background)',
+                                                            overflow: 'hidden'
+                                                        }}
+                                                    >
+                                                        {/* THE HEADER ROW (Always Visible) */}
+                                                        <summary style={{
+                                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                                            padding: '10px 12px', cursor: 'pointer', outline: 'none', userSelect: 'none',
+                                                            background: 'var(--vscode-editorGroupHeader-tabsBackground)',
+                                                            borderBottom: (!status || status === 'reviewing' || status === 'error') ? '1px solid var(--vscode-widget-border)' : 'none'
+                                                        }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 'bold', fontSize: '13px', color: 'var(--vscode-foreground)' }}>
+                                                                <span>{tIdx + 1}. {taskTitle}</span>
+                                                            </div>
 
+                                                            {/* Compact Status Badges for the Header */}
+                                                            <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                {status === 'reviewing' && <span style={{ color: 'var(--vscode-charts-orange)', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}><span className="spin">{Icons.Loader}</span> Working...</span>}
+                                                                {status === 'approved' && <span style={{ color: 'var(--vscode-testing-iconPassed)', fontSize: '11px', fontWeight: 'bold' }}>✅ Approved</span>}
+                                                                {status === 'rejected' && <span style={{ color: 'var(--vscode-testing-iconFailed)', fontSize: '11px', fontWeight: 'bold' }}>❌ Rejected</span>}
+                                                                {status === 'error' && <span style={{ color: 'var(--vscode-testing-iconFailed)', fontSize: '11px', fontWeight: 'bold' }}>⚠️ Error</span>}
+                                                                {status === 'undone' && <span style={{ color: 'var(--vscode-descriptionForeground)', fontSize: '11px' }}>⏪ Reverted</span>}
+                                                            </div>
+                                                        </summary>
+
+                                                        {/* THE COLLAPSIBLE BODY (Logs, Reasoning, Actions) */}
+                                                        <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+                                                            {/* Context & Prompts */}
+                                                            <div>
+                                                                {taskObj && <div style={{ fontSize: '11px', color: 'var(--vscode-descriptionForeground)', fontFamily: 'monospace', marginBottom: '4px' }}>📄 {taskFile}</div>}
                                                                 {taskReq && (
-                                                                    <div style={{ fontSize: '10.5px', color: 'var(--vscode-textLink-foreground)', fontStyle: 'italic', background: 'var(--vscode-textCodeBlock-background)', padding: '2px 6px', borderRadius: '4px', alignSelf: 'flex-start', marginTop: '6px', display: 'inline-block' }}>
+                                                                    <div style={{ fontSize: '10px', color: 'var(--vscode-textLink-foreground)', fontStyle: 'italic', background: 'var(--vscode-textCodeBlock-background)', padding: '2px 6px', borderRadius: '4px', display: 'inline-block' }}>
                                                                         🔗 Ref: {taskReq}
                                                                     </div>
                                                                 )}
 
                                                                 {taskObj && taskObj.detailedInstructions && (
                                                                     <details style={{ marginTop: '8px', fontSize: '11px', color: 'var(--vscode-descriptionForeground)' }}>
-                                                                        <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none', fontWeight: 'bold', opacity: 0.8 }}>
-                                                                            View Prompt Instructions
-                                                                        </summary>
-                                                                        <div style={{ 
-                                                                            marginTop: '6px', 
-                                                                            padding: '8px 10px', 
-                                                                            borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', 
-                                                                            background: 'var(--vscode-editor-inactiveSelectionBackground)',
-                                                                            whiteSpace: 'pre-wrap',
-                                                                            borderRadius: '0 4px 4px 0',
-                                                                            lineHeight: '1.4'
-                                                                        }}>
+                                                                        <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none', fontWeight: 'bold', opacity: 0.8 }}>View Prompt Instructions</summary>
+                                                                        <div style={{ marginTop: '6px', padding: '8px', borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', background: 'var(--vscode-editor-inactiveSelectionBackground)', whiteSpace: 'pre-wrap', borderRadius: '0 4px 4px 0' }}>
                                                                             {taskObj.detailedInstructions}
                                                                         </div>
                                                                     </details>
                                                                 )}
-
-                                                                {taskSummaries[taskKey] && (
-                                                                    <div className="task-summary" style={{ marginTop: '8px', padding: '6px 8px', background: 'var(--vscode-inputValidation-infoBackground)', border: '1px solid var(--vscode-inputValidation-infoBorder)', borderRadius: '4px', fontSize: '11px', color: 'var(--vscode-foreground)' }}>
-                                                                        ℹ️ {taskSummaries[taskKey]}
-                                                                    </div>
-                                                                )}
                                                             </div>
 
-                                                            <div className="task-status" style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '5px' }}>
-                                                                {status === 'reviewing' && <span className="status-pending">⏳ Reviewing</span>}
-
-                                                                {status === 'approved' && (
-                                                                    <div style={{
-                                                                        padding: '8px 10px',
-                                                                        background: 'var(--vscode-editorWidget-background)',
-                                                                        border: '1px solid var(--vscode-testing-iconPassed)',
-                                                                        borderRadius: '6px',
-                                                                        display: 'flex',
-                                                                        flexDirection: 'column',
-                                                                        gap: '6px',
-                                                                        minWidth: '200px'
-                                                                    }}>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', color: 'var(--vscode-testing-iconPassed)', fontWeight: 'bold', gap: '6px', fontSize: '11px' }}>
-                                                                            <span>✓</span> Accepted edits
-                                                                        </div>
-
-                                                                        {taskFiles[taskKey] && (
-                                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--vscode-input-background)', padding: '4px 6px', borderRadius: '4px' }}>
-                                                                                <div
-                                                                                    style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', fontFamily: 'monospace', fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '120px' }}
-                                                                                    onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}
-                                                                                    title={taskFiles[taskKey]}
-                                                                                >
-                                                                                    📄 {taskFiles[taskKey].split('/').pop()}
-                                                                                </div>
-
-                                                                                <div style={{ display: 'flex', gap: '8px' }}>
-                                                                                    <button
-                                                                                        style={{ background: 'none', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', opacity: 0.7, padding: 0 }}
-                                                                                        onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })}
-                                                                                        title="Compare Changes"
-                                                                                    >
-                                                                                        ⚖️
-                                                                                    </button>
-                                                                                    <button
-                                                                                        style={{ background: 'none', border: 'none', color: 'var(--vscode-foreground)', cursor: 'pointer', opacity: 0.7, padding: 0 }}
-                                                                                        onClick={() => {
-                                                                                            vscode.postMessage({ type: 'undoTaskEdit', task: taskKey });
-                                                                                        }}
-                                                                                        title="Undo Edit"
-                                                                                    >
-                                                                                        ↩️
-                                                                                    </button>
-                                                                                </div>
+                                                            {/* AI Execution Steps */}
+                                                            {taskSteps[taskKey] && taskSteps[taskKey].length > 0 && (
+                                                                <div className="agent-steps-container" style={{ background: 'var(--vscode-input-background)', padding: '8px', borderRadius: '6px', border: '1px solid var(--vscode-input-border)' }}>
+                                                                    <div style={{ fontSize: '10px', fontWeight: 'bold', color: 'var(--nexus-subtext)', marginBottom: '6px', textTransform: 'uppercase' }}>Swarm Execution Logs</div>
+                                                                    {taskSteps[taskKey].map((step, sIdx) => (
+                                                                        <div key={sIdx} className="agent-step-card" style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '6px 8px', borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', marginLeft: '4px' }}>
+                                                                            <div className="agent-step-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                                <span className="step-icon" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: step.type === 'error' ? 'var(--vscode-testing-iconFailed)' : step.type === 'success' ? 'var(--vscode-testing-iconPassed)' : step.type === 'heal' ? 'var(--vscode-charts-orange)' : 'var(--vscode-symbolIcon-propertyForeground)' }}>
+                                                                                    {step.type === 'search' && Icons.Search}
+                                                                                    {step.type === 'read' && Icons.Read}
+                                                                                    {step.type === 'analyze' && Icons.Code}
+                                                                                    {step.type === 'error' && Icons.Alert}
+                                                                                    {step.type === 'heal' && Icons.Wrench}
+                                                                                    {step.type === 'success' && Icons.CheckCircle}
+                                                                                </span>
+                                                                                <span className="step-desc" style={{ fontSize: '11px', fontWeight: 'bold', color: 'var(--vscode-foreground)' }}>{step.description}</span>
                                                                             </div>
-                                                                        )}
-                                                                    </div>
-                                                                )}
-
-                                                                {status === 'undone' && (
-                                                                    <div style={{ padding: '6px 10px', background: 'var(--vscode-editorWidget-background)', border: '1px dashed var(--vscode-descriptionForeground)', borderRadius: '4px', color: 'var(--vscode-descriptionForeground)', fontSize: '11px' }}>
-                                                                        ⏪ Edit reverted.
-                                                                    </div>
-                                                                )}
-
-                                                                {status === 'rejected' && (
-                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                        <span className="status-error" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-testing-iconFailed)' }}>
-                                                                            {Icons.Alert} Rejected
-                                                                        </span>
-                                                                        <button className="micro-btn" style={{ border: '1px solid var(--nexus-border)', padding: '2px 6px' }}
-                                                                            onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle: codingStyleRef.current })}>
-                                                                            Revise
-                                                                        </button>
-                                                                    </div>
-                                                                )}
-                                                                {status === 'error' && (
-                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                        <span className="status-error" style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--vscode-testing-iconFailed)' }}>
-                                                                            {Icons.Alert} Error
-                                                                        </span>
-                                                                        <button className="micro-btn" style={{ border: '1px solid var(--vscode-testing-iconFailed)', color: 'var(--vscode-testing-iconFailed)', padding: '2px 6px' }}
-                                                                            onClick={() => {
-                                                                                setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
-                                                                                setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
-                                                                                vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current });
-                                                                            }}>
-                                                                            Retry
-                                                                        </button>
-                                                                    </div>
-                                                                )}
-
-                                                                {!status && (
-                                                                    <div style={{ display: 'flex', gap: '12px' }}>
-                                                                        <button style={{ background: 'transparent', border: 'none', color: 'var(--nexus-subtext)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}
-                                                                            title="Verify code I wrote manually"
-                                                                            onClick={() => {
-                                                                                setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
-                                                                                setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
-                                                                                setTaskReasoning(prev => ({ ...prev, [taskKey]: '' }));
-                                                                                vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt });
-                                                                            }}>
-                                                                            {Icons.Eye}
-                                                                        </button>
-
-                                                                        <button style={{ background: 'transparent', border: 'none', color: 'var(--vscode-button-background)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}
-                                                                            title="Let AI execute this task autonomously"
-                                                                            onClick={() => {
-                                                                                setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
-                                                                                setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
-                                                                                setTaskReasoning(prev => ({ ...prev, [taskKey]: '' }));
-                                                                                vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current });
-                                                                            }}>
-                                                                            {Icons.Play}
-                                                                        </button>
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-
-                                                        {taskSteps[taskKey] && taskSteps[taskKey].length > 0 && (
-                                                            <div className="agent-steps-container">
-                                                                {taskSteps[taskKey].map((step, sIdx) => (
-                                                                    <div key={sIdx} className="agent-step-card" style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '6px 8px', borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', marginLeft: '4px' }}>
-                                                                        <div className="agent-step-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                            <span className="step-icon" style={{ 
-                                                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                                                color: step.type === 'error' ? 'var(--vscode-testing-iconFailed)' :
-                                                                                       step.type === 'success' ? 'var(--vscode-testing-iconPassed)' :
-                                                                                       step.type === 'heal' ? 'var(--vscode-charts-orange)' :
-                                                                                       'var(--vscode-symbolIcon-propertyForeground)'
-                                                                            }}>
-                                                                                {step.type === 'search' && Icons.Search}
-                                                                                {step.type === 'read' && Icons.Read}
-                                                                                {step.type === 'analyze' && Icons.Code}
-                                                                                {step.type === 'error' && Icons.Alert}
-                                                                                {step.type === 'heal' && Icons.Wrench}
-                                                                                {step.type === 'success' && Icons.CheckCircle}
-                                                                            </span>
-                                                                            <span className="step-desc" style={{ fontSize: '11px', fontWeight: 'bold', color: 'var(--vscode-foreground)' }}>
-                                                                                {step.description}
-                                                                           </span>
+                                                                            {step.details && (
+                                                                                <div className="agent-step-details" style={{ paddingLeft: '22px', fontSize: '10.5px', color: 'var(--vscode-descriptionForeground)', whiteSpace: 'pre-wrap', lineHeight: '1.5', marginTop: '4px' }}>
+                                                                                    {step.details}
+                                                                                </div>
+                                                                            )}
                                                                         </div>
-                                                                        {step.details && (
-                                                                            <div className="agent-step-details" style={{ paddingLeft: '22px', fontSize: '10.5px', color: 'var(--vscode-descriptionForeground)', whiteSpace: 'pre-wrap', lineHeight: '1.5', marginTop: '4px' }}>
-                                                                                {step.details}
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        )}
+                                                                    ))}
+                                                                </div>
+                                                            )}
 
-                                                        {taskReasoning[taskKey] && (
-                                                            <div className="reasoning-container">
-                                                                <details open>
-                                                                    <summary className="reasoning-summary">
-                                                                        {Icons.Brain} Reasoning...
+                                                            {/* AI Reasoning Stream */}
+                                                            {taskReasoning[taskKey] && (
+                                                                <details open style={{ background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '6px' }}>
+                                                                    <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none', fontSize: '11px', fontWeight: 'bold', color: 'var(--nexus-subtext)' }}>
+                                                                        {Icons.Brain} View AI Reasoning
                                                                     </summary>
-                                                                    <div className="reasoning-content">
+                                                                    <div className="reasoning-content" style={{ marginTop: '8px', fontSize: '11px' }}>
                                                                         {taskReasoning[taskKey]}
                                                                     </div>
                                                                 </details>
+                                                            )}
+
+                                                            {terminalStreams[taskKey] && (
+                                                                <div style={{
+                                                                    background: '#0d1117', // Pitch black terminal feel
+                                                                    padding: '10px',
+                                                                    borderRadius: '6px',
+                                                                    border: '1px solid #30363d',
+                                                                    marginTop: '8px',
+                                                                    fontFamily: 'monospace',
+                                                                    fontSize: '10.5px',
+                                                                    color: '#c9d1d9',
+                                                                    maxHeight: '150px',
+                                                                    overflowY: 'auto',
+                                                                    whiteSpace: 'pre-wrap'
+                                                                }}>
+                                                                    <div style={{ color: '#8b949e', marginBottom: '6px', userSelect: 'none' }}>$ terminal execution</div>
+                                                                    {terminalStreams[taskKey]}
+                                                                </div>
+                                                            )}
+
+                                                            {/* Bottom Action Bar */}
+                                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px', paddingTop: '10px', borderTop: '1px dashed var(--vscode-widget-border)' }}>
+                                                                {taskSummaries[taskKey] ? (
+                                                                    <div style={{ fontSize: '11px', color: 'var(--vscode-textLink-foreground)' }}>ℹ️ {taskSummaries[taskKey]}</div>
+                                                                ) : <div />}
+
+                                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                                    {status === 'rejected' && <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle: codingStyleRef.current })}>Revise</button>}
+                                                                    {status === 'error' && <button className="micro-btn" style={{ borderColor: 'var(--vscode-testing-iconFailed)', color: 'var(--vscode-testing-iconFailed)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }}>Retry</button>}
+
+                                                                    {status === 'approved' && taskFiles[taskKey] && (
+                                                                        <>
+                                                                            <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })} title="Compare Changes">⚖️ Diff</button>
+                                                                            <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'undoTaskEdit', task: taskKey })} title="Undo Edit">↩️ Undo</button>
+                                                                        </>
+                                                                    )}
+
+                                                                    {!status && (
+                                                                        <>
+                                                                            <button className="micro-btn" onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt }); }} title="Verify manual code">👁️ Verify</button>
+                                                                            <button className="micro-btn btn-primary" style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }} title="Auto-execute task">▶ Execute</button>
+                                                                        </>
+                                                                    )}
+                                                                </div>
                                                             </div>
-                                                        )}
-                                                    </div>
+
+                                                        </div>
+                                                    </details>
                                                 );
                                             })}
                                         </div>
-                                    </div>
+                                    </details>
                                 )}
                             </div>
                         );
+                    })}
+
+                    {Object.entries(terminalStreams).map(([key, stream]) => {
+                        if (key.startsWith("Auto-Test") && stream.trim().length > 0) {
+                            return (
+                                <div key={key} className="message" style={{ marginBottom: '15px' }}>
+                                    <div className="message-header assistant" style={{ marginBottom: '8px' }}>
+                                        {Icons.Nexus} NEXUS TERMINAL: {key}
+                                    </div>
+                                    <div style={{
+                                        background: '#0d1117',
+                                        padding: '10px',
+                                        borderRadius: '6px',
+                                        border: '1px solid #30363d',
+                                        fontFamily: 'monospace',
+                                        fontSize: '10.5px',
+                                        color: '#c9d1d9',
+                                        maxHeight: '300px',
+                                        overflowY: 'auto',
+                                        whiteSpace: 'pre-wrap'
+                                    }}>
+                                        {stream}
+                                    </div>
+                                </div>
+                            );
+                        }
+                        return null;
                     })}
 
                     {loading && !agentStatus && (
@@ -933,6 +1022,54 @@ export default function App() {
                             </div>
                         </div>
                     )}
+
+                    {/* 🔥 THE GLASS BRAIN: Semantic & AST Context Visualizer */}
+                    {loading && glassBrainContext && (
+                        <div className="glass-brain-container">
+                            <details className="glass-brain-details" open>
+                                <summary>
+                                    {Icons.Brain} Nexus Glass Brain: Context Retrieved
+                                </summary>
+                                <div className="glass-brain-content">
+                                    {/* We split the context by lines to apply the success 
+                  styling to the mathematical RRF scores automatically. 
+                */}
+                                    {glassBrainContext.split('\n').map((line, i) => {
+                                        if (line.includes('RRF Score:')) {
+                                            const [text, score] = line.split('RRF Score:');
+                                            return <div key={i}>{text} <span className="glass-brain-score">RRF: {score}</span></div>;
+                                        }
+                                        return <div key={i}>{line}</div>;
+                                    })}
+                                </div>
+                            </details>
+                        </div>
+                    )}
+
+                    {pendingCommand && (
+                        <div className="message" style={{ margin: '10px 16px', border: '1px solid var(--nexus-warning)', borderRadius: '6px', overflow: 'hidden' }}>
+                            <div style={{ background: 'rgba(204, 167, 0, 0.1)', padding: '10px', fontSize: '11px', fontWeight: 'bold', color: 'var(--nexus-warning)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                {Icons.Alert} SECURITY INTERCEPTOR: ACTION REQUIRED
+                            </div>
+                            <div style={{ padding: '12px', background: 'var(--nexus-card-bg)' }}>
+                                <div style={{ fontSize: '12px', marginBottom: '8px' }}>{pendingCommand.message}</div>
+                                <code style={{ display: 'block', padding: '8px', background: 'black', borderRadius: '4px', marginBottom: '12px', color: '#73c991' }}>
+                                    $ {pendingCommand.command}
+                                </code>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <button className="btn-primary" style={{ flex: 1 }} onClick={() => {
+                                        vscode.postMessage({ type: 'approveCommand', command: pendingCommand.command });
+                                        setPendingCommand(null);
+                                    }}>Allow</button>
+                                    <button className="btn-secondary" style={{ flex: 1, borderColor: 'var(--nexus-error)', color: 'var(--nexus-error)' }} onClick={() => {
+                                        setPendingCommand(null);
+                                        setAgentStatus("🛑 Command blocked by user.");
+                                    }}>Block</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     <div ref={chatEndRef} />
                 </div>
 
@@ -1041,22 +1178,30 @@ export default function App() {
                         <div className="toolbar-group" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                             <button
                                 className="micro-btn"
+                                style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-charts-orange)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.9, padding: 0 }}
+                                onClick={() => vscode.postMessage({ type: 'generateAndRunTests', autopilot: isAutopilot })}
+                                title="Auto-Generate & Run Tests for the currently open file">
+                                🧪 Auto-Test
+                            </button>
+
+                            <button
+                                className="micro-btn"
                                 style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-testing-iconPassed)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.9, padding: 0 }}
                                 onClick={() => vscode.postMessage({ type: 'runGlobalCompiler' })}
                                 title="Run strict project-wide compilation check">
                                 {Icons.Build} Compile
                             </button>
-                            <button 
-                                className="micro-btn" 
-                                style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }} 
-                                onClick={handleClearHistory} 
+                            <button
+                                className="micro-btn"
+                                style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }}
+                                onClick={handleClearHistory}
                                 title="Clear Chat History">
                                 {Icons.Trash} Clear
                             </button>
-                            <button 
-                                className="micro-btn" 
-                                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }} 
-                                onClick={() => vscode.postMessage({ type: 'refreshCodeLens' })} 
+                            <button
+                                className="micro-btn"
+                                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }}
+                                onClick={() => vscode.postMessage({ type: 'refreshCodeLens' })}
                                 title="Refresh UI">
                                 {Icons.Refresh}
                             </button>
@@ -1329,75 +1474,231 @@ export default function App() {
             </div>
 
             {/* ========================================================= */}
-            {/* 🌌 THE SPLIT-VIEW MATRIX (3D Graph + Text Detail)         */}
+            {/* 🌌 TAB 4: THE SPLIT-VIEW MATRIX (Traceability Map)        */}
             {/* ========================================================= */}
-            {showGraph && (
-                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: '#0d1117', zIndex: 999, display: 'flex', flexDirection: 'column' }}>
-                    
-                    {/* Header Controls */}
-                    <div style={{ padding: '15px', borderBottom: '1px solid var(--vscode-widget-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(13, 17, 23, 0.8)', zIndex: 1000 }}>
-                        <div>
-                            <h3 style={{ margin: 0, color: 'white' }}>🌌 Codebase Matrix</h3>
-                            <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '4px' }}>Click a 3D Node to view its structural text data.</div>
-                        </div>
-                        <button style={{ background: '#21262d', border: '1px solid #30363d', color: '#c9d1d9', cursor: 'pointer', fontSize: '14px', padding: '4px 10px', borderRadius: '6px' }} onClick={() => setShowGraph(false)}>Close Matrix</button>
+            <div style={{ display: activeTab === 'Map' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden', background: '#0d1117' }}>
+
+                {/* Header Controls with New Map Toggles */}
+                <div style={{ padding: '15px', borderBottom: '1px solid #30363d', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(13, 17, 23, 0.8)', zIndex: 1000, flexShrink: 0 }}>
+                    <div>
+                        <h3 style={{ margin: 0, color: 'white' }}>Traceability Matrix</h3>
+                        <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '4px' }}>Click a 3D Node to view its structural text data.</div>
                     </div>
 
-                    {/* Split View Body */}
-                    <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
-                        
-                        {/* LEFT SIDE: WebGL 3D Canvas (60% Width) */}
-                        <div ref={graphContainerRef} style={{ flex: 3, position: 'relative', borderRight: '1px solid #30363d', overflow: 'hidden' }}>
-                            {!graphData ? (
-                                <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>Scanning workspace geometry...</div>
-                            ) : (
-                                <ForceGraph3D
-                                    width={graphDims.width}   
-                                    height={graphDims.height}
-                                    graphData={visualGraphData}
-                                    nodeAutoColorBy="group"
-                                    nodeLabel="name"
-                                    linkDirectionalArrowLength={4} // Slightly larger arrows
-                                    linkDirectionalArrowRelPos={1}
-                                    linkWidth={1.5} // 🔥 INCREASE LINE THICKNESS!
-                                    linkColor={(link: any) => link.color || 'rgba(255,255,255,0.2)'} // 🔥 THE FIX! READ THE DYNAMIC COLOR!
-                                    nodeVal="val"
-                                    backgroundColor="#0d1117"
-                                    onNodeClick={(node: any) => {
-                                        if (node.group !== 'external_lib') {
-                                            const safeId = `node-card-${node.id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-                                            const el = document.getElementById(safeId);
-                                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                            
-                                            if (el) {
-                                                el.style.borderColor = '#58a6ff';
-                                                setTimeout(() => { el.style.borderColor = 'var(--vscode-input-border)'; }, 1500);
-                                            }
+                    {/*  TRACEABILITY TOGGLES */}
+                    <div style={{ display: 'flex', gap: '8px', background: 'rgba(0,0,0,0.3)', padding: '4px', borderRadius: '6px' }}>
+                        <button
+                            style={{ padding: '6px 12px', background: activeMapType === 'codeMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}
+                            onClick={() => setActiveMapType('codeMap')}
+                        >Code AST</button>
+
+                        <button
+                            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: activeMapType === 'reqMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}
+                            onClick={() => setActiveMapType('reqMap')}
+                        >
+                            Requirements {(isGraphLoading && activeMapType === 'reqMap') && <span className="spin">{Icons.Loader}</span>}
+                        </button>
+
+                        <button
+                            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: activeMapType === 'combinedMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}
+                            onClick={() => setActiveMapType('combinedMap')}
+                        >
+                            Combined Traceability {(isGraphLoading && activeMapType === 'combinedMap') && <span className="spin">{Icons.Loader}</span>}
+                        </button>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                        <button style={{ background: 'transparent', border: '1px solid #58a6ff', color: '#58a6ff', cursor: 'pointer', fontSize: '12px', padding: '6px 12px', borderRadius: '6px' }} onClick={() => vscode.postMessage({ type: 'requestWorkspaceGraph' })}>↻ Refresh</button>
+                    </div>
+                </div>
+
+                {/* Split View Body */}
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
+
+                    {/* LEFT SIDE: WebGL 3D Canvas (60% Width) */}
+                    <div ref={graphContainerRef} style={{ flex: 3, position: 'relative', borderRight: '1px solid #30363d', overflow: 'hidden' }}>
+                        {isGraphLoading && activeMapType !== 'codeMap' ? (
+                            <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+                                <div className="spin" style={{ transform: 'scale(1.5)' }}>{Icons.Loader}</div>
+                                <div>Calculating Semantic Matrix via LLM...</div>
+                            </div>
+                        ) : !graphData ? (
+                            <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>Scanning workspace geometry...</div>
+                        ) : (
+                            <ForceGraph3D
+                                key={activeMapType}
+                                width={graphDims.width}
+                                height={graphDims.height}
+                                graphData={visualGraphData}
+                                nodeAutoColorBy="group"
+                                nodeLabel="name"
+                                linkDirectionalArrowLength={4}
+                                linkDirectionalArrowRelPos={1}
+                                linkWidth={(link: any) => link.isSemantic ? 0.5 : 1.5} // Thinner line for AI semantic links
+
+                                //  THE FIX: Use pulsing WebGL particles instead of dashes!
+                                linkDirectionalParticles={(link: any) => link.isSemantic ? 3 : 0}
+                                linkDirectionalParticleWidth={2}
+                                linkDirectionalParticleSpeed={0.005}
+
+                                linkColor={(link: any) => link.color}
+                                nodeVal="val"
+                                backgroundColor="#0d1117"
+                                onNodeClick={(node: any) => {
+                                    if (node.group !== 'external_lib') {
+                                        const safeId = `node-card-${node.id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+                                        const el = document.getElementById(safeId);
+                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+                                        if (el) {
+                                            el.style.borderColor = '#58a6ff';
+                                            setTimeout(() => { el.style.borderColor = 'var(--vscode-input-border)'; }, 1500);
                                         }
-                                    }}
-                                />
-                            )}
+                                    }
+                                }}
+                            />
+                        )}
+                    </div>
+
+                    {/* RIGHT SIDE: Text Detail Sidebar (40% Width) */}
+                    <div style={{ flex: 2, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '15px', background: 'var(--vscode-editor-background)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--nexus-subtext)', textTransform: 'uppercase' }}>
+                                {activeMapType === 'codeMap' ? 'File Anatomy' : 'Relational Node Data'}
+                            </div>
+                            <div style={{ fontSize: '10px', color: 'var(--nexus-subtext)' }}>
+                                {activeMapType === 'combinedMap' && 'Showing Tasks & Vector Math'}
+                            </div>
                         </div>
 
-                        {/* RIGHT SIDE: Text Detail Sidebar (40% Width) */}
-                        <div style={{ flex: 2, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '15px', background: 'var(--vscode-editor-background)' }}>
-                            <div style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--nexus-subtext)', marginBottom: '5px', textTransform: 'uppercase' }}>File Anatomy</div>
-                            
-                            {!graphData ? null : (
+                        {isGraphLoading && activeMapType !== 'codeMap' ? (
+                            <div style={{ textAlign: 'center', color: 'var(--nexus-subtext)', marginTop: '40px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+                                <div className="spin">{Icons.Loader}</div>
+                                <div>Generating Relational Data...</div>
+                            </div>
+                        ) : !graphData ? null :
+                            Array.isArray(graphData.nodes) ? (
+                                graphData.nodes.length === 0 ? (
+                                    <div style={{ textAlign: 'center', color: 'var(--nexus-subtext)', marginTop: '40px', padding: '20px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                                        No requirements found. Go to the <strong>Spec</strong> tab to generate a PRD and Implementation Plan first!
+                                    </div>
+                                ) : (
+                                    graphData.nodes.map((node: any) => {
+                                        // 1. Get Badge Styles based on Group
+                                        const safeGroup = (node.group || node.type || 'file').toLowerCase();
+                                        let badge = { bg: 'rgba(255,255,255,0.1)', color: '#ccc', icon: '🔹' };
+                                        if (safeGroup === 'epic') badge = { bg: 'rgba(245, 66, 141, 0.15)', color: '#f5428d', icon: '🎯' };
+                                        if (safeGroup === 'story') badge = { bg: 'rgba(81, 207, 102, 0.15)', color: '#51cf66', icon: '📖' };
+                                        if (safeGroup === 'criteria') badge = { bg: 'rgba(51, 154, 240, 0.15)', color: '#339af0', icon: '✅' };
+                                        if (safeGroup === 'task') badge = { bg: 'rgba(252, 163, 17, 0.15)', color: '#fca311', icon: '⚡' };
+                                        if (safeGroup === 'file') badge = { bg: 'rgba(139, 148, 158, 0.15)', color: '#8b949e', icon: '📄' };
+                                        if (safeGroup === 'api') badge = { bg: 'rgba(156, 39, 176, 0.15)', color: '#e0a8ff', icon: '🔌' };
+                                        if (safeGroup === 'model') badge = { bg: 'rgba(0, 188, 212, 0.15)', color: '#80deea', icon: '🗄️' };
+
+                                        // 2. Extract Relational Connections (Safe for WebGL Object mutation)
+                                        const edges = graphData.edges || [];
+                                        const nodeEdges = edges.filter((e: any) => {
+                                            const srcId = typeof e.source === 'object' ? e.source.id : e.source;
+                                            const tgtId = typeof e.target === 'object' ? e.target.id : e.target;
+                                            return srcId === node.id || tgtId === node.id;
+                                        });
+
+                                        return (
+                                            <div key={node.id} id={`node-card-${node.id.replace(/[^a-zA-Z0-9-]/g, '-')}`} style={{ background: 'var(--vscode-input-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', padding: '12px', transition: 'border-color 0.3s', boxShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+
+                                                {/* Header with Badge */}
+                                                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                                                    <span style={{ background: badge.bg, color: badge.color, padding: '2px 8px', borderRadius: '12px', fontSize: '10px', fontWeight: 'bold', textTransform: 'uppercase', flexShrink: 0, marginTop: '2px' }}>
+                                                        {badge.icon} {node.group}
+                                                    </span>
+                                                    <div style={{ color: 'var(--vscode-foreground)', fontWeight: 'bold', fontSize: '13px', lineHeight: '1.4' }}>
+                                                        {node.label || node.id}
+                                                    </div>
+                                                </div>
+
+                                                {/* System ID */}
+                                                <div style={{ fontSize: '10px', color: 'var(--nexus-subtext)', marginTop: '8px', fontFamily: 'monospace', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '4px' }}>
+                                                    ID: {node.id}
+                                                </div>
+
+                                                {/* THE UPGRADE: Relational Connections & Vector Math */}
+                                                {nodeEdges.length > 0 && (
+                                                    <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px dashed var(--vscode-input-border)' }}>
+                                                        <div style={{ fontSize: '10px', fontWeight: 'bold', color: 'var(--nexus-subtext)', marginBottom: '6px' }}>🔗 CONNECTIONS</div>
+                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                            {nodeEdges.map((edge: any, idx: number) => {
+                                                                const srcId = typeof edge.source === 'object' ? edge.source.id : edge.source;
+                                                                const tgtId = typeof edge.target === 'object' ? edge.target.id : edge.target;
+
+                                                                const isOutgoing = srcId === node.id;
+                                                                const connectedId = isOutgoing ? tgtId : srcId;
+
+                                                                // Format the Math!
+                                                                const isSemantic = edge.isSemantic;
+                                                                const weight = edge.weight ? (edge.weight * 100).toFixed(1) + '%' : null;
+
+                                                                return (
+                                                                    <div key={idx} style={{ fontSize: '11px', color: 'var(--vscode-textLink-foreground)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(255,255,255,0.03)', padding: '4px 6px', borderRadius: '4px' }}>
+                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+                                                                            <span style={{ color: 'var(--nexus-subtext)' }}>{isOutgoing ? '→' : '←'}</span>
+                                                                            <span title={connectedId}>{connectedId}</span>
+                                                                        </div>
+
+                                                                        {/* Render the Mathematical Cosine Similarity Score */}
+                                                                        {isSemantic && weight && (
+                                                                            <span style={{ color: '#fca311', fontWeight: 'bold', fontSize: '10px', background: 'rgba(252, 163, 17, 0.1)', padding: '2px 6px', borderRadius: '4px', flexShrink: 0 }}>
+                                                                                🧠 {weight} match
+                                                                            </span>
+                                                                        )}
+                                                                        {!isSemantic && (
+                                                                            <span style={{ color: '#51cf66', fontSize: '10px', opacity: 0.8, flexShrink: 0 }}>
+                                                                                Hard Link
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })
+                                )) : (
                                 Object.entries(graphData).map(([filepath, node]: [string, any]) => {
+                                    if (filepath === 'nodes' || filepath === 'edges') return null;
                                     const safeId = `node-card-${filepath.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+
+                                    //  THE FIX: Intelligently split the path for clean typography
+                                    const isWindows = filepath.includes('\\');
+                                    const parts = filepath.split(isWindows ? '\\' : '/');
+                                    const fileName = parts.pop() || filepath;
+                                    const dirName = parts.length > 0 ? parts.join(isWindows ? '\\' : '/') : '';
+
                                     return (
-                                        <div id={safeId} key={filepath} style={{ background: 'var(--vscode-input-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', padding: '12px', transition: 'border-color 0.3s' }}>
-                                            <div style={{ color: 'var(--vscode-textLink-foreground)', fontWeight: 'bold', fontSize: '13px', marginBottom: '8px', wordBreak: 'break-all', display: 'flex', justifyContent: 'space-between' }}>
-                                                <span>📄 {filepath}</span>
-                                                <button 
-                                                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }} 
+                                        <div id={safeId} key={filepath} style={{ background: 'var(--vscode-input-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', padding: '12px', transition: 'border-color 0.3s', boxShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+
+                                            {/* Beautiful Header Layout */}
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
+                                                <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', paddingRight: '10px' }}>
+                                                    <span style={{ color: 'var(--vscode-foreground)', fontWeight: 'bold', fontSize: '13px', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }} title={fileName}>
+                                                        📄 {fileName}
+                                                    </span>
+                                                    {dirName && (
+                                                        <span style={{ color: 'var(--nexus-subtext)', fontSize: '10px', marginTop: '2px', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', fontFamily: 'monospace' }} title={dirName}>
+                                                            {dirName}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    style={{ background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: '1px solid var(--vscode-button-border, transparent)', cursor: 'pointer', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', flexShrink: 0 }}
                                                     title="Open File in Editor"
                                                     onClick={() => vscode.postMessage({ type: 'openFile', filepath: filepath })}>
-                                                    📂
+                                                    OPEN ↗
                                                 </button>
                                             </div>
-                                            
+
+                                            {/* File Attributes */}
                                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '11px' }}>
                                                 {node.exports?.length > 0 && (
                                                     <div style={{ background: 'rgba(81, 207, 102, 0.1)', color: '#51cf66', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(81, 207, 102, 0.3)' }}>
@@ -1414,17 +1715,6 @@ export default function App() {
                                                         <strong>Functions:</strong> {node.functions.join(', ')}
                                                     </div>
                                                 )}
-                                                {/* Interfaces and Variables rendering */}
-                                                {node.interfaces?.length > 0 && (
-                                                    <div style={{ background: 'rgba(206, 147, 216, 0.1)', color: '#ce93d8', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(206, 147, 216, 0.3)' }}>
-                                                        <strong>Interfaces:</strong> {node.interfaces.join(', ')}
-                                                    </div>
-                                                )}
-                                                {node.variables?.length > 0 && (
-                                                    <div style={{ background: 'rgba(255, 204, 128, 0.1)', color: '#ffcc80', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(255, 204, 128, 0.3)' }}>
-                                                        <strong>Vars/Consts:</strong> {node.variables.join(', ')}
-                                                    </div>
-                                                )}
                                                 {node.imports?.length > 0 && (
                                                     <div style={{ width: '100%', marginTop: '4px', color: 'var(--nexus-subtext)' }}>
                                                         ↳ Imports: {node.imports.map((imp: string) => imp.replace(/['"]/g, '')).join(', ')}
@@ -1434,11 +1724,11 @@ export default function App() {
                                         </div>
                                     );
                                 })
-                            )}
-                        </div>
+                            )
+                        }
                     </div>
                 </div>
-            )}
+            </div>
         </div>
     );
 }

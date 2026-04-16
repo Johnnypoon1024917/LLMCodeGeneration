@@ -11,7 +11,7 @@ export async function runPlannerAgent(
 ): Promise<string> {
     log("🧠 Planner Agent: Architecting step-by-step spec...");
 
-    // 🔥 THE COMPLETE ENTERPRISE PROMPT
+    //  THE COMPLETE ENTERPRISE PROMPT
     const systemPrompt = `You are the Principal Software Architect. Your objective is to generate a comprehensive execution plan based on the user's request and the provided workspace context.
 You do not write implementation code. You generate strict architectural instructions.
 
@@ -28,8 +28,19 @@ You must structure your response strictly using the following XML tags:
   <file>path/to/exact/file.ts</file>
 </files_to_modify>
 <execution_plan>
-  Step-by-step technical instructions for the Coder agent. Detail exactly what logic to add, modify, or remove in each file. Do not write the raw code, write the logic requirements.
-</execution_plan>`;
+  Step-by-step technical instructions for the Coder agent. Detail exactly what logic to add, modify, or remove in each file. 
+  CRITICAL RULES:
+  - DO NOT write the raw code, write the logic requirements.
+  - DO NOT include abstract human tasks like "test across browsers", "ensure responsiveness", or "deploy to production".
+  - Write ONLY deterministic instructions for generating code syntax.
+</execution_plan>
+<verification_rules>
+  Generate a strict bulleted list of syntax and logic conditions that MUST be true for this code to be considered complete.
+  Example:
+  - The file must export a 'loginUser' function.
+  - The function must include a try/catch block.
+  - It must return a 400 status code if the email is missing.
+</verification_rules>`;
 
     const { endpoint, model, apiKey } = await getLLMConfig();
 

@@ -31,7 +31,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const provenanceTracker = new ProvenanceTracker(lensProvider);
     const sidebarProvider = new SidebarProvider(context.extensionUri);
     
-    // 🔥 Boot the Terminal Auto-Debugger
+    //  Boot the Terminal Auto-Debugger
     activateTerminalInterceptor(sidebarProvider, context);
 
     // 2. Wire them together
@@ -40,7 +40,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const selector: vscode.DocumentSelector = [{ language: '*', scheme: '*' }];
 
-    // 🔥 ENTERPRISE UPGRADE: Group all registrations into a single, clean push block
+    //  ENTERPRISE UPGRADE: Group all registrations into a single, clean push block
     context.subscriptions.push(
         vscode.workspace.registerTextDocumentContentProvider('nexus-original', originalContentProvider),
         // --- PROVIDERS ---
@@ -133,7 +133,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const selection = editor.document.getText(editor.selection);
                 const filename = vscode.workspace.asRelativePath(editor.document.uri);
                 
-                // 🔥 ENTERPRISE UPGRADE: Send structured context instead of raw text
+                //  ENTERPRISE UPGRADE: Send structured context instead of raw text
                 sidebarProvider.sendMessageToWebview({ 
                     type: 'addContext', 
                     file: filename, 
@@ -149,7 +149,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const selection = editor.document.getText(editor.selection);
                 const filename = vscode.workspace.asRelativePath(editor.document.uri);
                 
-                // 🔥 Attach the context silently, then trigger an explain prompt
+                //  Attach the context silently, then trigger an explain prompt
                 const contextStr = `\n\`\`\`${editor.document.languageId} title="${filename}"\n${selection}\n\`\`\`\n`;
                 sidebarProvider.sendMessageToWebview({ 
                     type: 'addUserMessageAndSubmit', 
@@ -165,7 +165,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 const selection = editor.document.getText(editor.selection);
                 const filename = vscode.workspace.asRelativePath(editor.document.uri);
                 
-                // 🔥 Attach the context silently, then pre-fill a modification request
+                //  Attach the context silently, then pre-fill a modification request
                 sidebarProvider.sendMessageToWebview({ type: 'addContext', file: filename, code: selection, language: editor.document.languageId });
                 sidebarProvider.sendMessageToWebview({ type: 'insertText', text: `I want to modify the selected code. Please change it to: ` });
                 vscode.commands.executeCommand('qwen-sidebar.focus');
