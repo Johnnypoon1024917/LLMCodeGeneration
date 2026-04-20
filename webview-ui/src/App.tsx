@@ -5,11 +5,30 @@ import ForceGraph3D from 'react-force-graph-3d';
 
 const vscode = (window as any).acquireVsCodeApi();
 let chatTokenBuffer = "";
+let lastChatUpdate = Date.now();
 let reasoningTokenBuffer = "";
+let lastReasoningUpdate = Date.now();
 
-interface ProjectTask { step: string; file: string; detailedInstructions: string; relatedRequirement: string; }
-interface AIPlan { folderStructure: string[]; implementationTasks: (string | ProjectTask)[]; }
-interface Message { role: 'user' | 'assistant'; content?: string; plan?: AIPlan; attachments?: AttachedContext[]; isCompacted?: boolean; }
+interface ProjectTask {
+    step: string;
+    file: string;
+    detailedInstructions: string;
+    relatedRequirement: string;
+}
+
+interface AIPlan {
+    folderStructure: string[];
+    implementationTasks: (string | ProjectTask)[];
+}
+
+interface Message {
+    role: 'user' | 'assistant';
+    content?: string;
+    plan?: AIPlan;
+    attachments?: AttachedContext[];
+    isCompacted?: boolean;
+}
+
 interface AttachedContext { file: string; code: string; language: string; }
 interface AtomicEdit { filepath: string; code: string; action: 'replace' | 'append' | 'inject'; target?: string; }
 interface AgentStep { type: string; description: string; details?: string; }
@@ -39,6 +58,7 @@ export default function App() {
     const chatTokenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const reasoningTokenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    //  MAP & TRACEABILITY STATE
     const [graphPayload, setGraphPayload] = useState<any>(null);
     const [activeMapType, setActiveMapType] = useState<'codeMap' | 'reqMap' | 'combinedMap'>('combinedMap');
     const [isGraphLoading, setIsGraphLoading] = useState<boolean>(false);
@@ -78,7 +98,9 @@ export default function App() {
     const sessionStoreRef = useRef<Record<string, { messages: Message[], taskSteps: Record<string, AgentStep[]>, taskReasoning: Record<string, string> }>>({});
 
     const currentStateRef = useRef({ messages, taskSteps, taskReasoning });
-    useEffect(() => { currentStateRef.current = { messages, taskSteps, taskReasoning }; }, [messages, taskSteps, taskReasoning]);
+    useEffect(() => {
+        currentStateRef.current = { messages, taskSteps, taskReasoning };
+    }, [messages, taskSteps, taskReasoning]);
 
     const [activeTab, setActiveTab] = useState<'coder' | 'builder' | 'rules' | 'Map'>('coder');
     const [nexusRules, setNexusRules] = useState<string>('');
@@ -94,6 +116,7 @@ export default function App() {
     const [isGeneratingTasks, setIsGeneratingTasks] = useState(false);
 
     const [activePlan, setActivePlan] = useState<AIPlan | null>(null);
+
     const [showGraph, setShowGraph] = useState(false);
     const [graphData, setGraphData] = useState<Record<string, any> | null>(null);
 
@@ -105,196 +128,420 @@ export default function App() {
     const [activeSessionId, setActiveSessionId] = useState('1');
 
     const [terminalStreams, setTerminalStreams] = useState<Record<string, string>>({});
+
     const [glassBrainContext, setGlassBrainContext] = useState<string>("");
     const [pendingCommand, setPendingCommand] = useState<{ command: string, message: string } | null>(null);
 
+
     useEffect(() => {
         if (!showGraph || !graphContainerRef.current) return;
+
         const resizeObserver = new ResizeObserver(entries => {
-            for (let entry of entries) setGraphDims({ width: entry.contentRect.width, height: entry.contentRect.height });
+            for (let entry of entries) {
+                setGraphDims({
+                    width: entry.contentRect.width,
+                    height: entry.contentRect.height
+                });
+            }
         });
+
         resizeObserver.observe(graphContainerRef.current);
         return () => resizeObserver.disconnect();
     }, [showGraph]);
 
+    //  DYNAMIC GRAPH MAPPER
+    // Gracefully handles both Old AST Dictionary and New Array [{nodes, edges}] formats
     const visualGraphData = useMemo(() => {
         if (!graphData) return { nodes: [], links: [] };
-        const nodes: any[] = []; const links: any[] = [];
+
+        const nodes: any[] = [];
+        const links: any[] = [];
         const nodeSet = new Set<string>();
 
+        // FORMAT 1: New Tracability Map (Array Form)
         if (Array.isArray(graphData.nodes) && Array.isArray(graphData.edges)) {
             const validNodeIds = new Set<string>();
+
             graphData.nodes.forEach((n: any) => {
                 let val = 5;
                 const nodeGroup = (n.group || n.type || 'file').toLowerCase();
+
                 if (nodeGroup === 'epic') val = 8;
                 if (nodeGroup === 'story') val = 6;
                 if (nodeGroup === 'criteria') val = 4;
                 if (nodeGroup === 'task') val = 7;
-                validNodeIds.add(n.id);
+
+                validNodeIds.add(n.id); // Register the node ID
                 nodes.push({ id: n.id, name: n.label || n.id, group: nodeGroup, val });
             });
+
             graphData.edges.forEach((e: any) => {
+                // 🔥 FIX 2: Safely extract string IDs from mutated WebGL objects
                 const sourceId = typeof e.source === 'object' ? e.source.id : String(e.source || '');
                 const targetId = typeof e.target === 'object' ? e.target.id : String(e.target || '');
+
+                // 🔥 FIX 3: FIREWALL - Only push the link if BOTH nodes actually exist!
                 if (validNodeIds.has(sourceId) && validNodeIds.has(targetId)) {
                     links.push({
-                        source: sourceId, target: targetId,
-                        color: e.color ? e.color : (sourceId.includes('Epic') || sourceId.includes('Story')) ? 'rgba(245, 66, 141, 0.8)' : 'rgba(51, 154, 240, 0.9)',
-                        isSemantic: e.isSemantic, weight: e.weight
+                        source: sourceId,
+                        target: targetId,
+                        color: e.color ? e.color : (sourceId.includes('Epic') || sourceId.includes('Story') || sourceId.includes('EPIC') || sourceId.includes('STORY')) ? 'rgba(245, 66, 141, 0.8)' : 'rgba(51, 154, 240, 0.9)',
+                        isSemantic: e.isSemantic,
+                        weight: e.weight
                     });
+                } else {
+                    console.warn(`[Graph Firewall] Dropped hallucinated link: ${sourceId} -> ${targetId}`);
                 }
             });
+
             return { nodes, links };
         }
 
+        // FORMAT 2: Fallback for Pure AST Code Map (Dictionary Form)
         Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
-            if (filepath === 'nodes' || filepath === 'edges') return;
+            if (filepath === 'nodes' || filepath === 'edges') return; // Guard clause
+
+            const folder = filepath.split('/')[0] || 'root';
             const filename = filepath.split('/').pop() || '';
+
             nodes.push({ id: filepath, name: `📄 ${filename}`, group: 'file', val: 5 });
             nodeSet.add(filepath);
+
             node.functions?.forEach((func: string) => {
                 const funcId = `${filepath}::${func}`;
                 nodes.push({ id: funcId, name: `ƒ ${func}()`, group: 'function', val: 3 });
                 links.push({ source: filepath, target: funcId, color: 'rgba(51, 154, 240, 0.9)' });
+                nodeSet.add(funcId);
             });
+
             node.classes?.forEach((cls: string) => {
                 const clsId = `${filepath}::${cls}`;
                 nodes.push({ id: clsId, name: `© ${cls}`, group: 'class', val: 4 });
                 links.push({ source: filepath, target: clsId, color: 'rgba(252, 163, 17, 0.9)' });
+                nodeSet.add(clsId);
             });
+
             node.imports?.forEach((imp: string) => {
                 const cleanImp = imp.replace(/['"]/g, '');
                 let targetFile = Object.keys(graphData).find(k => k.includes(cleanImp.replace('./', '').replace('../', '')));
-                if (targetFile) links.push({ source: filepath, target: targetFile, color: 'rgba(245, 66, 141, 0.8)' });
+                if (targetFile) {
+                    links.push({ source: filepath, target: targetFile, color: 'rgba(245, 66, 141, 0.8)' });
+                }
             });
         });
+
         return { nodes, links };
     }, [graphData]);
 
     useEffect(() => { codingStyleRef.current = codingStyle; }, [codingStyle]);
-    useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, terminalStreams, glassBrainContext, pendingCommand]);
-    useEffect(() => { vscode.postMessage({ type: 'webviewReady' }); vscode.postMessage({ type: 'requestModels' }); }, []);
+
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [messages, terminalStreams, glassBrainContext, pendingCommand]);
+
+    useEffect(() => {
+        vscode.postMessage({ type: 'webviewReady' });
+        vscode.postMessage({ type: 'requestModels' });
+    }, []);
+
     useEffect(() => {
         let interval: ReturnType<typeof setTimeout>;
-        if (isGeneratingReqs || isGeneratingDesign || isGeneratingTasks) interval = setInterval(() => setSpecTimer(t => t + 1), 1000);
-        else setSpecTimer(0);
+        if (isGeneratingReqs || isGeneratingDesign || isGeneratingTasks) {
+            interval = setInterval(() => setSpecTimer(t => t + 1), 1000);
+        } else {
+            setSpecTimer(0);
+        }
         return () => clearInterval(interval);
     }, [isGeneratingReqs, isGeneratingDesign, isGeneratingTasks]);
 
-    const formatTime = (sec: number) => `${Math.floor(sec / 60)}:${(sec % 60 < 10 ? '0' : '') + (sec % 60)}`;
+    const formatTime = (sec: number) => {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return `${m}:${s < 10 ? '0' : ''}${s}`;
+    };
 
-    useEffect(() => { if (graphPayload) setGraphData(graphPayload[activeMapType] || null); }, [activeMapType, graphPayload]);
+    useEffect(() => {
+        if (graphPayload) {
+            setGraphData(graphPayload[activeMapType] || null);
+        }
+    }, [activeMapType, graphPayload]);
 
-    // THE STREAMLINED TELEMETRY LISTENER
     useEffect(() => {
         const messageHandler = (event: MessageEvent) => {
             const data = event.data;
-            const handlers: Record<string, () => void> = {
-                'historyCompacted': () => setMessages(data.messages),
-                'clearTerminalStream': () => setTerminalStreams(p => { const n = { ...p }; delete n[data.task]; return n; }),
-                'streamTerminal': () => setTerminalStreams(p => ({ ...p, [data.task]: (p[data.task] || '') + data.text })),
-                'tasksGenerated': () => { setIsGeneratingTasks(false); setActiveTab('coder'); },
-                'workspaceGraphData': () => {
-                    try {
-                        const payload = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
-                        setGraphPayload(payload);
-                        setGraphData(payload.combinedMap || { nodes: [], edges: [] });
-                        if (payload.isGraphLoading) { setActiveMapType('codeMap'); setGraphData(payload.codeMap || { nodes: [], edges: [] }); setShowGraph(true); } 
-                        else { setActiveMapType('combinedMap'); setGraphData(payload.combinedMap || { nodes: [], edges: [] }); }
-                    } catch (err) { }
-                },
-                'startRevision': () => {
-                    const { task, feedback } = data;
-                    setTaskStatuses(p => ({ ...p, [task]: 'reviewing' })); setTaskSummaries(p => ({ ...p, [task]: 'Revising...' }));
-                    setTaskSteps(p => ({ ...p, [task]: [] })); setTaskReasoning(p => ({ ...p, [task]: '' }));
-                    vscode.postMessage({ type: 'executeTask', task, codingStyle: codingStyleRef.current, feedback });
-                },
-                'injectTerminalTask': () => {
-                    setMessages(p => [...p, { role: 'user', content: data.task }, { role: 'assistant', content: "Analyzing terminal crash..." }]);
-                    setTaskStatuses(p => ({ ...p, [data.task]: 'reviewing' }));
-                    vscode.postMessage({ type: 'executeTask', task: data.task, codingStyle: codingStyleRef.current });
-                },
-                'agentStep': () => setTaskSteps(p => ({ ...p, [data.task]: [...(p[data.task] || []), { type: data.stepType, description: data.description, details: data.details }] })),
-                'searchResults': () => {
-                    const suffix = data.originalQuery?.match(/:\d+(?:-\d+)?$/)?.[0] || '';
-                    const res = data.results.map((r: string) => r + suffix);
-                    setMentionResults(res); setSearchResults(res);
-                },
-                'addContext': () => {
-                    const ctxUpdater = searchTargetRef.current === 'coder' ? setAttachedContexts : setBuilderContexts;
-                    ctxUpdater(p => p.some(c => c.file === data.file && c.code === data.code) ? p : [...p, { file: data.file, code: data.code, language: data.language }]);
-                    if (searchTargetRef.current === 'coder') setTimeout(() => document.getElementById('chat-input')?.focus(), 100);
-                    setSearchQuery(''); setSearchResults([]); setIsSearching(false); setMentionQuery(''); setMentionResults([]); setShowMentionMenu(false);
-                },
-                'insertText': () => {
-                    setInput(p => p + (p.length > 0 && !p.endsWith('\n') ? '\n' : '') + data.text);
-                    setTimeout(() => { const el = document.getElementById('chat-input'); if (el) { el.focus(); el.scrollTop = el.scrollHeight; } }, 100);
-                },
-                'addUserMessageAndSubmit': () => {
-                    setMessages(p => [...p, { role: 'user', content: `${data.text}\n\n*(Attached from Editor)*\n${data.context || ''}` }]);
-                    setLoading(true);
-                    vscode.postMessage({ type: 'processUserMessage', text: data.text, context: data.context, codingStyle: codingStyleRef.current, autopilot: isAutopilot });
-                },
-                'initState': () => {
-                    setHasKey(data.hasKey);
-                    if (data.taskStatuses) setTaskStatuses(data.taskStatuses);
-                    if (data.taskSummaries) setTaskSummaries(data.taskSummaries);
-                    if (data.taskFiles) setTaskFiles(data.taskFiles);
-                    if (data.requirements) setRequirements(data.requirements);
-                    if (data.design) setDesign(data.design);
-                    if (data.nexusRules) setNexusRules(data.nexusRules);
-                    if (data.tasks) {
-                        setActivePlan(data.tasks);
-                        if (!data.messages?.some((m: Message) => m.plan)) setMessages([...(data.messages||[]), { role: 'assistant', content: "Welcome back! Here is your plan.", plan: data.tasks }]);
-                        else setMessages(data.messages || []);
-                    } else setMessages(data.messages || []);
-                    setTimeout(() => setIsLoaded(true), 100);
-                },
-                'requestCommandApproval': () => setPendingCommand({ command: data.command, message: data.message }),
-                'requirementsUpdated': () => { setRequirements(data.text); },
-                'requirementsGenerated': () => { setRequirements(data.text); setIsGeneratingReqs(false); },
-                'designGenerated': () => { setDesign(data.text); setIsGeneratingDesign(false); },
-                'reqStep': () => setReqLogs(p => [...p, data.message]),
-                'generationFailed': () => { setIsGeneratingReqs(false); setIsGeneratingDesign(false); setIsGeneratingTasks(false); },
-                'updateModelsList': () => { setAvailableModels(data.models); if (data.currentModel && data.models.includes(data.currentModel)) setSelectedModel(data.currentModel); else if (data.models.length > 0) setSelectedModel(data.models[0]); },
-                'structureResponse': () => { setActivePlan(data.value); setMessages(p => [...p, { role: 'assistant', plan: data.value }]); setLoading(false); setIsGeneratingTasks(false); setActiveTab('coder'); },
-                'statusUpdate': () => setAgentStatus(data.message),
-                'reviewEdits': () => { setPendingEdits(data.edits); setLoading(false); },
-                'allTasksCompleted': () => { setPendingEdits(null); setMessages(p => [...p, { role: 'assistant', content: "✅ Atomic transaction committed successfully." }]); setAgentStatus(''); },
-                'taskCompleted': () => { setTaskStatuses(p => ({ ...p, [data.task]: data.status })); if (data.summary) setTaskSummaries(p => ({ ...p, [data.task]: data.summary })); if (data.filepath) setTaskFiles(p => ({ ...p, [data.task]: data.filepath })); if (data.status === 'error') setLoading(false); },
-                'taskStatusUpdate': () => { setTaskStatuses(p => ({ ...p, [data.task]: data.status })); if (data.summary) setTaskSummaries(p => ({ ...p, [data.task]: data.summary })); if (data.filepath) setTaskFiles(p => ({ ...p, [data.task]: data.filepath })); if (data.status === 'error') setLoading(false); },
-                'streamReasoning': () => {
-                    reasoningTokenBuffer += data.token;
-                    if (!reasoningTokenTimerRef.current) {
-                        reasoningTokenTimerRef.current = setTimeout(() => {
-                            const flush = reasoningTokenBuffer; reasoningTokenBuffer = ""; reasoningTokenTimerRef.current = null;
-                            setTaskReasoning(p => ({ ...p, [data.task]: (p[data.task] || '') + flush }));
-                        }, 50);
+
+            if (data.type === 'historyCompacted') {
+                setMessages(data.messages);
+            }
+
+            if (data.type === 'clearTerminalStream') {
+                setTerminalStreams(prev => {
+                    const next = { ...prev };
+                    delete next[data.task];
+                    return next;
+                });
+            }
+
+            if (data.type === 'streamTerminal') {
+                setTerminalStreams(prev => ({
+                    ...prev,
+                    [data.task]: (prev[data.task] || '') + data.text
+                }));
+            }
+
+            if (data.type === 'tasksGenerated') {
+                setIsGeneratingTasks(false);
+                setActiveTab('coder');
+            }
+
+            //  TRACEABILITY PAYLOAD CAPTURE
+
+            if (data.type === 'workspaceGraphData') {
+                console.log("[DEBUG-MAP-UI] 🟢 Received workspaceGraphData from backend!", data);
+            }
+
+            if (data.type === 'workspaceGraphData') {
+                try {
+                    const parsedPayload = typeof data.data === 'string' ? JSON.parse(data.data) : data.data;
+                    console.log("[DEBUG-MAP-UI] 🟢 Successfully parsed payload:", parsedPayload);
+                    setGraphPayload(parsedPayload);
+                    setGraphData(parsedPayload.combinedMap || { nodes: [], edges: [] });
+                    if (parsedPayload.isGraphLoading) {
+                        // Force the UI to show the CodeMap while the others load
+                        setActiveMapType('codeMap');
+                        setGraphData(parsedPayload.codeMap || { nodes: [], edges: [] });
+                        setShowGraph(true);
+                    } else {
+                        // When finished, default back to Combined Map
+                        setActiveMapType('combinedMap');
+                        setGraphData(parsedPayload.combinedMap || { nodes: [], edges: [] });
                     }
-                },
-                'glassBrain': () => setGlassBrainContext(data.text),
-                'startChatStream': () => { setMessages(p => [...p, { role: 'assistant', content: '' }]); setLoading(false); setGlassBrainContext(""); },
-                'chatToken': () => {
-                    chatTokenBuffer += data.token;
-                    if (!chatTokenTimerRef.current) {
-                        chatTokenTimerRef.current = setTimeout(() => {
-                            const flush = chatTokenBuffer; chatTokenBuffer = ""; chatTokenTimerRef.current = null;
-                            setMessages(p => { const m = [...p]; const l = m[m.length - 1]; if (l?.role === 'assistant') l.content = (l.content || "") + flush; return m; });
-                        }, 50);
+                } catch (err) {
+                    console.error("[DEBUG-MAP-UI] 🔴 Failed to parse incoming graph payload:", err);
+                }
+            }
+
+            if (data.type === 'startRevision') {
+                const { task, feedback } = data;
+                setTaskStatuses(prev => ({ ...prev, [task]: 'reviewing' }));
+                setTaskSummaries(prev => ({ ...prev, [task]: 'Revising based on feedback...' }));
+                setTaskSteps(prev => ({ ...prev, [task]: [] }));
+                setTaskReasoning(prev => ({ ...prev, [task]: '' }));
+                vscode.postMessage({ type: 'executeTask', task: task, codingStyle: codingStyleRef.current, feedback: feedback });
+            }
+
+            if (data.type === 'injectTerminalTask') {
+                const terminalTask = data.task;
+                setMessages(prev => [...prev,
+                { role: 'user', content: terminalTask },
+                { role: 'assistant', content: "I am analyzing your terminal crash right now. Hang tight..." }
+                ]);
+                setTaskStatuses(prev => ({ ...prev, [terminalTask]: 'reviewing' }));
+                vscode.postMessage({ type: 'executeTask', task: terminalTask, codingStyle: codingStyleRef.current });
+            }
+
+            if (data.type === 'agentStep') {
+                setTaskSteps(prev => ({
+                    ...prev,
+                    [data.task]: [...(prev[data.task] || []), { type: data.stepType, description: data.description, details: data.details }]
+                }));
+            }
+
+            if (data.type === 'searchResults') {
+                const lineMatch = data.originalQuery?.match(/:\d+(?:-\d+)?$/);
+                const suffix = lineMatch ? lineMatch[0] : '';
+                const updatedResults = data.results.map((r: string) => r + suffix);
+
+                setMentionResults(updatedResults);
+                setSearchResults(updatedResults);
+            }
+
+            if (data.type === 'addContext') {
+                if (searchTargetRef.current === 'coder') {
+                    setAttachedContexts(prev => {
+                        if (prev.some(c => c.file === data.file && c.code === data.code)) return prev;
+                        return [...prev, { file: data.file, code: data.code, language: data.language }];
+                    });
+                    setTimeout(() => document.getElementById('chat-input')?.focus(), 100);
+                } else {
+                    setBuilderContexts(prev => {
+                        if (prev.some(c => c.file === data.file && c.code === data.code)) return prev;
+                        return [...prev, { file: data.file, code: data.code, language: data.language }];
+                    });
+                }
+                setSearchQuery('');
+                setSearchResults([]);
+                setIsSearching(false);
+                setMentionQuery('');
+                setMentionResults([]);
+                setShowMentionMenu(false);
+            }
+
+            if (data.type === 'insertText') {
+                setInput(prev => prev + (prev.length > 0 && !prev.endsWith('\n') ? '\n' : '') + data.text);
+                setTimeout(() => {
+                    const el = document.getElementById('chat-input');
+                    if (el) { el.focus(); el.scrollTop = el.scrollHeight; }
+                }, 100);
+            }
+
+            if (data.type === 'addUserMessageAndSubmit') {
+                const displayContent = `${data.text}\n\n*(Attached from Editor)*\n${data.context || ''}`;
+                setMessages(prev => [...prev, { role: 'user', content: displayContent }]);
+                setLoading(true);
+                vscode.postMessage({
+                    type: 'processUserMessage',
+                    text: data.text,
+                    context: data.context,
+                    codingStyle: codingStyleRef.current,
+                    autopilot: isAutopilot
+                });
+            }
+
+            if (data.type === 'initState') {
+                const loadedMsgs = data.messages || [];
+                setHasKey(data.hasKey);
+                if (data.taskStatuses) setTaskStatuses(data.taskStatuses);
+                if (data.taskSummaries) setTaskSummaries(data.taskSummaries);
+                if (data.taskFiles) setTaskFiles(data.taskFiles);
+                if (data.requirements) setRequirements(data.requirements);
+                if (data.design) setDesign(data.design);
+                if (data.nexusRules) setNexusRules(data.nexusRules);
+
+                if (data.tasks) {
+                    setActivePlan(data.tasks);
+                    const hasPlan = loadedMsgs.some((m: Message) => m.plan);
+                    if (!hasPlan) {
+                        setMessages([...loadedMsgs, {
+                            role: 'assistant',
+                            content: "Welcome back! Here is your active implementation plan. You can execute tasks autonomously, or code them yourself and ask me to verify them.",
+                            plan: data.tasks
+                        }]);
+                    } else {
+                        setMessages(loadedMsgs);
                     }
-                },
-                'metaModeChanged': () => setMetaMode(data.value),
-                'requestReview': () => setInput(`Please review this code:\n\n\`\`\`\n${data.code}\n\`\`\``)
-            };
-            if (handlers[data.type]) handlers[data.type]();
+                } else {
+                    setMessages(loadedMsgs);
+                }
+
+                setTimeout(() => setIsLoaded(true), 100);
+            }
+
+            if (data.type === 'requestCommandApproval') {
+                setPendingCommand({
+                    command: data.command,
+                    message: data.message
+                });
+            }
+
+            if (data.type === 'requirementsUpdated' || data.type === 'requirementsGenerated') {
+                setRequirements(data.text);
+                if (data.type === 'requirementsGenerated') setIsGeneratingReqs(false);
+            }
+
+            if (data.type === 'designGenerated') {
+                setDesign(data.text);
+                setIsGeneratingDesign(false);
+            }
+
+            if (data.type === 'reqStep') {
+                setReqLogs(prev => [...prev, data.message]);
+            }
+
+            if (data.type === 'generationFailed') {
+                setIsGeneratingReqs(false);
+                setIsGeneratingDesign(false);
+                setIsGeneratingTasks(false);
+            }
+
+            if (data.type === 'updateModelsList') {
+                setAvailableModels(data.models);
+                if (data.currentModel && data.models.includes(data.currentModel)) setSelectedModel(data.currentModel);
+                else if (data.models.length > 0) setSelectedModel(data.models[0]);
+            }
+
+            if (data.type === 'structureResponse') {
+                setActivePlan(data.value);
+                setMessages(prev => [...prev, { role: 'assistant', plan: data.value }]);
+                setLoading(false);
+                setIsGeneratingTasks(false);
+                setActiveTab('coder');
+            }
+
+            if (data.type === 'statusUpdate') setAgentStatus(data.message);
+            if (data.type === 'reviewEdits') { setPendingEdits(data.edits); setLoading(false); }
+            if (data.type === 'allTasksCompleted') {
+                setPendingEdits(null);
+                setMessages(prev => [...prev, { role: 'assistant', content: "✅ Atomic transaction committed successfully." }]);
+                setAgentStatus('');
+            }
+            if (data.type === 'taskCompleted' || data.type === 'taskStatusUpdate') {
+                setTaskStatuses(prev => ({ ...prev, [data.task]: data.status }));
+                if (data.summary) setTaskSummaries(prev => ({ ...prev, [data.task]: data.summary }));
+                if (data.filepath) setTaskFiles(prev => ({ ...prev, [data.task]: data.filepath }));
+                if (data.status === 'error') setLoading(false);
+            }
+
+            if (data.type === 'streamReasoning') {
+                reasoningTokenBuffer += data.token;
+                if (!reasoningTokenTimerRef.current) {
+                    reasoningTokenTimerRef.current = setTimeout(() => {
+                        const flush = reasoningTokenBuffer;
+                        reasoningTokenBuffer = "";
+                        reasoningTokenTimerRef.current = null;
+                        setTaskReasoning(prev => ({
+                            ...prev, [data.task]: (prev[data.task] || '') + flush
+                        }));
+                    }, 50);
+                }
+            }
+
+            if (data.type === 'glassBrain') {
+                setGlassBrainContext(data.text);
+            }
+
+            if (data.type === 'startChatStream') {
+                setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+                setLoading(false);
+                setGlassBrainContext("");
+            }
+
+            if (data.type === 'chatToken') {
+                chatTokenBuffer += data.token;
+                if (!chatTokenTimerRef.current) {
+                    chatTokenTimerRef.current = setTimeout(() => {
+                        const flush = chatTokenBuffer;
+                        chatTokenBuffer = "";
+                        chatTokenTimerRef.current = null;
+                        setMessages(prev => {
+                            const newMessages = [...prev];
+                            const lastIdx = newMessages.length - 1;
+                            if (newMessages[lastIdx] && newMessages[lastIdx].role === 'assistant') {
+                                newMessages[lastIdx].content = (newMessages[lastIdx].content || "") + flush;
+                            }
+                            return newMessages;
+                        });
+                    }, 50);
+                }
+            }
+
+            if (data.type === 'metaModeChanged') setMetaMode(data.value);
+            if (data.type === 'requestReview') setInput(`Please review this code:\n\n\`\`\`\n${data.code}\n\`\`\``);
         };
         window.addEventListener('message', messageHandler);
         return () => window.removeEventListener('message', messageHandler);
-    }, [isAutopilot]);
+    }, [isAutopilot]); // Dependency included
 
     useEffect(() => {
-        if (hasKey && isLoaded) vscode.postMessage({ type: 'syncHistory', messages, taskStatuses, taskSummaries, taskFiles });
+        if (hasKey && isLoaded) {
+            vscode.postMessage({
+                type: 'syncHistory',
+                messages: messages,
+                taskStatuses: taskStatuses,
+                taskSummaries: taskSummaries,
+                taskFiles: taskFiles
+            });
+        }
     }, [messages, taskStatuses, taskSummaries, taskFiles, hasKey, isLoaded]);
 
     if (!isLoaded) return <div style={{ padding: '20px', textAlign: 'center', color: 'var(--nexus-subtext)' }}>Loading Nexus...</div>;
@@ -309,7 +556,9 @@ export default function App() {
                     const val = (document.getElementById('api-key-input') as HTMLInputElement).value;
                     if (val) vscode.postMessage({ type: 'saveApiKey', value: val });
                 }}>Save Key to OS Vault</button>
-                <button className="auth-btn secondary" onClick={() => vscode.postMessage({ type: 'saveApiKey', value: 'lm-studio' })}>Use Local LLM (Skip)</button>
+                <button className="auth-btn secondary" onClick={() => {
+                    vscode.postMessage({ type: 'saveApiKey', value: 'lm-studio' });
+                }}>Use Local LLM (Skip)</button>
             </div>
         );
     }
@@ -317,48 +566,101 @@ export default function App() {
     const handleSubmit = (overrideText?: string) => {
         const text = overrideText || input;
         if ((!text.trim() && attachedContexts.length === 0) || loading) return;
+
         let finalQuery = text.trim() || "Please review the attached code.";
-        let contextStr = attachedContexts.length > 0 ? attachedContexts.map(c => `\n\`\`\`${c.language} title="${c.file}"\n${c.code}\n\`\`\`\n`).join('') : "";
-        setMessages(p => [...p, { role: 'user', content: finalQuery, attachments: attachedContexts }]);
+        let contextStr = "";
+
+        if (attachedContexts.length > 0) {
+            contextStr = attachedContexts.map(c => `\n\`\`\`${c.language} title="${c.file}"\n${c.code}\n\`\`\`\n`).join('');
+        }
+
+        setMessages(prev => [...prev, { role: 'user', content: finalQuery, attachments: attachedContexts }]);
         setLoading(true);
-        vscode.postMessage({ type: 'processUserMessage', text: finalQuery, context: contextStr, codingStyle: codingStyleRef.current, autopilot: isAutopilot, history: messages });
-        setInput(''); setAttachedContexts([]);
-        const textarea = document.getElementById('chat-input'); if (textarea) textarea.style.height = 'auto';
+
+        vscode.postMessage({
+            type: 'processUserMessage',
+            text: finalQuery,
+            context: contextStr,
+            codingStyle: codingStyleRef.current,
+            autopilot: isAutopilot,
+            history: messages
+        });
+
+        setInput('');
+        setAttachedContexts([]);
+        const textarea = document.getElementById('chat-input');
+        if (textarea) textarea.style.height = 'auto';
     };
 
     const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-        const val = e.target.value; setInput(val);
-        e.target.style.height = 'auto'; e.target.style.height = `${Math.min(e.target.scrollHeight, 150)}px`;
-        const words = val.substring(0, e.target.selectionStart).split(/\s/);
+        const val = e.target.value;
+        setInput(val);
+        e.target.style.height = 'auto';
+        e.target.style.height = `${Math.min(e.target.scrollHeight, 150)}px`;
+
+        const cursorPosition = e.target.selectionStart;
+        const textBeforeCursor = val.substring(0, cursorPosition);
+        const words = textBeforeCursor.split(/\s/);
         const lastWord = words[words.length - 1];
-        if (lastWord.startsWith('@')) { setShowMentionMenu(true); const query = lastWord.substring(1); setMentionQuery(query); vscode.postMessage({ type: 'searchFiles', query }); } 
-        else { setShowMentionMenu(false); }
+
+        if (lastWord.startsWith('@')) {
+            setShowMentionMenu(true);
+            const query = lastWord.substring(1);
+            setMentionQuery(query);
+            vscode.postMessage({ type: 'searchFiles', query });
+        } else {
+            setShowMentionMenu(false);
+        }
     };
 
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(); } };
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
+    };
 
     const handleClearHistory = () => {
         vscode.postMessage({ type: 'clearHistory' });
-        setMessages(activePlan ? [{ role: 'assistant', content: "Conversation cleared. Active Implementation Plan preserved:", plan: activePlan }] : []);
-        setTaskSteps({}); setTaskReasoning({}); setTaskStatuses({}); setTaskSummaries({}); setTaskFiles({});
-        sessionStoreRef.current = {}; setSessions([{ id: '1', name: 'New Session' }]); setActiveSessionId('1');
+
+        if (activePlan) {
+            setMessages([{ role: 'assistant', content: "Conversation cleared. Active Implementation Plan preserved:", plan: activePlan }]);
+        } else {
+            setMessages([]);
+        }
+
+        setTaskSteps({});
+        setTaskReasoning({});
+        setTaskStatuses({});
+        setTaskSummaries({});
+        setTaskFiles({});
+
+        sessionStoreRef.current = {};
+        setSessions([{ id: '1', name: 'New Session' }]);
+        setActiveSessionId('1');
     };
 
     const switchSession = (newId: string) => {
         if (newId === activeSessionId) return;
+
         sessionStoreRef.current[activeSessionId] = currentStateRef.current;
-        const nextState = sessionStoreRef.current[newId] || { messages: activePlan ? [{ role: 'assistant', content: "New session started.", plan: activePlan }] : [], taskSteps: {}, taskReasoning: {} };
-        setMessages(nextState.messages); setTaskSteps(nextState.taskSteps); setTaskReasoning(nextState.taskReasoning); setActiveSessionId(newId);
+
+        const nextState = sessionStoreRef.current[newId] || {
+            messages: activePlan ? [{ role: 'assistant', content: "New session started. Active Implementation Plan preserved:", plan: activePlan }] : [],
+            taskSteps: {},
+            taskReasoning: {}
+        };
+
+        setMessages(nextState.messages);
+        setTaskSteps(nextState.taskSteps);
+        setTaskReasoning(nextState.taskReasoning);
+        setActiveSessionId(newId);
     };
 
-    // YOUR EXACT ORIGINAL JSX RETURN BLOCK (UNMODIFIED)
     return (
         <div className="app-wrapper" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
             <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)', flexShrink: 0 }}>
                 {metaMode ? '⚠️ SELF-EVOLUTION ACTIVE' : 'Andromeda'}
             </div>
 
-            {/* TABS HEADER */}
+            {/*  TABS HEADER */}
             <div className="tabs-header" style={{ display: 'flex', borderBottom: '1px solid var(--vscode-widget-border)', flexShrink: 0, marginTop: '5px' }}>
                 <button
                     style={{ flex: 1, padding: '8px', background: activeTab === 'coder' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'coder' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'coder' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'coder' ? 'bold' : 'normal' }}
@@ -1205,7 +1507,7 @@ export default function App() {
                         <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '4px' }}>Click a 3D Node to view its structural text data.</div>
                     </div>
 
-                    {/* TRACEABILITY TOGGLES */}
+                    {/*  TRACEABILITY TOGGLES */}
                     <div style={{ display: 'flex', gap: '8px', background: 'rgba(0,0,0,0.3)', padding: '4px', borderRadius: '6px' }}>
                         <button
                             style={{ padding: '6px 12px', background: activeMapType === 'codeMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}

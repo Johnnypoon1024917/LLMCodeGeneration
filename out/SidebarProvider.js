@@ -39,7 +39,6 @@ const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const extension_1 = require("./extension");
 const codeGraph_1 = require("./context/codeGraph");
-const skillsManager_1 = require("./skillsManager");
 const Coordinator_1 = require("./agents/Coordinator");
 // AI Services & Tools
 const llmService_1 = require("./llmService");
@@ -52,21 +51,30 @@ const hybridSearch_1 = require("./context/hybridSearch");
 const commentStyles_1 = require("./utilities/commentStyles");
 const pathUtils_1 = require("./utilities/pathUtils");
 const workspaceManager_1 = require("./workspaceManager");
-// --- CORE INJECTION ENGINE ---
 function injectCodeIntoContent(originalContent, target, newCode, action) {
+    // 🔥 THE FIX: Aggressively strip any accidental markdown or XML leakage 
+    // to prevent syntax hallucinations from entering the source code.
     let cleanedCode = newCode
         .replace(/```[a-z]*\n?/gi, '')
         .replace(/```/g, '')
         .replace(/<\/?(target|filepath|action|plan|reasoning|command|self_critique)[^>]*>/gi, '')
         .trim();
-    if (action === 'replace')
+    // 🚀 DETERMINISTIC OVERWRITE: 
+    // If the action is 'replace' (triggered by the Rewriter agent), 
+    // ignore the old content and return the new code as the full file.
+    if (action === 'replace') {
         return cleanedCode;
-    if (action === 'append')
+    }
+    if (action === 'append') {
         return originalContent + "\n\n" + cleanedCode;
-    if (!target)
+    }
+    // Fallback if no target is provided
+    if (!target) {
         return originalContent + "\n\n" + cleanedCode;
+    }
     const lines = originalContent.split('\n');
     let startIdx = -1;
+    // Locate the exact target line for AST Splicing
     for (let i = 0; i < lines.length; i++) {
         if (lines[i].includes(target)) {
             startIdx = i;
@@ -74,13 +82,16 @@ function injectCodeIntoContent(originalContent, target, newCode, action) {
         }
     }
     if (startIdx === -1) {
+        // 🔥 THE POISON PILL: Strict verification to prevent misaligned edits.
         throw new Error(`Target "${target}" not found in file. Aborting injection to prevent code corruption.`);
     }
+    // Handle "insert_before" (typically for new routes or imports)
     if (action === 'insert_before') {
         const before = lines.slice(0, startIdx).join('\n');
         const after = lines.slice(startIdx).join('\n');
         return before + "\n" + cleanedCode + "\n\n" + after;
     }
+    // Handle block replacement (finding matching braces for functions/classes)
     let endIdx = startIdx;
     let braces = 0;
     let foundBrace = false;
@@ -110,7 +121,6 @@ class SidebarProvider {
     _tracker;
     _terminalManager;
     _metaManager;
-    // --- State Management ---
     _activeTaskController;
     _activeRequirements = "";
     _activeDesign = "";
@@ -118,63 +128,61 @@ class SidebarProvider {
     _isMetaMode = false;
     _undoStack = new Map();
     _pendingCommandResolver;
-    _diffProvider;
-    _lensProvider;
     constructor(_extensionUri) {
         this._extensionUri = _extensionUri;
     }
     setTerminalManager(manager) { this._terminalManager = manager; }
     setProvenanceTracker(tracker) { this._tracker = tracker; }
     setMetaManager(manager) { this._metaManager = manager; }
-    setDiffProvider(provider) { this._diffProvider = provider; }
-    setCodeLensProvider(provider) { this._lensProvider = provider; }
-    // --- TELEMETRY PROTOCOL ---
-    // HK IPD Patent Claim: Centralized asynchronous event emission standardizing UI/Engine communication
-    emit(type, payload = {}) {
+    sendMessageToWebview(message) {
         if (this._view) {
-            this._view.webview.postMessage({ type, ...payload });
+            this._view.webview.postMessage(message);
+        }
+        else {
+            vscode.window.showInformationMessage("Please open the NexusCode sidebar first.");
         }
     }
-    sendMessageToWebview(message) {
-        if (this._view)
-            this._view.webview.postMessage(message);
-        else
-            vscode.window.showInformationMessage("Please open the NexusCode sidebar first.");
-    }
     injectTerminalTask(prompt) {
-        this.emit('injectTerminalTask', { task: prompt });
+        if (this._view) {
+            this._view.webview.postMessage({ type: 'injectTerminalTask', task: prompt });
+        }
     }
     toggleMetaMode() {
         this._isMetaMode = !this._isMetaMode;
         const mode = this._isMetaMode ? "⚠️ SELF-EVOLUTION MODE" : "User Project Mode";
         vscode.window.showWarningMessage(`Switched to: ${mode}`);
-        this.emit('metaModeChanged', { value: this._isMetaMode });
+        this._view?.webview.postMessage({ type: 'metaModeChanged', value: this._isMetaMode });
     }
     async getTargetContext() {
-        if (this._isMetaMode)
+        if (this._isMetaMode) {
             return this._extensionUri.fsPath;
+        }
         return vscode.workspace.workspaceFolders?.[0].uri.fsPath || "";
     }
-    // --- SECURITY & EXECUTION LAYER ---
     async confirmAndRunCommand(command, workspacePath, progressMessage, isAutopilot = false, onStream) {
-        this.emit('statusUpdate', { message: `🛡️ Security Monitor inspecting command...` });
+        this._view?.webview.postMessage({ type: 'statusUpdate', message: `🛡️ Security Monitor inspecting command...` });
         const isMalicious = await (0, llmService_1.askSecurityMonitor)(command);
         if (isMalicious) {
             vscode.window.showErrorMessage(`🚨 Nexus Security Firewall BLOCKED a malicious command: ${command}`);
-            this.emit('statusUpdate', { message: `🚨 Command Blocked by Security Monitor.` });
+            this._view?.webview.postMessage({ type: 'statusUpdate', message: `🚨 Command Blocked by Security Monitor.` });
             return { success: false, output: "SECURITY_BLOCK" };
         }
         if (isAutopilot || this._isMetaMode) {
-            this.emit('statusUpdate', { message: `🤖 Autopilot Executing: ${command}` });
+            this._view?.webview.postMessage({ type: 'statusUpdate', message: `🤖 Autopilot Executing: ${command}` });
             return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream);
         }
+        // 🔥 THE PROMISE LOCK: Halt Node.js execution until the human clicks Allow or Block!
         const isApproved = await new Promise((resolve) => {
             this._pendingCommandResolver = resolve;
-            this.emit('requestCommandApproval', { command: command, message: progressMessage });
+            this._view?.webview.postMessage({
+                type: 'requestCommandApproval',
+                command: command,
+                message: progressMessage
+            });
         });
-        this._pendingCommandResolver = undefined;
+        this._pendingCommandResolver = undefined; // Clear the lock
         if (isApproved) {
-            this.emit('statusUpdate', { message: progressMessage });
+            this._view?.webview.postMessage({ type: 'statusUpdate', message: progressMessage });
             return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream);
         }
         else {
@@ -182,1021 +190,6 @@ class SidebarProvider {
             return { success: false, output: "USER_BLOCKED" };
         }
     }
-    // --- WEBVIEW INITIALIZATION & ROUTER BINDING ---
-    async resolveWebviewView(webviewView) {
-        this._view = webviewView;
-        this._tracker?.setView(webviewView);
-        webviewView.webview.options = { enableScripts: true };
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
-        // Map incoming messages to discrete handler methods
-        webviewView.webview.onDidReceiveMessage(async (data) => {
-            try {
-                await this.routeTelemetryEvent(data);
-            }
-            catch (error) {
-                console.error("[Nexus Router Error]", error);
-                vscode.window.showErrorMessage(`Nexus Error: ${error.message}`);
-                this.emit('statusUpdate', { message: "" });
-            }
-        });
-    }
-    // --- THE ASYNCHRONOUS TELEMETRY ROUTER ---
-    async routeTelemetryEvent(data) {
-        const routes = {
-            'webviewReady': () => this.handleWebviewReady(),
-            'requestWorkspaceGraph': () => this.handleRequestWorkspaceGraph(),
-            'saveNexusRules': () => this.handleSaveNexusRules(data),
-            'verifyTask': () => this.handleVerifyTask(data),
-            'generateRequirements': () => this.handleGenerateRequirements(data),
-            'generateDesign': () => this.handleGenerateDesign(data),
-            'generateProjectTasks': () => this.handleGenerateProjectTasks(data),
-            'requestRevision': () => this.handleRequestRevision(data),
-            'updateRequirements': () => this.handleUpdateRequirements(data),
-            'updateDesign': () => this.handleUpdateDesign(data),
-            'syncHistory': () => this.handleSyncHistory(data),
-            'clearHistory': () => this.handleClearHistory(),
-            'saveApiKey': () => this.handleSaveApiKey(data),
-            'processUserMessage': () => this.handleProcessUserMessage(data),
-            'cancelTask': () => this.handleCancelTask(),
-            'executeTask': () => this.handleExecuteTask(data),
-            'refreshCodeLens': () => this.handleRefreshCodeLens(),
-            'undoTaskEdit': () => this.handleUndoTaskEdit(data),
-            'runGlobalCompiler': () => this.handleRunGlobalCompiler(data),
-            'searchFiles': () => this.handleSearchFiles(data),
-            'showDiff': () => this.handleShowDiff(data),
-            'openFile': () => this.handleOpenFile(data),
-            'readFileContext': () => this.handleReadFileContext(data),
-            'executeAllTasks': () => this.handleExecuteAllTasks(data),
-            'commitAtomicEdits': () => this.handleCommitAtomicEdits(data),
-            'generateAndRunTests': () => this.handleGenerateAndRunTests(data),
-            'executeCommand': () => this.handleExecuteCommand(data),
-            'requestModels': () => this.handleRequestModels(),
-            'setModel': () => this.handleSetModel(data),
-            'approveCommand': () => this.handleApproveCommand(),
-            'rejectCommand': () => this.handleRejectCommand()
-        };
-        if (routes[data.type]) {
-            await routes[data.type]();
-        }
-        else {
-            console.warn(`[Nexus Router] Unhandled telemetry event type: ${data.type}`);
-        }
-    }
-    // --- DISCRETE HANDLER IMPLEMENTATIONS ---
-    async handleWebviewReady() {
-        const chatHistory = extension_1.globalContext.globalState.get('nexus_chat_history') || [];
-        const taskStatuses = extension_1.globalContext.globalState.get('nexus_task_statuses') || {};
-        const taskSummaries = extension_1.globalContext.globalState.get('nexus_task_summaries') || {};
-        const taskFiles = extension_1.globalContext.globalState.get('nexus_task_files') || {};
-        const hasApiKey = !!(await extension_1.globalContext.secrets.get('nexuscode_apikey'));
-        let savedReqs = "";
-        let savedDesign = "";
-        let savedTasks = null;
-        let savedRules = "";
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders) {
-            const rootUri = workspaceFolders[0].uri;
-            (0, codeGraph_1.buildWorkspaceGraph)(rootUri).catch(e => console.error("CodeGraph init failed:", e));
-            const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
-            try {
-                savedReqs = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'requirements.md')));
-                this._activeRequirements = savedReqs;
-            }
-            catch (e) { }
-            try {
-                savedDesign = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'design.md')));
-                this._activeDesign = savedDesign;
-            }
-            catch (e) { }
-            try {
-                savedTasks = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'tasks.json'))));
-            }
-            catch (e) { }
-            try {
-                savedRules = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, '.nexusrules')));
-            }
-            catch (e) { }
-        }
-        this.emit('initState', {
-            messages: chatHistory,
-            taskStatuses,
-            taskSummaries,
-            taskFiles,
-            requirements: savedReqs,
-            design: savedDesign,
-            tasks: savedTasks,
-            nexusRules: savedRules,
-            hasKey: hasApiKey
-        });
-    }
-    async handleRequestWorkspaceGraph() {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
-        const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
-        this.emit('statusUpdate', { message: 'Nexus: Indexing AST Code Map...' });
-        try {
-            let rawCodeGraph = (0, codeGraph_1.getGraphJSON)();
-            if (!rawCodeGraph || rawCodeGraph === '{}') {
-                await (0, codeGraph_1.buildWorkspaceGraph)(rootUri);
-                rawCodeGraph = (0, codeGraph_1.getGraphJSON)();
-            }
-            let codeGraph = {};
-            if (rawCodeGraph) {
-                try {
-                    codeGraph = typeof rawCodeGraph === 'string' ? JSON.parse(rawCodeGraph) : rawCodeGraph;
-                }
-                catch (e) { }
-            }
-            let normalizedCodeGraph = { nodes: [], edges: [] };
-            Object.entries(codeGraph).forEach(([filepath, data]) => {
-                if (filepath === 'nodes' || filepath === 'edges')
-                    return;
-                normalizedCodeGraph.nodes.push({ id: filepath, label: filepath.split('/').pop(), group: 'file' });
-                if (data.imports) {
-                    data.imports.forEach((imp) => {
-                        const cleanImp = imp.replace(/['"]/g, '').replace('./', '').replace('../', '');
-                        const targetFile = Object.keys(codeGraph).find(k => k.includes(cleanImp));
-                        if (targetFile)
-                            normalizedCodeGraph.edges.push({ source: filepath, target: targetFile });
-                    });
-                }
-            });
-            this.emit('workspaceGraphData', {
-                data: { codeMap: codeGraph, reqMap: null, combinedMap: null, isGraphLoading: true }
-            });
-            this.emit('statusUpdate', { message: 'Nexus: Parsing Traceability Matrix (LLM)...' });
-            let reqGraph = { nodes: [], edges: [] };
-            try {
-                const { parseRequirementGraph } = await import('./context/traceabilityGraph.js');
-                const reqString = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'requirements.md')));
-                reqGraph = await parseRequirementGraph(reqString);
-            }
-            catch (e) { }
-            let designGraph = { nodes: [], edges: [] };
-            try {
-                const { parseDesignGraph } = await import('./context/traceabilityGraph.js');
-                const designString = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'design.md')));
-                designGraph = await parseDesignGraph(designString);
-            }
-            catch (e) { }
-            let tasksJson = null;
-            try {
-                tasksJson = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'tasks.json'))));
-            }
-            catch (e) { }
-            let combinedGraph = { nodes: [...normalizedCodeGraph.nodes], edges: [...normalizedCodeGraph.edges] };
-            try {
-                const { buildCombinedGraph } = await import('./context/traceabilityGraph.js');
-                combinedGraph = buildCombinedGraph(normalizedCodeGraph, reqGraph, designGraph, tasksJson);
-            }
-            catch (e) { }
-            this.emit('workspaceGraphData', {
-                data: { codeMap: codeGraph, reqMap: reqGraph, combinedMap: combinedGraph, isGraphLoading: false }
-            });
-            this.emit('statusUpdate', { message: '' });
-        }
-        catch (error) {
-            this.emit('workspaceGraphData', {
-                data: { codeMap: {}, reqMap: { nodes: [], edges: [] }, combinedMap: { nodes: [], edges: [] }, isGraphLoading: false }
-            });
-            this.emit('statusUpdate', { message: 'Failed to load maps.' });
-        }
-    }
-    async handleSaveNexusRules(data) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
-        const rulesUri = vscode.Uri.joinPath(rootUri, '.nexusrules');
-        try {
-            await vscode.workspace.fs.writeFile(rulesUri, Buffer.from(data.text, 'utf8'));
-            vscode.window.showInformationMessage("✨ Nexus Skills & Rules successfully saved!");
-        }
-        catch (e) {
-            vscode.window.showErrorMessage("Failed to save .nexusrules");
-        }
-    }
-    async handleVerifyTask(data) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        this.emit('taskStatusUpdate', { task: data.task, status: 'reviewing', summary: 'Gathering context to verify your code...' });
-        try {
-            const taskQuery = data.prompt || data.task;
-            const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
-            const [astContext, hybridContext] = await Promise.all([
-                (0, codeGraph_1.getSmartASTContext)(taskQuery),
-                (0, hybridSearch_1.retrieveHybridContext)(taskQuery, 5)
-            ]);
-            const fullContext = `${astContext}\n\n${hybridContext}`;
-            this.emit('taskStatusUpdate', { task: data.task, status: 'reviewing', summary: 'AI QA is checking your work against PRD...' });
-            const verification = await (0, llmService_1.askQwenToVerifyTask)(taskQuery, this._activeRequirements, fullContext);
-            if (verification.verified) {
-                const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
-                const tasksMdUri = vscode.Uri.joinPath(nexusDir, 'tasks.md');
-                try {
-                    let mdContent = new TextDecoder().decode(await vscode.workspace.fs.readFile(tasksMdUri));
-                    mdContent = mdContent.replace(`[ ] **${data.task}**`, `[x] **${data.task}**`).replace(`[ ] ${data.task}`, `[x] ${data.task}`);
-                    await vscode.workspace.fs.writeFile(tasksMdUri, Buffer.from(mdContent, 'utf8'));
-                }
-                catch (e) { }
-                try {
-                    if (this._activeRequirements) {
-                        this.emit('statusUpdate', { message: `Nexus QA: Scanning your code to update Living PRD...` });
-                        const reqMdUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'requirements.md');
-                        let currentPRD = this._activeRequirements;
-                        const prdUpdates = await (0, llmService_1.askQwenToUpdatePRD)(currentPRD, data.task, "Manual Code Edit", fullContext);
-                        if (prdUpdates.length > 0) {
-                            prdUpdates.forEach(update => { currentPRD = currentPRD.replace(update.original, update.updated); });
-                            await vscode.workspace.fs.writeFile(reqMdUri, Buffer.from(currentPRD, 'utf8'));
-                            this._activeRequirements = currentPRD;
-                            this.emit('requirementsUpdated', { text: currentPRD });
-                        }
-                    }
-                }
-                catch (e) { }
-                this.emit('taskStatusUpdate', { task: data.task, status: 'approved', summary: `✅ VERIFIED: ${verification.reasoning}` });
-                this.emit('statusUpdate', { message: "" });
-            }
-            else {
-                this.emit('taskStatusUpdate', { task: data.task, status: 'rejected', summary: `❌ REJECTED: ${verification.reasoning}` });
-            }
-        }
-        catch (error) {
-            this.emit('taskStatusUpdate', { task: data.task, status: 'error', summary: `Verification Error: ${error.message}` });
-        }
-    }
-    async handleGenerateRequirements(data) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        this._activeTaskController = new AbortController();
-        this.emit('reqStep', { message: '━━━ Step 1: Understanding your request & building feature discovery prompt ━━━' });
-        try {
-            this.emit('reqStep', { message: '━━━ Step 2: Drafting Agile User Stories & Acceptance Criteria ━━━' });
-            const reqPlan = await (0, llmService_1.askQwenForRequirements)(data.text, data.context, this._activeTaskController.signal);
-            this.emit('reqStep', { message: `Project:      ${reqPlan.projectName}` });
-            this.emit('reqStep', { message: `Domain:       ${reqPlan.domain}` });
-            this.emit('reqStep', { message: `Stories:      ${reqPlan.userStories.length} generated` });
-            let enrichedPrompt = `---\nversion: 1.0.0\ntype: prd\nproject: "${reqPlan.projectName}"\ndomain: "${reqPlan.domain}"\n---\n\n# 📋 Product Requirements Document (PRD)\n\n<metadata>\n  <target_audience>${reqPlan.targetAudience}</target_audience>\n</metadata>\n\n## 🎯 Agile User Stories\n\n`;
-            reqPlan.userStories.forEach((us, eIdx) => {
-                const epicId = `EPIC-${(eIdx + 1).toString().padStart(2, '0')}`;
-                const storyId = `STORY-${epicId}-1`;
-                enrichedPrompt += `<epic id="${epicId}" name="${us.epic || 'General'}">\n### ${epicId}: ${us.epic || 'General'}\n\n<story id="${storyId}">\n**Story:** ${us.story || 'N/A'}\n\n**Acceptance Criteria:**\n`;
-                const criteria = Array.isArray(us.acceptanceCriteria) ? us.acceptanceCriteria : [us.acceptanceCriteria];
-                criteria.forEach((ac, cIdx) => { enrichedPrompt += `- [ ] <criteria id="${storyId}-C${cIdx + 1}">${ac}</criteria>\n`; });
-                enrichedPrompt += `</story>\n</epic>\n\n`;
-            });
-            enrichedPrompt += `## 🛡️ Non-Functional Requirements (NFRs)\n<nfr_list>\n`;
-            reqPlan.nonFunctionalRequirements.forEach((nfr) => { enrichedPrompt += `- ${nfr}\n`; });
-            enrichedPrompt += `</nfr_list>\n`;
-            const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
-            const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
-            const reqFileUri = vscode.Uri.joinPath(nexusDir, 'requirements.md');
-            try {
-                await vscode.workspace.fs.createDirectory(nexusDir);
-            }
-            catch (e) { }
-            await vscode.workspace.fs.writeFile(reqFileUri, Buffer.from(enrichedPrompt, 'utf8'));
-            this._activeRequirements = enrichedPrompt;
-            this.emit('reqStep', { message: `✅ Saved requirements.md` });
-            this.emit('requirementsGenerated', { text: enrichedPrompt });
-        }
-        catch (error) {
-            this.emit('reqStep', { message: error.name === 'AbortError' ? `\n🛑 Cancelled by User.` : `\n❌ Error: ${error.message}` });
-            this.emit('generationFailed');
-        }
-        finally {
-            this._activeTaskController = undefined;
-        }
-    }
-    async handleGenerateDesign(data) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        this._activeTaskController = new AbortController();
-        this.emit('reqStep', { message: '\n━━━ Step 4: Architecting System Design ━━━\nAnalyzing approved PRD and drafting architecture...\n' });
-        try {
-            const designDoc = await (0, llmService_1.askQwenForDesign)(data.requirements, this._activeTaskController.signal);
-            const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
-            const designFileUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'design.md');
-            await vscode.workspace.fs.writeFile(designFileUri, Buffer.from(designDoc, 'utf8'));
-            this._activeDesign = designDoc;
-            this.emit('reqStep', { message: `✅ Saved design.md` });
-            this.emit('designGenerated', { text: designDoc });
-        }
-        catch (error) {
-            this.emit('reqStep', { message: error.name === 'AbortError' ? `\n🛑 Architecting Cancelled by User.` : `\n❌ Error: ${error.message}` });
-            this.emit('generationFailed');
-        }
-        finally {
-            this._activeTaskController = undefined;
-        }
-    }
-    async handleGenerateProjectTasks(data) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        this._activeTaskController = new AbortController();
-        this.emit('statusUpdate', { message: "Nexus: Drafting Master Implementation Plan..." });
-        this.emit('startChatStream');
-        try {
-            const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
-            const projectContext = await (0, projectContext_1.getProjectContext)(rootUri.fsPath);
-            const plan = await (0, llmService_1.askQwenForProjectTasks)(this._activeRequirements, this._activeDesign, projectContext, this._activeTaskController.signal);
-            const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
-            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(nexusDir, 'tasks.json'), Buffer.from(JSON.stringify(plan, null, 2), 'utf8'));
-            let mdContent = `---\nversion: 1.0.0\ntype: implementation_plan\nstatus: draft\n---\n\n# Master Implementation Plan\n\n## 📁 Folder Structure\n<folder_structure>\n`;
-            plan.folderStructure.forEach((f) => mdContent += `- \`${f}\`\n`);
-            mdContent += `</folder_structure>\n\n## 🛠️ Execution Tasks\n<tasks>\n`;
-            plan.implementationTasks.forEach((t, i) => {
-                const taskId = `TASK-${(i + 1).toString().padStart(3, '0')}`;
-                const prevTaskId = i > 0 ? `TASK-${(i).toString().padStart(3, '0')}` : 'none';
-                if (typeof t === 'string') {
-                    mdContent += `<task id="${taskId}" dependsOn="${prevTaskId}">\n${i + 1}. [ ] ${t}\n</task>\n\n`;
-                }
-                else {
-                    mdContent += `<task id="${taskId}" dependsOn="${prevTaskId}" targetFile="${t.file}" relatesTo="${t.relatedRequirement || ''}">\n${i + 1}. [ ] **${t.step}** (File: \`${t.file}\`)\n   - *Instructions:* <instructions>${t.detailedInstructions}</instructions>\n</task>\n\n`;
-                }
-            });
-            mdContent += `</tasks>\n`;
-            await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(nexusDir, 'tasks.md'), Buffer.from(mdContent, 'utf8'));
-            const { finalPaths, renamingMap } = await (0, pathUtils_1.resolveCanonicalPaths)(plan.folderStructure, rootUri.fsPath);
-            plan.folderStructure = finalPaths;
-            plan.implementationTasks = plan.implementationTasks.map((task) => {
-                if (typeof task === 'string')
-                    return task;
-                let updatedTask = { ...task };
-                renamingMap.forEach((realPath, plannedPath) => {
-                    if (updatedTask.file === plannedPath)
-                        updatedTask.file = realPath;
-                    if (updatedTask.detailedInstructions.includes(plannedPath))
-                        updatedTask.detailedInstructions = updatedTask.detailedInstructions.replace(plannedPath, realPath);
-                });
-                return updatedTask;
-            });
-            if (plan.folderStructure.length > 0)
-                await (0, workspaceManager_1.createWorkspaceStructure)(plan.folderStructure);
-            this.emit('chatToken', { token: "I have analyzed the PRD and System Architecture. Here is the master implementation plan.\n\n" });
-            this.emit("structureResponse", { value: plan });
-            this.emit('tasksGenerated');
-        }
-        catch (error) {
-            if (error.name === 'AbortError')
-                this.emit('statusUpdate', { message: `🛑 Planning Cancelled.` });
-            else
-                vscode.window.showErrorMessage(`Failed to generate tasks: ${error.message}`);
-            this.emit('generationFailed');
-        }
-        finally {
-            this._activeTaskController = undefined;
-            this.emit('statusUpdate', { message: "" });
-        }
-    }
-    async handleRequestRevision(data) {
-        const feedback = await vscode.window.showInputBox({
-            prompt: `Why was the code for "${data.task}" rejected?`,
-            placeHolder: "e.g., 'Use axios instead of fetch'"
-        });
-        if (feedback === undefined)
-            return;
-        this.emit('startRevision', { task: data.task, feedback: feedback || "Try a different approach and ensure bug-free code." });
-    }
-    async handleUpdateRequirements(data) {
-        this._activeRequirements = data.text;
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders && data.text.trim()) {
-            try {
-                await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri, 'nexuscode', 'requirements.md'), Buffer.from(data.text, 'utf8'));
-            }
-            catch (e) { }
-        }
-        else if (data.text === "") {
-            this._activeRequirements = "";
-            this._activeDesign = "";
-        }
-    }
-    async handleUpdateDesign(data) {
-        this._activeDesign = data.text;
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (workspaceFolders && data.text.trim()) {
-            try {
-                await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri, 'nexuscode', 'design.md'), Buffer.from(data.text, 'utf8'));
-            }
-            catch (e) { }
-        }
-    }
-    async handleSyncHistory(data) {
-        let historyToSave = data.messages;
-        if (historyToSave.length > 15) {
-            this.emit('statusUpdate', { message: "🗜️ Nexus is compacting context memory..." });
-            try {
-                const RECENT_KEEP_COUNT = 5;
-                const messagesToCompact = historyToSave.slice(0, historyToSave.length - RECENT_KEEP_COUNT);
-                const recentMessages = historyToSave.slice(historyToSave.length - RECENT_KEEP_COUNT);
-                const summary = await (0, llmService_1.compactConversationHistory)(messagesToCompact);
-                historyToSave = [{ role: 'assistant', isCompacted: true, content: summary }, ...recentMessages];
-                this.emit('historyCompacted', { messages: historyToSave });
-            }
-            catch (e) { }
-            finally {
-                this.emit('statusUpdate', { message: "" });
-            }
-        }
-        await extension_1.globalContext.globalState.update('nexus_chat_history', historyToSave);
-        await extension_1.globalContext.globalState.update('nexus_task_statuses', data.taskStatuses);
-        await extension_1.globalContext.globalState.update('nexus_task_summaries', data.taskSummaries);
-        await extension_1.globalContext.globalState.update('nexus_task_files', data.taskFiles);
-    }
-    async handleClearHistory() {
-        await extension_1.globalContext.globalState.update('nexus_chat_history', []);
-        await extension_1.globalContext.globalState.update('nexus_task_statuses', {});
-        await extension_1.globalContext.globalState.update('nexus_task_summaries', {});
-        await extension_1.globalContext.globalState.update('nexus_task_files', {});
-    }
-    async handleSaveApiKey(data) {
-        await extension_1.globalContext.secrets.store('nexuscode_apikey', data.value);
-        vscode.window.showInformationMessage("NexusCode: API Key Saved Securely!");
-        this.emit('initState', { messages: [], hasKey: true });
-    }
-    async handleProcessUserMessage(data) {
-        this._activeTaskController = new AbortController();
-        try {
-            const workspacePath = await this.getTargetContext();
-            await skillsManager_1.SkillsManager.initializeSkillsDirectory(workspacePath);
-            const skillResult = await skillsManager_1.SkillsManager.processSkill(workspacePath, data.text);
-            let actualPromptText = data.text;
-            if (skillResult.isSkill) {
-                this.emit('statusUpdate', { message: `✨ Executing Custom Skill...` });
-                actualPromptText = skillResult.skillPrompt;
-            }
-            else {
-                this.emit('statusUpdate', { message: "Nexus: Analyzing intent..." });
-            }
-            const intent = await (0, llmService_1.determineIntent)(data.text);
-            const fullPrompt = data.context ? `--- ATTACHED CONTEXT ---\n${data.context}\n\n--- USER QUERY ---\n${data.text}` : data.text;
-            if (intent === 'build') {
-                this.emit('statusUpdate', { message: "Nexus: Architecting plan..." });
-                this.emit('startChatStream');
-                await (0, ragIndexer_1.indexWorkspace)((msg) => this.emit('statusUpdate', { message: msg }));
-                const [lspContext, styleGuide, astContext, hybridContext] = await Promise.all([
-                    (0, lspContext_1.getLspContext)(data.text), (0, styleContext_1.getProjectStyleGuides)(), (0, codeGraph_1.getSmartASTContext)(data.text), (0, hybridSearch_1.retrieveHybridContext)(data.text, 5)
-                ]);
-                const reqInj = this._activeRequirements ? `\n--- 📋 STRICT BUSINESS REQUIREMENTS ---\n${this._activeRequirements}\n` : "";
-                const desInj = this._activeDesign ? `\n--- 🏗️ SYSTEM ARCHITECTURE ---\n${this._activeDesign}\n` : "";
-                const finalContext = `${lspContext}\n\n${astContext}\n\n${hybridContext}\n\n${styleGuide}${reqInj}${desInj}`;
-                const result = await (0, llmService_1.askQwenForStructure)(fullPrompt, finalContext);
-                this.emit('chatToken', { token: result.explanation + "\n\n" });
-                const rootSearchPath = this._isMetaMode ? this._extensionUri.fsPath : undefined;
-                const { finalPaths, renamingMap } = await (0, pathUtils_1.resolveCanonicalPaths)(result.plan.folderStructure, rootSearchPath);
-                result.plan.folderStructure = finalPaths;
-                result.plan.implementationTasks = result.plan.implementationTasks.map(task => {
-                    let updatedTask = task;
-                    renamingMap.forEach((realPath, plannedPath) => {
-                        const plannedName = path.basename(plannedPath);
-                        if (typeof updatedTask === 'string') {
-                            if (updatedTask.includes(plannedPath))
-                                updatedTask = updatedTask.replace(plannedPath, realPath);
-                            else if (updatedTask.includes(plannedName))
-                                updatedTask = updatedTask.replace(plannedName, `${plannedName} (found at ${realPath})`);
-                        }
-                    });
-                    return updatedTask;
-                });
-                if (result.plan.folderStructure.length > 0)
-                    await (0, workspaceManager_1.createWorkspaceStructure)(result.plan.folderStructure);
-                this.emit("structureResponse", { value: result.plan });
-            }
-            else if (intent === 'explore') {
-                this.emit('statusUpdate', { message: "🔍 Agentic Exploration: Investigating..." });
-                const exploreTaskId = "Exploration-" + Date.now();
-                this.emit('taskStatusUpdate', { task: exploreTaskId, status: 'reviewing', summary: 'Gathering forensic evidence...' });
-                const explorationContext = await (0, llmService_1.runAgenticExploration)(data.text, workspacePath, (stepType, desc, details) => this.emit('agentStep', { task: exploreTaskId, stepType, description: desc, details }));
-                this.emit('statusUpdate', { message: "Nexus: Analyzing evidence..." });
-                this.emit('startChatStream');
-                const fullContext = `--- FORENSIC EVIDENCE GATHERED BY TOOLS ---\n${explorationContext}\n\nExplain exactly what went wrong and how to fix it.`;
-                await (0, llmService_1.streamQwenChat)(data.text, fullContext, data.history || [], (token) => this.emit('chatToken', { token }), this._activeTaskController.signal);
-                this.emit('taskCompleted', { task: exploreTaskId, status: 'approved', summary: 'Exploration Complete' });
-            }
-            else {
-                this.emit('statusUpdate', { message: "Nexus: Gathering context..." });
-                const ragContext = await (0, hybridSearch_1.retrieveHybridContext)(data.text, 5);
-                if (ragContext)
-                    this.emit('glassBrain', { text: ragContext });
-                let openFilesContext = "";
-                vscode.workspace.textDocuments.forEach(doc => {
-                    if (doc.uri.scheme === 'file' && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
-                        openFilesContext += `\n📍 OPEN FILE: ${vscode.workspace.asRelativePath(doc.uri)}\n\`\`\`\n${doc.getText().substring(0, 3000)}\n\`\`\`\n`;
-                    }
-                });
-                let fullContext = intent === 'explain'
-                    ? `Directory Tree:\n${await (0, projectContext_1.getProjectContext)(workspacePath)}\n\nOpen Files:\n${openFilesContext}\n\nRAG:\n${ragContext}`
-                    : `Open Files:\n${openFilesContext}\n\nRAG:\n${ragContext}`;
-                this.emit('statusUpdate', { message: "Nexus: Thinking..." });
-                this.emit('startChatStream');
-                await (0, llmService_1.streamQwenChat)(fullPrompt, fullContext, data.history || [], (token) => this.emit('chatToken', { token }), this._activeTaskController.signal);
-            }
-            this.emit('statusUpdate', { message: "" });
-        }
-        catch (error) {
-            if (error.name === 'AbortError') {
-                this.emit('statusUpdate', { message: "⚠️ Generation stopped." });
-                setTimeout(() => this.emit('statusUpdate', { message: "" }), 3000);
-            }
-            else {
-                vscode.window.showErrorMessage(`NexusCode Error: ${error.message}`);
-                this.emit('taskCompleted', { status: 'error' });
-            }
-        }
-        finally {
-            this._activeTaskController = undefined;
-        }
-    }
-    async handleCancelTask() {
-        if (this._activeTaskController) {
-            this._activeTaskController.abort();
-            this._activeTaskController = undefined;
-            this.emit('statusUpdate', { message: "⚠️ Task cancelled by user." });
-            setTimeout(() => this.emit('statusUpdate', { message: "" }), 3000);
-        }
-    }
-    async handleExecuteTask(data) {
-        const originalTaskQuery = data.prompt || data.task;
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
-        this._activeTaskController = new AbortController();
-        vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: "NexusCode Swarm Execution Engine...",
-            cancellable: true
-        }, async (progress, token) => {
-            token.onCancellationRequested(() => this._activeTaskController?.abort());
-            const taskStartTime = Date.now();
-            const gitCheck = await this._terminalManager?.runCommandWithCapture("git status", rootUri.fsPath);
-            const isGitRepo = gitCheck && gitCheck.success;
-            this.emit('statusUpdate', { message: `Nexus: Generating MCTS Execution Branches...` });
-            // 1. Generate MCTS Approaches (Architectural Exploration)
-            let approaches = [originalTaskQuery];
-            if (isGitRepo) {
-                approaches = await (0, llmService_1.generateMCTSApproaches)(originalTaskQuery, "Generating alternative architectures...");
-            }
-            let success = false;
-            let winningApproach = 0;
-            let finalMergedFilepath = "";
-            for (let i = 0; i < approaches.length; i++) {
-                if (success || token.isCancellationRequested)
-                    break;
-                const approachNum = i + 1;
-                const isMCTSActive = approaches.length > 1;
-                const currentApproachPrompt = isMCTSActive ? `Original Task: ${originalTaskQuery}\n\nImplementation Directive (Approach ${approachNum}):\n${approaches[i]}` : originalTaskQuery;
-                const sandboxBranch = `nexus-mcts-sandbox-${Date.now()}`;
-                try {
-                    // Sandbox the Git environment for safe exploration
-                    if (isMCTSActive) {
-                        await this._terminalManager?.runCommandWithCapture(`git stash`, rootUri.fsPath);
-                        await this._terminalManager?.runCommandWithCapture(`git checkout -b ${sandboxBranch}`, rootUri.fsPath);
-                    }
-                    let previousFailures = "";
-                    try {
-                        const failData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, 'nexuscode', 'NEXUS_FAILURES.md'));
-                        previousFailures = new TextDecoder().decode(failData);
-                    }
-                    catch { }
-                    const currentFileContent = "";
-                    const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
-                    // 2. TRIGGER THE SWARM ORCHESTRATOR
-                    const finalDiff = await Coordinator_1.SwarmCoordinator.executeTask(currentApproachPrompt, rootUri.fsPath, currentFileContent, lspBlastRadiusContext, this._activeRequirements, this._activeDesign, previousFailures, data.codingStyle || 'precise', (msg, stepType, details) => {
-                        // Stream telemetry to React UI
-                        this.emit('statusUpdate', { message: msg });
-                        if (stepType && details) {
-                            this.emit('agentStep', {
-                                task: data.task,
-                                stepType: stepType,
-                                description: msg.replace('Coordinator: ', ''),
-                                details: details
-                            });
-                        }
-                    }, (streamToken) => {
-                        this.emit('streamReasoning', { task: data.task, token: streamToken });
-                    });
-                    if (!finalDiff)
-                        throw new Error("Swarm failed to generate verified code.");
-                    const realFilepath = finalDiff.filepath;
-                    const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
-                    // 3. READ ORIGINAL CONTENT (For Native Diffing)
-                    let originalFileContent = "";
-                    try {
-                        const fileData = await vscode.workspace.fs.readFile(fileUri);
-                        originalFileContent = new TextDecoder().decode(fileData);
-                    }
-                    catch {
-                        // File doesn't exist yet, create a blank placeholder
-                        await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
-                    }
-                    // 4. REGISTER VIRTUAL DOCUMENT FOR NATIVE DIFF
-                    if (this._diffProvider) {
-                        this._diffProvider.registerOriginalContent(fileUri, originalFileContent);
-                    }
-                    // 5. INJECT AND FORMAT THE NEW CODE
-                    const finalPerfectCode = injectCodeIntoContent(originalFileContent, finalDiff.targetLine || '', finalDiff.code, finalDiff.action);
-                    const mergedHeader = (0, commentStyles_1.getAIHeader)(realFilepath, currentApproachPrompt, originalFileContent) + "\n";
-                    const finalCodePayload = mergedHeader + finalPerfectCode;
-                    const document = await vscode.workspace.openTextDocument(fileUri);
-                    const editor = await vscode.window.showTextDocument(document, { preview: false });
-                    await editor.edit(b => {
-                        b.delete(new vscode.Range(0, 0, document.lineCount, 0));
-                        b.insert(new vscode.Position(0, 0), finalCodePayload);
-                    });
-                    // 6. TRIGGER THE INLINE CODELENS (The Mutative Action Gate)
-                    if (this._lensProvider) {
-                        this._lensProvider.addPendingReview(fileUri, new vscode.Range(0, 0, document.lineCount, 0), data.task);
-                    }
-                    // Save the document so Linter/Adversarial tests can run against disk
-                    await document.save();
-                    // Register with Provenance Tracker for HK IPD Compliance
-                    if (this._tracker) {
-                        this._tracker.trackStreamedReview(editor, originalFileContent, data.task, 0, document.lineCount);
-                    }
-                    // 7. AUTO-OPEN THE SPLIT-PANE NATIVE DIFF VIEW
-                    const originalDiffUri = vscode.Uri.parse(`nexus-original:${fileUri.path}`);
-                    await vscode.commands.executeCommand('vscode.diff', originalDiffUri, fileUri, `Review: ${path.basename(fileUri.fsPath)}`, { preview: true, viewColumn: vscode.ViewColumn.Beside });
-                    // 8. MCTS SUCCESS MERGE
-                    if (isMCTSActive) {
-                        await this._terminalManager?.runCommandWithCapture(`git add . && git commit -m "chore: nexus mcts approach ${approachNum}"`, rootUri.fsPath);
-                        await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
-                        await this._terminalManager?.runCommandWithCapture(`git merge ${sandboxBranch} --squash`, rootUri.fsPath);
-                        await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
-                        await this._terminalManager?.runCommandWithCapture(`git stash pop`, rootUri.fsPath);
-                    }
-                    success = true;
-                    winningApproach = approachNum;
-                    finalMergedFilepath = realFilepath;
-                }
-                catch (error) {
-                    // MCTS Failure Rollback
-                    if (isMCTSActive) {
-                        await this._terminalManager?.runCommandWithCapture(`git reset --hard`, rootUri.fsPath);
-                        await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
-                        await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
-                    }
-                    else {
-                        vscode.window.showErrorMessage(`Execution failed: ${error.message}`);
-                    }
-                }
-            }
-            // 9. UPDATE TELEMETRY STATE
-            if (success) {
-                const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
-                // Architectural Note: We set status to "reviewing" rather than "approved", 
-                // because the Dual-Vector Action Gate requires the human to click the CodeLens first.
-                this.emit('taskCompleted', {
-                    task: data.task,
-                    status: "reviewing",
-                    filepath: finalMergedFilepath,
-                    summary: `Awaiting your approval... (Total: ${totalTime}s)`
-                });
-            }
-            else {
-                this.emit('taskCompleted', {
-                    task: data.task,
-                    status: 'error',
-                    summary: approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.`
-                });
-            }
-            this._activeTaskController = undefined;
-            this.emit('statusUpdate', { message: "" });
-        });
-    }
-    async handleRefreshCodeLens() {
-        vscode.commands.executeCommand('nexuscode.refreshLens');
-    }
-    async handleUndoTaskEdit(data) {
-        const undoData = this._undoStack.get(data.task);
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (undoData && workspaceFolders) {
-            const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
-            const fileUri = vscode.Uri.joinPath(rootUri, undoData.filepath);
-            try {
-                const edit = new vscode.WorkspaceEdit();
-                const document = await vscode.workspace.openTextDocument(fileUri);
-                edit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), undoData.originalContent);
-                await vscode.workspace.applyEdit(edit);
-                await document.save();
-                vscode.window.showInformationMessage(`⏪ Undid AI edits to ${undoData.filepath}`);
-                this.emit('taskStatusUpdate', { task: data.task, status: 'undone', summary: `⏪ Reverted to original state.` });
-            }
-            catch (e) {
-                vscode.window.showErrorMessage("Failed to undo file edit.");
-            }
-        }
-        else {
-            vscode.window.showWarningMessage("No undo history found for this task.");
-        }
-    }
-    async handleRunGlobalCompiler(data) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        const workspacePath = workspaceFolders[0].uri.fsPath;
-        this.emit('statusUpdate', { message: "Nexus: Running Global Workspace Compiler..." });
-        const result = await this._terminalManager?.runCommandWithCapture("npx tsc --noEmit", workspacePath);
-        if (result && result.success) {
-            vscode.window.showInformationMessage("✅ Global Compiler Passed! The app is structurally sound.");
-            this.emit('statusUpdate', { message: "" });
-        }
-        else if (result && !result.success) {
-            vscode.window.showErrorMessage("❌ Global Compiler Failed. Initializing Build-Healer...");
-            this.emit('statusUpdate', { message: "Nexus: Analyzing global build failures..." });
-            try {
-                const matches = [...new Set(result.output.match(/([a-zA-Z0-9_\-\/\\]+\.(?:ts|tsx|js|jsx|py|go|rs|cpp|c|h|hpp|java|rb|php|cs))/g))];
-                if (matches.length === 0)
-                    throw new Error("Could not parse file paths from error log.");
-                let brokenFilesContext = "";
-                for (const file of matches) {
-                    try {
-                        const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(workspaceFolders[0].uri, file)));
-                        brokenFilesContext += `\n--- FILE: ${file} ---\n\`\`\`\n${content}\n\`\`\`\n`;
-                    }
-                    catch (e) { }
-                }
-                this.emit('statusUpdate', { message: `Nexus: Healing ${matches.length} cross-file errors...` });
-                const fixes = await (0, llmService_1.askQwenToHealGlobalBuild)(result.output, brokenFilesContext, data.codingStyle || 'precise');
-                if (fixes && fixes.length > 0) {
-                    const workspaceEdit = new vscode.WorkspaceEdit();
-                    for (const edit of fixes) {
-                        const fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, edit.filepath);
-                        try {
-                            await vscode.workspace.fs.stat(fileUri);
-                        }
-                        catch {
-                            await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
-                        }
-                        const document = await vscode.workspace.openTextDocument(fileUri);
-                        workspaceEdit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), (0, commentStyles_1.getAIHeader)(edit.filepath, "Build-Healer Patch") + edit.code);
-                    }
-                    if (await vscode.workspace.applyEdit(workspaceEdit)) {
-                        vscode.workspace.textDocuments.filter(d => d.isDirty).forEach(async (doc) => await doc.save());
-                        vscode.window.showInformationMessage(`✅ Build-Healer autonomously patched ${fixes.length} files!`);
-                    }
-                }
-                else {
-                    vscode.window.showWarningMessage("⚠️ Build-Healer could not determine a safe patch. Manual intervention required.");
-                }
-            }
-            catch (error) {
-                vscode.window.showErrorMessage(`Build-Healer Aborted: ${error.message}`);
-                this.emit('statusUpdate', { message: `⚠️ Healer failed to parse terminal.` });
-                this.emit('streamTerminal', { task: "Global Compiler", text: result.output || "No terminal output captured." });
-            }
-            this.emit('statusUpdate', { message: "" });
-        }
-    }
-    async handleSearchFiles(data) {
-        const cleanQuery = data.query.split(':')[0];
-        const files = await vscode.workspace.findFiles(`**/*${cleanQuery}*`, '{**/node_modules/**,**/.git/**,**/dist/**}', 10);
-        this.emit('searchResults', { results: files.map(f => vscode.workspace.asRelativePath(f)), originalQuery: data.query });
-    }
-    async handleShowDiff(data) {
-        const rootUri = this._isMetaMode ? this._extensionUri : vscode.workspace.workspaceFolders[0].uri;
-        const fileUri = vscode.Uri.joinPath(rootUri, data.filepath);
-        await vscode.commands.executeCommand('vscode.diff', vscode.Uri.parse(`nexus-original:${fileUri.path}`), fileUri, `NexusCode Diff: ${path.basename(data.filepath)}`);
-    }
-    async handleOpenFile(data) {
-        const rootUri = this._isMetaMode ? this._extensionUri : vscode.workspace.workspaceFolders[0].uri;
-        const fullPath = path.isAbsolute(data.filepath) ? data.filepath : path.join(rootUri.fsPath, data.filepath);
-        try {
-            const document = await vscode.workspace.openTextDocument(vscode.Uri.file(fullPath));
-            const editor = await vscode.window.showTextDocument(document, { preview: false });
-            if (data.symbol) {
-                const symbolIdx = document.getText().indexOf(data.symbol);
-                if (symbolIdx !== -1) {
-                    const pos = document.positionAt(symbolIdx);
-                    editor.selection = new vscode.Selection(pos, pos);
-                    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
-                }
-            }
-        }
-        catch (e) {
-            vscode.window.showErrorMessage(`NexusCode: Could not open ${fullPath}`);
-        }
-    }
-    async handleReadFileContext(data) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        let targetFile = data.file;
-        let startLine = 0, endLine = Infinity;
-        const match = targetFile.match(/(.*?):(\d+)(?:-(\d+))?$/);
-        if (match) {
-            targetFile = match[1];
-            startLine = Math.max(0, parseInt(match[2], 10) - 1);
-            endLine = match[3] ? parseInt(match[3], 10) : startLine + 100;
-        }
-        try {
-            const content = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri, targetFile));
-            let code = new TextDecoder().decode(content);
-            if (startLine > 0 || endLine !== Infinity) {
-                const lines = code.split('\n');
-                code = `// [PARTIAL FILE READ: Lines ${startLine + 1} to ${Math.min(endLine, lines.length)}]\n` + lines.slice(startLine, endLine).join('\n');
-            }
-            this.emit('addContext', { file: data.file, code: code, language: path.extname(targetFile).substring(1) || 'text' });
-        }
-        catch (e) {
-            console.error("Failed to read file:", e);
-        }
-    }
-    async handleExecuteAllTasks(data) {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders)
-            return;
-        vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "NexusCode: Drafting Atomic Plan...", cancellable: true }, async (progress, token) => {
-            try {
-                const projectContext = await (0, projectContext_1.getProjectContext)(this._isMetaMode ? this._extensionUri.fsPath : undefined);
-                const allEdits = [];
-                const BATCH_SIZE = 5;
-                for (let i = 0; i < data.tasks.length; i += BATCH_SIZE) {
-                    if (token.isCancellationRequested)
-                        break;
-                    const batch = data.tasks.slice(i, i + BATCH_SIZE);
-                    const batchNum = Math.ceil((i + 1) / BATCH_SIZE);
-                    progress.report({ message: `Drafting batch ${batchNum}...` });
-                    this.emit('statusUpdate', { message: `Drafting batch ${batchNum}: ${batch[0]}...` });
-                    allEdits.push(...(await (0, llmService_1.askQwenForAtomicEdits)(batch, projectContext, data.codingStyle)));
-                }
-                if (token.isCancellationRequested)
-                    return;
-                this.emit('statusUpdate', { message: "Compiling Final Review..." });
-                this.emit('reviewEdits', { edits: allEdits, tasks: data.tasks });
-                vscode.window.showInformationMessage(`Draft complete. Generated code for ${allEdits.length} files.`);
-            }
-            catch (error) {
-                vscode.window.showErrorMessage(`Drafting Failed: ${error.message}`);
-            }
-            finally {
-                this.emit('statusUpdate', { message: "" });
-            }
-        });
-    }
-    async handleCommitAtomicEdits(data) {
-        if (!vscode.workspace.workspaceFolders || !data.edits)
-            return;
-        vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "NexusCode: Committing Changes...", cancellable: false }, async () => {
-            const workspaceEdit = new vscode.WorkspaceEdit();
-            const rootUri = this._isMetaMode ? this._extensionUri : vscode.workspace.workspaceFolders[0].uri;
-            for (const edit of data.edits) {
-                const fileUri = vscode.Uri.joinPath(rootUri, edit.filepath);
-                try {
-                    await vscode.workspace.fs.stat(fileUri);
-                }
-                catch {
-                    await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
-                }
-                const document = await vscode.workspace.openTextDocument(fileUri);
-                workspaceEdit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), (0, commentStyles_1.getAIHeader)(edit.filepath, "Atomic Implementation") + edit.code);
-            }
-            if (await vscode.workspace.applyEdit(workspaceEdit)) {
-                vscode.workspace.textDocuments.filter(d => d.isDirty).forEach(async (doc) => await doc.save());
-                this.emit('allTasksCompleted', { status: 'approved' });
-                vscode.window.showInformationMessage("Atomic Transaction Committed.");
-            }
-        });
-    }
-    async handleGenerateAndRunTests(data) {
-        const activeEditor = vscode.window.activeTextEditor;
-        if (!vscode.workspace.workspaceFolders || !activeEditor)
-            return;
-        const workspacePath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-        vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Writing and executing tests...", cancellable: false }, async () => {
-            try {
-                this.emit('clearTerminalStream', { task: "Auto-Test Setup" });
-                this.emit('clearTerminalStream', { task: "Auto-Test Execution" });
-                const relativeFileName = vscode.workspace.asRelativePath(activeEditor.document.uri);
-                let customRules = "";
-                try {
-                    customRules = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, '.nexusrules')));
-                }
-                catch { }
-                const testPlan = await (0, llmService_1.askQwenForTests)(relativeFileName, activeEditor.document.getText(), customRules);
-                if (activeEditor.document.isDirty)
-                    await activeEditor.document.save();
-                if (testPlan.installCommand) {
-                    const installResult = await this.confirmAndRunCommand(testPlan.installCommand, workspacePath, 'Installing dependencies...', data.autopilot, (chunk) => this.emit('streamTerminal', { task: "Auto-Test Setup", text: chunk }));
-                    if (!installResult?.success) {
-                        vscode.window.showErrorMessage("Dependency installation failed.");
-                        this.emit('statusUpdate', { message: '⚠️ Tests aborted due to install failure.' });
-                        return;
-                    }
-                }
-                const parsedPath = path.parse(relativeFileName);
-                let cleanDir = parsedPath.dir.replace(/^src\/?/, '');
-                const testFileUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, path.join('tests', cleanDir, `${parsedPath.name}.test${parsedPath.ext}`));
-                const createEdit = new vscode.WorkspaceEdit();
-                createEdit.createFile(testFileUri, { ignoreIfExists: true });
-                await vscode.workspace.applyEdit(createEdit);
-                const doc = await vscode.workspace.openTextDocument(testFileUri);
-                const replaceEdit = new vscode.WorkspaceEdit();
-                replaceEdit.replace(testFileUri, new vscode.Range(0, 0, doc.lineCount, 0), testPlan.code);
-                await vscode.workspace.applyEdit(replaceEdit);
-                await vscode.window.showTextDocument(doc);
-                await doc.save();
-                const result = await this.confirmAndRunCommand(testPlan.testCommand, workspacePath, 'Running tests...', data.autopilot, (chunk) => this.emit('streamTerminal', { task: "Auto-Test Execution", text: chunk }));
-                if (!result)
-                    return;
-                if (!result.success) {
-                    this.emit('statusUpdate', { message: 'Tests failed. Auto-healing...' });
-                    try {
-                        const fixResult = await (0, llmService_1.askQwenToFixError)(result.output, relativeFileName, activeEditor.document.getText(), path.join('tests', cleanDir, `${parsedPath.name}.test${parsedPath.ext}`), testPlan.code);
-                        const fileToFixUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, fixResult.filepath);
-                        const fixEdit = new vscode.WorkspaceEdit();
-                        const docToFix = await vscode.workspace.openTextDocument(fileToFixUri);
-                        fixEdit.replace(fileToFixUri, new vscode.Range(0, 0, docToFix.lineCount, 0), fixResult.code);
-                        await vscode.workspace.applyEdit(fixEdit);
-                        await docToFix.save();
-                        this.emit('statusUpdate', { message: 'Re-running tests after heal...' });
-                        const retryResult = await this._terminalManager?.runCommandWithCapture(testPlan.testCommand, workspacePath);
-                        if (retryResult?.success)
-                            vscode.window.showInformationMessage(`Auto-Heal successful!`);
-                        else
-                            vscode.window.showErrorMessage("Auto-Heal attempted, but tests still failing.");
-                    }
-                    catch (e) {
-                        vscode.window.showErrorMessage("Auto-heal failed.");
-                    }
-                }
-                else {
-                    vscode.window.showInformationMessage("All tests passed!");
-                }
-                this.emit('statusUpdate', { message: '' });
-            }
-            catch (error) {
-                vscode.window.showErrorMessage("Failed to run tests.");
-            }
-        });
-    }
-    async handleExecuteCommand(data) {
-        if (!vscode.workspace.workspaceFolders)
-            return;
-        const workspacePath = vscode.workspace.workspaceFolders[0].uri.fsPath;
-        const maxRetries = 3;
-        let currentAttempt = 1;
-        this.emit('taskStatusUpdate', { task: data.task, status: 'reviewing' });
-        while (currentAttempt <= maxRetries) {
-            this.emit('statusUpdate', { message: `Nexus: Running \`${data.command}\` (Attempt ${currentAttempt}/${maxRetries})...` });
-            const result = await this._terminalManager?.runCommandWithCapture(data.command, workspacePath, (chunk) => this.emit('streamTerminal', { task: data.task, text: chunk }));
-            if (!result)
-                break;
-            if (result.success) {
-                this.emit('taskCompleted', { task: data.task, status: 'approved', summary: `✅ Command executed flawlessly.` });
-                break;
-            }
-            this.emit('statusUpdate', { message: `🚨 Command Failed. Intercepting Error for Auto-Heal...` });
-            this.emit('agentStep', { task: data.task, stepType: 'error', description: `Failed (Code ${result.code})`, details: result.output.substring(0, 1000) });
-            if (currentAttempt === maxRetries) {
-                this.emit('taskCompleted', { task: data.task, status: 'error', summary: `❌ Failed after ${maxRetries} attempts.` });
-                break;
-            }
-            this.emit('statusUpdate', { message: `Nexus: Architecting fix for terminal error...` });
-            try {
-                const { askQwenToHealGlobalBuild } = await import('./llmService.js');
-                const fixes = await askQwenToHealGlobalBuild(result.output, "Fix the terminal crash.", data.codingStyle);
-                if (fixes && fixes.length > 0) {
-                    const workspaceEdit = new vscode.WorkspaceEdit();
-                    for (const edit of fixes) {
-                        const fileUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, edit.filepath);
-                        const document = await vscode.workspace.openTextDocument(fileUri);
-                        workspaceEdit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), edit.code);
-                    }
-                    await vscode.workspace.applyEdit(workspaceEdit);
-                    vscode.workspace.textDocuments.filter(d => d.isDirty).forEach(async (doc) => await doc.save());
-                    this.emit('agentStep', { task: data.task, stepType: 'heal', description: `Auto-Heal Applied to ${fixes.length} files.` });
-                }
-                else
-                    throw new Error("AI could not determine a safe patch.");
-            }
-            catch (e) {
-                this.emit('taskCompleted', { task: data.task, status: 'error', summary: `❌ Auto-heal failed: ${e.message}` });
-                break;
-            }
-            currentAttempt++;
-        }
-        this.emit('statusUpdate', { message: "" });
-    }
-    async handleRequestModels() {
-        const models = await (0, llmService_1.getAvailableModels)();
-        this.emit('updateModelsList', { models, currentModel: vscode.workspace.getConfiguration('nexuscode').get('model') });
-    }
-    async handleSetModel(data) {
-        await vscode.workspace.getConfiguration('nexuscode').update('model', data.value, vscode.ConfigurationTarget.Global);
-        vscode.window.setStatusBarMessage(`NexusCode: Model set to ${data.value}`, 3000);
-    }
-    async handleApproveCommand() { if (this._pendingCommandResolver)
-        this._pendingCommandResolver(true); }
-    async handleRejectCommand() { if (this._pendingCommandResolver)
-        this._pendingCommandResolver(false); }
     async handlePostApproval(uri) {
         if (!this._isMetaMode) {
             return;
@@ -1207,7 +200,7 @@ class SidebarProvider {
         }
         const filepath = uri.fsPath;
         if (filepath.includes('webview-ui')) {
-            this.emit('statusUpdate', { message: "🎨 Self-Evolution: Rebuilding UI..." });
+            this._view?.webview.postMessage({ type: 'statusUpdate', message: "🎨 Self-Evolution: Rebuilding UI..." });
             const webviewPath = path.join(this._extensionUri.fsPath, 'webview-ui');
             const buildResult = await this._terminalManager?.runCommandWithCapture("npm run build", webviewPath);
             if (buildResult?.success) {
@@ -1219,7 +212,7 @@ class SidebarProvider {
             }
         }
         else {
-            this.emit('statusUpdate', { message: "🧬 Self-Evolution: Recompiling..." });
+            this._view?.webview.postMessage({ type: 'statusUpdate', message: "🧬 Self-Evolution: Recompiling..." });
             const compileResult = await this._terminalManager?.runCommandWithCapture("npm run compile", this._extensionUri.fsPath);
             if (compileResult?.success) {
                 vscode.window.showInformationMessage("🧬 Evolution Applied. Reload window to see changes.");
@@ -1228,9 +221,1279 @@ class SidebarProvider {
                 vscode.window.showErrorMessage("💥 Build Failed! Check Output.");
             }
         }
-        this.emit('statusUpdate', { message: "" });
+        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
     }
-    // --- VIEW RENDERER ---
+    async resolveWebviewView(webviewView) {
+        this._view = webviewView;
+        this._tracker?.setView(webviewView);
+        webviewView.webview.options = { enableScripts: true };
+        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+        webviewView.webview.onDidReceiveMessage(async (data) => {
+            switch (data.type) {
+                //  THE FIX: The Webview Handshake. Loads chat history, PRDs, AND .nexusrules
+                case "webviewReady": {
+                    const chatHistory = extension_1.globalContext.globalState.get('nexus_chat_history') || [];
+                    const taskStatuses = extension_1.globalContext.globalState.get('nexus_task_statuses') || {};
+                    const taskSummaries = extension_1.globalContext.globalState.get('nexus_task_summaries') || {};
+                    const taskFiles = extension_1.globalContext.globalState.get('nexus_task_files') || {};
+                    const hasApiKey = !!(await extension_1.globalContext.secrets.get('nexuscode_apikey'));
+                    let savedReqs = "";
+                    let savedDesign = "";
+                    let savedTasks = null;
+                    let savedRules = "";
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (workspaceFolders) {
+                        const rootUri = workspaceFolders[0].uri;
+                        (0, codeGraph_1.buildWorkspaceGraph)(rootUri).catch(e => console.error("CodeGraph init failed:", e));
+                        const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                        try {
+                            savedReqs = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'requirements.md')));
+                            this._activeRequirements = savedReqs;
+                        }
+                        catch (e) { }
+                        try {
+                            savedDesign = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'design.md')));
+                            this._activeDesign = savedDesign;
+                        }
+                        catch (e) { }
+                        try {
+                            const taskData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'tasks.json'));
+                            savedTasks = JSON.parse(new TextDecoder().decode(taskData));
+                        }
+                        catch (e) { }
+                        try {
+                            const rulesUri = vscode.Uri.joinPath(rootUri, '.nexusrules');
+                            savedRules = new TextDecoder().decode(await vscode.workspace.fs.readFile(rulesUri));
+                        }
+                        catch (e) { }
+                    }
+                    this._view?.webview.postMessage({
+                        type: 'initState',
+                        messages: chatHistory,
+                        taskStatuses: taskStatuses,
+                        taskSummaries: taskSummaries,
+                        taskFiles: taskFiles,
+                        requirements: savedReqs,
+                        design: savedDesign,
+                        tasks: savedTasks,
+                        nexusRules: savedRules,
+                        hasKey: hasApiKey
+                    });
+                    break;
+                }
+                case "requestWorkspaceGraph": {
+                    console.log("[DEBUG-MAP] 🟢 1. Webview requested workspace graph.");
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        console.log("[DEBUG-MAP] 🔴 Workspace folders not found.");
+                        return;
+                    }
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                    this._view?.webview.postMessage({ type: 'statusUpdate', message: 'Nexus: Indexing AST Code Map...' });
+                    try {
+                        console.log("[DEBUG-MAP] 🟡 2. Fetching raw CodeGraph...");
+                        let rawCodeGraph = (0, codeGraph_1.getGraphJSON)();
+                        // Force build if empty
+                        if (!rawCodeGraph || rawCodeGraph === '{}') {
+                            await (0, codeGraph_1.buildWorkspaceGraph)(rootUri);
+                            rawCodeGraph = (0, codeGraph_1.getGraphJSON)();
+                        }
+                        let codeGraph = {};
+                        if (rawCodeGraph) {
+                            try {
+                                codeGraph = typeof rawCodeGraph === 'string' ? JSON.parse(rawCodeGraph) : rawCodeGraph;
+                            }
+                            catch (e) {
+                                console.error("[DEBUG-MAP] 🔴 CodeGraph Parse Error:", e instanceof Error ? e.message : String(e));
+                            }
+                        }
+                        console.log("[DEBUG-MAP] 🟡 3. Normalizing AST Dictionary...");
+                        let normalizedCodeGraph = { nodes: [], edges: [] };
+                        Object.entries(codeGraph).forEach(([filepath, data]) => {
+                            if (filepath === 'nodes' || filepath === 'edges')
+                                return;
+                            normalizedCodeGraph.nodes.push({ id: filepath, label: filepath.split('/').pop(), group: 'file' });
+                            if (data.imports) {
+                                data.imports.forEach((imp) => {
+                                    const cleanImp = imp.replace(/['"]/g, '').replace('./', '').replace('../', '');
+                                    const targetFile = Object.keys(codeGraph).find(k => k.includes(cleanImp));
+                                    if (targetFile) {
+                                        normalizedCodeGraph.edges.push({ source: filepath, target: targetFile });
+                                    }
+                                });
+                            }
+                        });
+                        //  THE PROGRESSIVE LOADING INJECTION: Send CodeMap immediately!
+                        console.log("[DEBUG-MAP] 🟢 4. Sending Initial CodeMap to Webview!");
+                        this._view?.webview.postMessage({
+                            type: 'workspaceGraphData',
+                            data: {
+                                codeMap: codeGraph, // Original dictionary for the pure AST view
+                                reqMap: null,
+                                combinedMap: null,
+                                isGraphLoading: true // Locks the LLM buttons in the UI
+                            }
+                        });
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: 'Nexus: Parsing Traceability Matrix (LLM)...' });
+                        // --- BACKGROUND LLM PROCESSING ---
+                        // Fetch & Parse Requirements (PRD)
+                        let reqGraph = { nodes: [], edges: [] };
+                        try {
+                            const { parseRequirementGraph } = await import('./context/traceabilityGraph.js');
+                            const reqData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'requirements.md'));
+                            const reqString = new TextDecoder().decode(reqData);
+                            reqGraph = await parseRequirementGraph(reqString);
+                        }
+                        catch (e) {
+                            console.log("[DEBUG-MAP] 🟡 No requirements.md found or parsing failed:", e instanceof Error ? e.message : String(e));
+                        }
+                        // Fetch & Parse Architecture (Design)
+                        let designGraph = { nodes: [], edges: [] };
+                        try {
+                            const { parseDesignGraph } = await import('./context/traceabilityGraph.js');
+                            const designData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'design.md'));
+                            const designString = new TextDecoder().decode(designData);
+                            designGraph = await parseDesignGraph(designString);
+                        }
+                        catch (e) {
+                            console.log("[DEBUG-MAP] 🟡 No design.md found or parsing failed:", e instanceof Error ? e.message : String(e));
+                        }
+                        let tasksJson = null;
+                        try {
+                            const taskData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(nexusDir, 'tasks.json'));
+                            tasksJson = JSON.parse(new TextDecoder().decode(taskData));
+                        }
+                        catch (e) {
+                            console.log("[DEBUG-MAP] 🟡 No tasks.json found (Normal if tasks aren't generated yet).");
+                        }
+                        // 2. Build the Ultimate Combined Matrix
+                        let combinedGraph = { nodes: [...normalizedCodeGraph.nodes], edges: [...normalizedCodeGraph.edges] };
+                        try {
+                            const { buildCombinedGraph } = await import('./context/traceabilityGraph.js');
+                            //  THE FIX: This now executes NO MATTER WHAT, successfully merging Code + PRD!
+                            combinedGraph = buildCombinedGraph(normalizedCodeGraph, reqGraph, designGraph, tasksJson);
+                        }
+                        catch (e) {
+                            console.log("[DEBUG-MAP] 🔴 Graph Combining failed:", e instanceof Error ? e.message : String(e));
+                        }
+                        console.log("[DEBUG-MAP] 🟢 5. Sending Final Traceability Payload to Webview!");
+                        this._view?.webview.postMessage({
+                            type: 'workspaceGraphData',
+                            data: {
+                                codeMap: codeGraph,
+                                reqMap: reqGraph,
+                                combinedMap: combinedGraph,
+                                isGraphLoading: false // Unlocks the UI buttons
+                            }
+                        });
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: '' });
+                    }
+                    catch (error) {
+                        const safeError = error instanceof Error ? error.message : String(error);
+                        console.error("[DEBUG-MAP] 🔴 FATAL GRAPH ERROR:", safeError);
+                        // Fail gracefully
+                        this._view?.webview.postMessage({
+                            type: 'workspaceGraphData',
+                            data: { codeMap: {}, reqMap: { nodes: [], edges: [] }, combinedMap: { nodes: [], edges: [] }, isGraphLoading: false }
+                        });
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: 'Failed to load maps.' });
+                    }
+                    break;
+                }
+                case "saveNexusRules": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (workspaceFolders) {
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const rulesUri = vscode.Uri.joinPath(rootUri, '.nexusrules');
+                        try {
+                            await vscode.workspace.fs.writeFile(rulesUri, Buffer.from(data.text, 'utf8'));
+                            vscode.window.showInformationMessage("✨ Nexus Skills & Rules successfully saved!");
+                        }
+                        catch (e) {
+                            vscode.window.showErrorMessage("Failed to save .nexusrules");
+                        }
+                    }
+                    break;
+                }
+                case "verifyTask": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'reviewing', summary: 'Gathering context to verify your code...' });
+                    try {
+                        const taskQuery = data.prompt || data.task;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const [astContext, hybridContext] = await Promise.all([
+                            (0, codeGraph_1.getSmartASTContext)(taskQuery),
+                            (0, hybridSearch_1.retrieveHybridContext)(taskQuery, 5)
+                        ]);
+                        const fullContext = `${astContext}\n\n${hybridContext}`;
+                        this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'reviewing', summary: 'AI QA is checking your work against PRD...' });
+                        const verification = await (0, llmService_1.askQwenToVerifyTask)(taskQuery, this._activeRequirements, fullContext);
+                        if (verification.verified) {
+                            const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                            const tasksMdUri = vscode.Uri.joinPath(nexusDir, 'tasks.md');
+                            try {
+                                let mdContent = new TextDecoder().decode(await vscode.workspace.fs.readFile(tasksMdUri));
+                                mdContent = mdContent.replace(`[ ] **${data.task}**`, `[x] **${data.task}**`);
+                                mdContent = mdContent.replace(`[ ] ${data.task}`, `[x] ${data.task}`);
+                                await vscode.workspace.fs.writeFile(tasksMdUri, Buffer.from(mdContent, 'utf8'));
+                            }
+                            catch (e) {
+                                console.warn("Could not update tasks.md");
+                            }
+                            try {
+                                if (this._activeRequirements) {
+                                    this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus QA: Scanning your code to update Living PRD...` });
+                                    const reqMdUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'requirements.md');
+                                    let currentPRD = this._activeRequirements;
+                                    const prdUpdates = await (0, llmService_1.askQwenToUpdatePRD)(currentPRD, data.task, "Manual Code Edit", fullContext);
+                                    if (prdUpdates.length > 0) {
+                                        prdUpdates.forEach(update => {
+                                            currentPRD = currentPRD.replace(update.original, update.updated);
+                                        });
+                                        await vscode.workspace.fs.writeFile(reqMdUri, Buffer.from(currentPRD, 'utf8'));
+                                        this._activeRequirements = currentPRD;
+                                        this._view?.webview.postMessage({ type: 'requirementsUpdated', text: currentPRD });
+                                    }
+                                }
+                            }
+                            catch (e) {
+                                console.warn("[DEBUG] Living PRD QA check failed for manual verify", e);
+                            }
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'approved', summary: `✅ VERIFIED: ${verification.reasoning}` });
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                        }
+                        else {
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'rejected', summary: `❌ REJECTED: ${verification.reasoning}` });
+                        }
+                    }
+                    catch (error) {
+                        this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Verification Error: ${error.message}` });
+                    }
+                    break;
+                }
+                case "generateRequirements": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    this._activeTaskController = new AbortController();
+                    this._view?.webview.postMessage({ type: 'reqStep', message: '━━━ Step 1: Understanding your request & building feature discovery prompt ━━━' });
+                    try {
+                        this._view?.webview.postMessage({ type: 'reqStep', message: '━━━ Step 2: Drafting Agile User Stories & Acceptance Criteria ━━━' });
+                        const reqPlan = await (0, llmService_1.askQwenForRequirements)(data.text, data.context, this._activeTaskController.signal);
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `Project:      ${reqPlan.projectName}` });
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `Domain:       ${reqPlan.domain}` });
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `Stories:      ${reqPlan.userStories.length} generated` });
+                        let enrichedPrompt = `---\n`;
+                        enrichedPrompt += `version: 1.0.0\n`;
+                        enrichedPrompt += `type: prd\n`;
+                        enrichedPrompt += `project: "${reqPlan.projectName}"\n`;
+                        enrichedPrompt += `domain: "${reqPlan.domain}"\n`;
+                        enrichedPrompt += `---\n\n`;
+                        enrichedPrompt += `# 📋 Product Requirements Document (PRD)\n\n`;
+                        enrichedPrompt += `<metadata>\n  <target_audience>${reqPlan.targetAudience}</target_audience>\n</metadata>\n\n`;
+                        enrichedPrompt += `## 🎯 Agile User Stories\n\n`;
+                        reqPlan.userStories.forEach((us, eIdx) => {
+                            const epicId = `EPIC-${(eIdx + 1).toString().padStart(2, '0')}`;
+                            enrichedPrompt += `<epic id="${epicId}" name="${us.epic || 'General'}">\n`;
+                            enrichedPrompt += `### ${epicId}: ${us.epic || 'General'}\n\n`;
+                            const storyId = `STORY-${epicId}-1`;
+                            enrichedPrompt += `<story id="${storyId}">\n`;
+                            enrichedPrompt += `**Story:** ${us.story || 'N/A'}\n\n**Acceptance Criteria:**\n`;
+                            const criteria = us.acceptanceCriteria || us.acceptenceCriteria || us.AcceptanceCriteria || [];
+                            const criteriaArray = Array.isArray(criteria) ? criteria : [criteria];
+                            criteriaArray.forEach((ac, cIdx) => {
+                                enrichedPrompt += `- [ ] <criteria id="${storyId}-C${cIdx + 1}">${ac}</criteria>\n`;
+                            });
+                            enrichedPrompt += `</story>\n`;
+                            enrichedPrompt += `</epic>\n\n`;
+                        });
+                        enrichedPrompt += `## 🛡️ Non-Functional Requirements (NFRs)\n`;
+                        enrichedPrompt += `<nfr_list>\n`;
+                        reqPlan.nonFunctionalRequirements.forEach((nfr) => { enrichedPrompt += `- ${nfr}\n`; });
+                        enrichedPrompt += `</nfr_list>\n`;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                        const reqFileUri = vscode.Uri.joinPath(nexusDir, 'requirements.md');
+                        try {
+                            await vscode.workspace.fs.createDirectory(nexusDir);
+                        }
+                        catch (e) { }
+                        await vscode.workspace.fs.writeFile(reqFileUri, Buffer.from(enrichedPrompt, 'utf8'));
+                        this._activeRequirements = enrichedPrompt;
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `✅ Saved requirements.md` });
+                        this._view?.webview.postMessage({ type: 'requirementsGenerated', text: enrichedPrompt });
+                    }
+                    catch (error) {
+                        if (error.name === 'AbortError') {
+                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n🛑 Cancelled by User.` });
+                        }
+                        else {
+                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${error.message}` });
+                        }
+                        this._view?.webview.postMessage({ type: 'generationFailed' }); // Reset UI
+                    }
+                    finally {
+                        this._activeTaskController = undefined;
+                    }
+                    break;
+                }
+                case "generateDesign": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    this._activeTaskController = new AbortController();
+                    this._view?.webview.postMessage({ type: 'reqStep', message: '\n━━━ Step 4: Architecting System Design ━━━' });
+                    this._view?.webview.postMessage({ type: 'reqStep', message: 'Analyzing approved PRD and drafting architecture...\n' });
+                    try {
+                        const designDoc = await (0, llmService_1.askQwenForDesign)(data.requirements, this._activeTaskController.signal);
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const designFileUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'design.md');
+                        await vscode.workspace.fs.writeFile(designFileUri, Buffer.from(designDoc, 'utf8'));
+                        this._activeDesign = designDoc;
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `✅ Saved design.md` });
+                        this._view?.webview.postMessage({ type: 'designGenerated', text: designDoc });
+                    }
+                    catch (error) {
+                        if (error.name === 'AbortError') {
+                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n🛑 Architecting Cancelled by User.` });
+                        }
+                        else {
+                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${error.message}` });
+                        }
+                        this._view?.webview.postMessage({ type: 'generationFailed' });
+                    }
+                    finally {
+                        this._activeTaskController = undefined;
+                    }
+                    break;
+                }
+                case "generateProjectTasks": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    this._activeTaskController = new AbortController();
+                    this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Drafting Master Implementation Plan..." });
+                    this._view?.webview.postMessage({ type: 'startChatStream' });
+                    try {
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const projectContext = await (0, projectContext_1.getProjectContext)(rootUri.fsPath);
+                        const plan = await (0, llmService_1.askQwenForProjectTasks)(this._activeRequirements, this._activeDesign, projectContext, this._activeTaskController.signal);
+                        const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(nexusDir, 'tasks.json'), Buffer.from(JSON.stringify(plan, null, 2), 'utf8'));
+                        let mdContent = `---\n`;
+                        mdContent += `version: 1.0.0\n`;
+                        mdContent += `type: implementation_plan\n`;
+                        mdContent += `status: draft\n`;
+                        mdContent += `---\n\n`;
+                        mdContent += "# Master Implementation Plan\n\n## 📁 Folder Structure\n";
+                        mdContent += `<folder_structure>\n`;
+                        plan.folderStructure.forEach((f) => mdContent += `- \`${f}\`\n`);
+                        mdContent += `</folder_structure>\n\n`;
+                        mdContent += "## 🛠️ Execution Tasks\n";
+                        mdContent += `<tasks>\n`;
+                        plan.implementationTasks.forEach((t, i) => {
+                            const taskId = `TASK-${(i + 1).toString().padStart(3, '0')}`;
+                            const prevTaskId = i > 0 ? `TASK-${(i).toString().padStart(3, '0')}` : 'none';
+                            if (typeof t === 'string') {
+                                mdContent += `<task id="${taskId}" dependsOn="${prevTaskId}">\n`;
+                                mdContent += `${i + 1}. [ ] ${t}\n`;
+                                mdContent += `</task>\n\n`;
+                            }
+                            else {
+                                mdContent += `<task id="${taskId}" dependsOn="${prevTaskId}" targetFile="${t.file}" relatesTo="${t.relatedRequirement || ''}">\n`;
+                                mdContent += `${i + 1}. [ ] **${t.step}** (File: \`${t.file}\`)\n`;
+                                mdContent += `   - *Instructions:* <instructions>${t.detailedInstructions}</instructions>\n`;
+                                mdContent += `</task>\n\n`;
+                            }
+                        });
+                        mdContent += `</tasks>\n`;
+                        await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(nexusDir, 'tasks.md'), Buffer.from(mdContent, 'utf8'));
+                        const { finalPaths, renamingMap } = await (0, pathUtils_1.resolveCanonicalPaths)(plan.folderStructure, rootUri.fsPath);
+                        plan.folderStructure = finalPaths;
+                        plan.implementationTasks = plan.implementationTasks.map((task) => {
+                            if (typeof task === 'string') {
+                                return task;
+                            }
+                            let updatedTask = { ...task };
+                            renamingMap.forEach((realPath, plannedPath) => {
+                                if (updatedTask.file === plannedPath) {
+                                    updatedTask.file = realPath;
+                                }
+                                if (updatedTask.detailedInstructions.includes(plannedPath)) {
+                                    updatedTask.detailedInstructions = updatedTask.detailedInstructions.replace(plannedPath, realPath);
+                                }
+                            });
+                            return updatedTask;
+                        });
+                        if (plan.folderStructure.length > 0) {
+                            await (0, workspaceManager_1.createWorkspaceStructure)(plan.folderStructure);
+                        }
+                        this._view?.webview.postMessage({ type: 'chatToken', token: "I have analyzed the PRD and System Architecture. Here is the master implementation plan. You can execute these tasks one by one using the buttons below, or run them all at once.\n\n" });
+                        this._view?.webview.postMessage({ type: "structureResponse", value: plan });
+                        this._view?.webview.postMessage({ type: 'tasksGenerated' });
+                    }
+                    catch (error) {
+                        if (error.name === 'AbortError') {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: `🛑 Planning Cancelled by User.` });
+                        }
+                        else {
+                            vscode.window.showErrorMessage(`Failed to generate tasks: ${error.message}`);
+                        }
+                        this._view?.webview.postMessage({ type: 'generationFailed' });
+                    }
+                    finally {
+                        this._activeTaskController = undefined;
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                    }
+                    break;
+                }
+                case "requestRevision": {
+                    const feedback = await vscode.window.showInputBox({
+                        prompt: `Why was the code for "${data.task}" rejected?`,
+                        placeHolder: "e.g., 'Use axios instead of fetch', or 'Fix the null pointer error'"
+                    });
+                    if (feedback === undefined) {
+                        return;
+                    }
+                    this._view?.webview.postMessage({
+                        type: 'startRevision',
+                        task: data.task,
+                        feedback: feedback || "The previous attempt was rejected. Try a different approach and ensure the code is completely bug-free."
+                    });
+                    break;
+                }
+                case "updateRequirements": {
+                    this._activeRequirements = data.text;
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (workspaceFolders && data.text.trim()) {
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const reqFileUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'requirements.md');
+                        try {
+                            await vscode.workspace.fs.writeFile(reqFileUri, Buffer.from(data.text, 'utf8'));
+                        }
+                        catch (e) { }
+                    }
+                    else if (data.text === "") {
+                        this._activeRequirements = "";
+                        this._activeDesign = "";
+                    }
+                    break;
+                }
+                case "updateDesign": {
+                    this._activeDesign = data.text;
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (workspaceFolders && data.text.trim()) {
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const designFileUri = vscode.Uri.joinPath(rootUri, 'nexuscode', 'design.md');
+                        try {
+                            await vscode.workspace.fs.writeFile(designFileUri, Buffer.from(data.text, 'utf8'));
+                        }
+                        catch (e) { }
+                    }
+                    break;
+                }
+                case "syncHistory": {
+                    let historyToSave = data.messages;
+                    //  THE COMPACTOR DAEMON THRESHOLD
+                    if (historyToSave.length > 15) {
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "🗜️ Nexus is compacting context memory..." });
+                        try {
+                            // Keep the 5 most recent messages for immediate conversational context
+                            const RECENT_KEEP_COUNT = 5;
+                            const messagesToCompact = historyToSave.slice(0, historyToSave.length - RECENT_KEEP_COUNT);
+                            const recentMessages = historyToSave.slice(historyToSave.length - RECENT_KEEP_COUNT);
+                            const summary = await (0, llmService_1.compactConversationHistory)(messagesToCompact);
+                            // Replace old history with the compressed memory block!
+                            historyToSave = [
+                                { role: 'assistant', isCompacted: true, content: summary },
+                                ...recentMessages
+                            ];
+                            // Push the newly compacted array back to the React UI
+                            this._view?.webview.postMessage({ type: 'historyCompacted', messages: historyToSave });
+                        }
+                        catch (e) {
+                            console.error("Compaction failed", e);
+                        }
+                        finally {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                        }
+                    }
+                    await extension_1.globalContext.globalState.update('nexus_chat_history', historyToSave);
+                    await extension_1.globalContext.globalState.update('nexus_task_statuses', data.taskStatuses);
+                    await extension_1.globalContext.globalState.update('nexus_task_summaries', data.taskSummaries);
+                    await extension_1.globalContext.globalState.update('nexus_task_files', data.taskFiles);
+                    break;
+                }
+                case "clearHistory":
+                    await extension_1.globalContext.globalState.update('nexus_chat_history', []);
+                    await extension_1.globalContext.globalState.update('nexus_task_statuses', {});
+                    await extension_1.globalContext.globalState.update('nexus_task_summaries', {});
+                    await extension_1.globalContext.globalState.update('nexus_task_files', {});
+                    break;
+                case "saveApiKey":
+                    await extension_1.globalContext.secrets.store('nexuscode_apikey', data.value);
+                    vscode.window.showInformationMessage("NexusCode: API Key Saved Securely!");
+                    this._view?.webview.postMessage({ type: 'initState', messages: [], hasKey: true });
+                    break;
+                case "processUserMessage": {
+                    this._activeTaskController = new AbortController();
+                    try {
+                        const workspacePath = await this.getTargetContext();
+                        //  PHASE 5: INTERCEPT CUSTOM MARKDOWN SKILLS
+                        const { SkillsManager } = await import('./skillsManager.js');
+                        await SkillsManager.initializeSkillsDirectory(workspacePath);
+                        const skillResult = await SkillsManager.processSkill(workspacePath, data.text);
+                        let actualPromptText = data.text;
+                        if (skillResult.isSkill) {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: `✨ Executing Custom Skill...` });
+                            actualPromptText = skillResult.skillPrompt; // Override with the Markdown Instructions!
+                        }
+                        else {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing intent..." });
+                        }
+                        const intent = await (0, llmService_1.determineIntent)(data.text);
+                        const fullPrompt = data.context
+                            ? `--- ATTACHED CONTEXT ---\n${data.context}\n\n--- USER QUERY ---\n${data.text}`
+                            : data.text;
+                        if (intent === 'build') {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Architecting plan..." });
+                            this._view?.webview.postMessage({ type: 'startChatStream' });
+                            await (0, ragIndexer_1.indexWorkspace)((msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg }));
+                            const [lspContext, styleGuide, astContext, hybridContext] = await Promise.all([
+                                (0, lspContext_1.getLspContext)(data.text),
+                                (0, styleContext_1.getProjectStyleGuides)(),
+                                (0, codeGraph_1.getSmartASTContext)(data.text),
+                                (0, hybridSearch_1.retrieveHybridContext)(data.text, 5)
+                            ]);
+                            const requirementInjection = this._activeRequirements ? `\n\n--- 📋 STRICT BUSINESS REQUIREMENTS ---\nYou must follow these rules absolutely:\n${this._activeRequirements}\n-----------------------------------\n` : "";
+                            const designInjection = this._activeDesign ? `\n\n--- 🏗️ SYSTEM ARCHITECTURE & DESIGN ---\nYou must follow this technical design strictly:\n${this._activeDesign}\n-----------------------------------\n` : "";
+                            const finalContext = `${lspContext}\n\n${astContext}\n\n${hybridContext}\n\n${styleGuide}${requirementInjection}${designInjection}`;
+                            const result = await (0, llmService_1.askQwenForStructure)(fullPrompt, finalContext);
+                            this._view?.webview.postMessage({ type: 'chatToken', token: result.explanation + "\n\n" });
+                            const rootSearchPath = this._isMetaMode ? this._extensionUri.fsPath : undefined;
+                            const { finalPaths, renamingMap } = await (0, pathUtils_1.resolveCanonicalPaths)(result.plan.folderStructure, rootSearchPath);
+                            result.plan.folderStructure = finalPaths;
+                            result.plan.implementationTasks = result.plan.implementationTasks.map(task => {
+                                let updatedTask = task;
+                                renamingMap.forEach((realPath, plannedPath) => {
+                                    const plannedName = path.basename(plannedPath);
+                                    if (typeof updatedTask === 'string') {
+                                        if (updatedTask.includes(plannedPath)) {
+                                            updatedTask = updatedTask.replace(plannedPath, realPath);
+                                        }
+                                        else if (updatedTask.includes(plannedName)) {
+                                            updatedTask = updatedTask.replace(plannedName, `${plannedName} (found at ${realPath})`);
+                                        }
+                                    }
+                                });
+                                return updatedTask;
+                            });
+                            if (result.plan.folderStructure.length > 0) {
+                                await (0, workspaceManager_1.createWorkspaceStructure)(result.plan.folderStructure);
+                            }
+                            this._view?.webview.postMessage({ type: "structureResponse", value: result.plan });
+                        }
+                        else if (intent === 'explore') {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "🔍 Agentic Exploration: Investigating..." });
+                            // 🔥 Create a dummy task ID so the UI renders the beautiful Swarm Logs
+                            const exploreTaskId = "Exploration-" + Date.now();
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: exploreTaskId, status: 'reviewing', summary: 'Gathering forensic evidence...' });
+                            const workspacePath = await this.getTargetContext();
+                            // 🤖 THE CLAUDE CODE LOOP: It will now use grep and read_file autonomously!
+                            const explorationContext = await (0, llmService_1.runAgenticExploration)(data.text, workspacePath, (stepType, desc, details) => {
+                                this._view?.webview.postMessage({
+                                    type: 'agentStep',
+                                    task: exploreTaskId,
+                                    stepType: stepType,
+                                    description: desc,
+                                    details: details
+                                });
+                            });
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing evidence..." });
+                            this._view?.webview.postMessage({ type: 'startChatStream' });
+                            const fullContext = `--- FORENSIC EVIDENCE GATHERED BY TOOLS ---\n${explorationContext}\n\nBased on this evidence, explain exactly what went wrong and how we should fix it.`;
+                            // Stream the final analysis back to the chat window
+                            await (0, llmService_1.streamQwenChat)(data.text, fullContext, data.history || [], (token) => { this._view?.webview.postMessage({ type: 'chatToken', token: token }); }, this._activeTaskController.signal);
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: exploreTaskId, status: 'approved', summary: 'Exploration Complete' });
+                        }
+                        else {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Gathering context..." });
+                            const workspacePath = await this.getTargetContext();
+                            const ragContext = await (0, hybridSearch_1.retrieveHybridContext)(data.text, 5);
+                            if (ragContext) {
+                                this._view?.webview.postMessage({
+                                    type: 'glassBrain',
+                                    text: ragContext
+                                });
+                            }
+                            let openFilesContext = "";
+                            vscode.workspace.textDocuments.forEach(doc => {
+                                if (doc.uri.scheme === 'file' && !doc.fileName.includes('node_modules') && !doc.fileName.includes('.git')) {
+                                    openFilesContext += `\n📍 OPEN FILE: ${vscode.workspace.asRelativePath(doc.uri)}\n\`\`\`\n${doc.getText().substring(0, 3000)}\n\`\`\`\n`;
+                                }
+                            });
+                            let fullContext = "";
+                            if (intent === 'explain') {
+                                const projectStructure = await (0, projectContext_1.getProjectContext)(workspacePath);
+                                const truncatedStructure = projectStructure.length > 15000 ? projectStructure.substring(0, 15000) + "\n...[TRUNCATED TO SAVE TOKENS]" : projectStructure;
+                                fullContext = `Directory Tree:\n${truncatedStructure}\n\nCurrently Open Files:\n${openFilesContext}\n\nVector Search Context:\n${ragContext}`;
+                            }
+                            else {
+                                fullContext = `Currently Open Files:\n${openFilesContext}\n\nVector Search Context:\n${ragContext}`;
+                            }
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Thinking..." });
+                            this._view?.webview.postMessage({ type: 'startChatStream' });
+                            await (0, llmService_1.streamQwenChat)(fullPrompt, fullContext, data.history || [], (token) => { this._view?.webview.postMessage({ type: 'chatToken', token: token }); }, this._activeTaskController.signal);
+                        }
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                    }
+                    catch (error) {
+                        if (error.name === 'AbortError') {
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "⚠️ Generation stopped." });
+                            setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 3000);
+                        }
+                        else {
+                            vscode.window.showErrorMessage(`NexusCode Error: ${error.message}`);
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                            this._view?.webview.postMessage({ type: 'taskCompleted', status: 'error' });
+                        }
+                    }
+                    finally {
+                        this._activeTaskController = undefined;
+                    }
+                    break;
+                }
+                case "cancelTask": {
+                    if (this._activeTaskController) {
+                        this._activeTaskController.abort();
+                        this._activeTaskController = undefined;
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "⚠️ Task cancelled by user." });
+                        setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 3000);
+                    }
+                    break;
+                }
+                case "executeTask": {
+                    const originalTaskQuery = data.prompt || data.task;
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders)
+                        return;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    this._activeTaskController = new AbortController();
+                    vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: "NexusCode Swarm Execution Engine...",
+                        cancellable: true
+                    }, async (progress, token) => {
+                        token.onCancellationRequested(() => this._activeTaskController?.abort());
+                        const taskStartTime = Date.now();
+                        const gitCheck = await this._terminalManager?.runCommandWithCapture("git status", rootUri.fsPath);
+                        const isGitRepo = gitCheck && gitCheck.success;
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Generating MCTS Execution Branches...` });
+                        let approaches = [originalTaskQuery];
+                        if (isGitRepo) {
+                            approaches = await (0, llmService_1.generateMCTSApproaches)(originalTaskQuery, "Generating alternative architectures...");
+                        }
+                        let success = false;
+                        let winningApproach = 0;
+                        let finalMergedFilepath = "";
+                        for (let i = 0; i < approaches.length; i++) {
+                            if (success || token.isCancellationRequested)
+                                break;
+                            const approachNum = i + 1;
+                            const isMCTSActive = approaches.length > 1;
+                            const currentApproachPrompt = isMCTSActive ? `Original Task: ${originalTaskQuery}\n\nImplementation Directive (Approach ${approachNum}):\n${approaches[i]}` : originalTaskQuery;
+                            const sandboxBranch = `nexus-mcts-sandbox-${Date.now()}`;
+                            try {
+                                if (isMCTSActive) {
+                                    await this._terminalManager?.runCommandWithCapture(`git stash`, rootUri.fsPath);
+                                    await this._terminalManager?.runCommandWithCapture(`git checkout -b ${sandboxBranch}`, rootUri.fsPath);
+                                }
+                                let previousFailures = "";
+                                try {
+                                    const failData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, 'nexuscode', 'NEXUS_FAILURES.md'));
+                                    previousFailures = new TextDecoder().decode(failData);
+                                }
+                                catch { }
+                                //  THE FIX: Define the missing variables for the Swarm Coordinator
+                                const currentFileContent = "";
+                                const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
+                                //  THE SWARM ORCHESTRATOR 
+                                const finalDiff = await Coordinator_1.SwarmCoordinator.executeTask(currentApproachPrompt, rootUri.fsPath, currentFileContent, lspBlastRadiusContext, this._activeRequirements, this._activeDesign, previousFailures, data.codingStyle || 'precise', (msg, stepType, details) => {
+                                    // Always update the tiny status bar
+                                    this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
+                                    //  ONLY drop a persistent UI card if stepType is provided!
+                                    if (stepType && details) {
+                                        this._view?.webview.postMessage({
+                                            type: 'agentStep',
+                                            task: data.task,
+                                            stepType: stepType,
+                                            description: msg.replace('Coordinator: ', ''),
+                                            details: details
+                                        });
+                                    }
+                                }, (streamToken) => {
+                                    this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: streamToken });
+                                });
+                                if (!finalDiff)
+                                    throw new Error("Swarm failed to generate verified code.");
+                                const realFilepath = finalDiff.filepath;
+                                const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
+                                let fileContent = "";
+                                try {
+                                    const fileData = await vscode.workspace.fs.readFile(fileUri);
+                                    fileContent = new TextDecoder().decode(fileData);
+                                }
+                                catch {
+                                    await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
+                                }
+                                const finalPerfectCode = injectCodeIntoContent(fileContent, finalDiff.targetLine || '', finalDiff.code, finalDiff.action);
+                                const document = await vscode.workspace.openTextDocument(fileUri);
+                                const editor = await vscode.window.showTextDocument(document, { preview: false });
+                                const mergedHeader = (0, commentStyles_1.getAIHeader)(realFilepath, currentApproachPrompt, fileContent) + "\n";
+                                const finalCodePayload = mergedHeader + finalPerfectCode;
+                                await editor.edit(b => {
+                                    b.delete(new vscode.Range(0, 0, document.lineCount, 0));
+                                    b.insert(new vscode.Position(0, 0), finalCodePayload);
+                                });
+                                // We save the document so the Adversarial node.js script can test it on disk...
+                                await document.save();
+                                //  THE FIX: RESTORE HUMAN INLINE APPROVAL 
+                                // Register the AI's action with the ProvenanceTracker using the exact method signature!
+                                if (this._tracker) {
+                                    this._tracker.trackStreamedReview(editor, fileContent, // The original content before the AI touched it
+                                    data.task, // The taskId to bind to the Accept/Reject buttons
+                                    0, // Start line of the edit
+                                    document.lineCount // End line of the edit
+                                    );
+                                }
+                                // MCTS Success Merge
+                                if (isMCTSActive) {
+                                    await this._terminalManager?.runCommandWithCapture(`git add . && git commit -m "chore: nexus mcts approach ${approachNum}"`, rootUri.fsPath);
+                                    await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
+                                    await this._terminalManager?.runCommandWithCapture(`git merge ${sandboxBranch} --squash`, rootUri.fsPath);
+                                    await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
+                                    await this._terminalManager?.runCommandWithCapture(`git stash pop`, rootUri.fsPath);
+                                }
+                                success = true;
+                                winningApproach = approachNum;
+                                finalMergedFilepath = realFilepath;
+                            }
+                            catch (error) {
+                                if (isMCTSActive) {
+                                    await this._terminalManager?.runCommandWithCapture(`git reset --hard`, rootUri.fsPath);
+                                    await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
+                                    await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
+                                }
+                                else {
+                                    vscode.window.showErrorMessage(`Execution failed: ${error.message}`);
+                                }
+                            }
+                        }
+                        if (success) {
+                            const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: "approved", filepath: finalMergedFilepath, summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)` });
+                        }
+                        else {
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.` });
+                        }
+                        this._activeTaskController = undefined;
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                    });
+                    break;
+                }
+                case "refreshCodeLens": {
+                    vscode.commands.executeCommand('nexuscode.refreshLens');
+                    break;
+                }
+                case "undoTaskEdit": {
+                    const undoData = this._undoStack.get(data.task);
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (undoData && workspaceFolders) {
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const fileUri = vscode.Uri.joinPath(rootUri, undoData.filepath);
+                        try {
+                            const edit = new vscode.WorkspaceEdit();
+                            const document = await vscode.workspace.openTextDocument(fileUri);
+                            // Replace the entire file with the original content
+                            edit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), undoData.originalContent);
+                            await vscode.workspace.applyEdit(edit);
+                            await document.save();
+                            vscode.window.showInformationMessage(`⏪ Undid AI edits to ${undoData.filepath}`);
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'undone', summary: `⏪ Reverted to original state.` });
+                        }
+                        catch (e) {
+                            vscode.window.showErrorMessage("Failed to undo file edit.");
+                        }
+                    }
+                    else {
+                        vscode.window.showWarningMessage("No undo history found for this task.");
+                    }
+                    break;
+                }
+                case "runGlobalCompiler": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    const workspacePath = workspaceFolders[0].uri.fsPath;
+                    this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Running Global Workspace Compiler..." });
+                    // Run the dry-run build
+                    const buildCommand = "npx tsc --noEmit";
+                    const result = await this._terminalManager?.runCommandWithCapture(buildCommand, workspacePath);
+                    if (result && result.success) {
+                        vscode.window.showInformationMessage("✅ Global Compiler Passed! The app is structurally sound.");
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                    }
+                    else if (result && !result.success) {
+                        vscode.window.showErrorMessage("❌ Global Compiler Failed. Initializing Build-Healer...");
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing global build failures..." });
+                        try {
+                            // 1. Extract broken file paths from the TypeScript error log
+                            // e.g. "src/models/user.ts(5,10): error TS2304..." -> "src/models/user.ts"
+                            const fileRegex = /([a-zA-Z0-9_\-\/\\]+\.(?:ts|tsx|js|jsx|py|go|rs|cpp|c|h|hpp|java|rb|php|cs))/g;
+                            const matches = [...new Set(result.output.match(fileRegex))]; // Get unique files
+                            if (matches.length === 0) {
+                                throw new Error("Could not parse file paths from error log.");
+                            }
+                            // 2. Read the contents of the broken files
+                            let brokenFilesContext = "";
+                            for (const file of matches) {
+                                try {
+                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, file);
+                                    const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(fileUri));
+                                    brokenFilesContext += `\n--- FILE: ${file} ---\n\`\`\`\n${content}\n\`\`\`\n`;
+                                }
+                                catch (e) {
+                                    // File might be a phantom import that doesn't exist yet
+                                }
+                            }
+                            // 3. Call the Build-Healer Agent
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Healing ${matches.length} cross-file errors...` });
+                            const fixes = await (0, llmService_1.askQwenToHealGlobalBuild)(result.output, brokenFilesContext, data.codingStyle || 'precise');
+                            // 4. Apply the Autonomous Edits
+                            if (fixes && fixes.length > 0) {
+                                const workspaceEdit = new vscode.WorkspaceEdit();
+                                for (const edit of fixes) {
+                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, edit.filepath);
+                                    // Ensure file exists
+                                    try {
+                                        await vscode.workspace.fs.stat(fileUri);
+                                    }
+                                    catch {
+                                        await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
+                                    }
+                                    const document = await vscode.workspace.openTextDocument(fileUri);
+                                    const aiHeader = (0, commentStyles_1.getAIHeader)(edit.filepath, "Build-Healer Patch");
+                                    const finalCode = aiHeader + edit.code;
+                                    workspaceEdit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), finalCode);
+                                }
+                                if (await vscode.workspace.applyEdit(workspaceEdit)) {
+                                    // Save all dirty documents so TS can see the updates
+                                    const dirtyDocs = vscode.workspace.textDocuments.filter(d => d.isDirty);
+                                    for (const doc of dirtyDocs) {
+                                        await doc.save();
+                                    }
+                                    vscode.window.showInformationMessage(`✅ Build-Healer autonomously patched ${fixes.length} files!`);
+                                }
+                            }
+                            else {
+                                vscode.window.showWarningMessage("⚠️ Build-Healer could not determine a safe patch. Manual intervention required.");
+                            }
+                        }
+                        catch (error) {
+                            console.error("[DEBUG-HEALER]", error);
+                            //  THE FIX: Expose the actual error and the raw terminal output so the developer can see why it failed!
+                            const safeError = error instanceof Error ? error.message : String(error);
+                            vscode.window.showErrorMessage(`Build-Healer Aborted: ${safeError}`);
+                            this._view?.webview.postMessage({
+                                type: 'statusUpdate',
+                                message: `⚠️ Healer failed to parse terminal. Check VS Code notifications.`
+                            });
+                            // Stream the raw terminal output to the chat so you can physically read what tsc complained about!
+                            this._view?.webview.postMessage({
+                                type: 'streamTerminal',
+                                task: "Global Compiler",
+                                text: result.output || "No terminal output captured."
+                            });
+                        }
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                    }
+                    break;
+                }
+                case "searchFiles": {
+                    // Split off the line numbers so the file search doesn't break const cleanQuery = data.query.split(':')[0];
+                    const cleanQuery = data.query.split(':')[0];
+                    const files = await vscode.workspace.findFiles(`**/*${cleanQuery}*`, '{**/node_modules/**,**/.git/**,**/dist/**}', 10);
+                    const results = files.map(f => vscode.workspace.asRelativePath(f));
+                    // Send results back, but preserve the original query so the UI remembers the line numbers!
+                    this._view?.webview.postMessage({ type: 'searchResults', results, originalQuery: data.query });
+                    break;
+                }
+                case "showDiff": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    const fileUri = vscode.Uri.joinPath(rootUri, data.filepath);
+                    const originalUri = vscode.Uri.parse(`nexus-original:${fileUri.path}`);
+                    await vscode.commands.executeCommand('vscode.diff', originalUri, fileUri, `NexusCode Diff: ${path.basename(data.filepath)}`);
+                    break;
+                }
+                case "openFile": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders)
+                        return;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    //  THE FIX: Safely handle Windows absolute paths vs relative paths!
+                    const fullPath = path.isAbsolute(data.filepath)
+                        ? data.filepath
+                        : path.join(rootUri.fsPath, data.filepath);
+                    const fileUri = vscode.Uri.file(fullPath);
+                    try {
+                        const document = await vscode.workspace.openTextDocument(fileUri);
+                        const editor = await vscode.window.showTextDocument(document, { preview: false });
+                        // Jump to the exact function if clicked!
+                        if (data.symbol) {
+                            const text = document.getText();
+                            const symbolIdx = text.indexOf(data.symbol);
+                            if (symbolIdx !== -1) {
+                                const pos = document.positionAt(symbolIdx);
+                                editor.selection = new vscode.Selection(pos, pos);
+                                editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+                            }
+                        }
+                    }
+                    catch (e) {
+                        vscode.window.showErrorMessage(`NexusCode: Could not open ${fileUri.fsPath}`);
+                    }
+                    break;
+                }
+                case "readFileContext": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    // Parse the target file and optional line ranges (e.g., "src/App.tsx:10-50")
+                    let targetFile = data.file;
+                    let startLine = 0;
+                    let endLine = Infinity;
+                    const match = targetFile.match(/(.*?):(\d+)(?:-(\d+))?$/);
+                    if (match) {
+                        targetFile = match[1];
+                        startLine = Math.max(0, parseInt(match[2], 10) - 1); // 0-indexed
+                        if (match[3]) {
+                            endLine = parseInt(match[3], 10);
+                        }
+                        else {
+                            endLine = startLine + 100;
+                        }
+                    }
+                    const fileUri = vscode.Uri.joinPath(this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri, targetFile);
+                    try {
+                        const content = await vscode.workspace.fs.readFile(fileUri);
+                        let code = new TextDecoder().decode(content);
+                        // ✂️ Slice the file if line numbers were provided!
+                        if (startLine > 0 || endLine !== Infinity) {
+                            const lines = code.split('\n');
+                            code = lines.slice(startLine, endLine).join('\n');
+                            code = `// [PARTIAL FILE READ: Lines ${startLine + 1} to ${Math.min(endLine, lines.length)}]\n` + code;
+                        }
+                        const ext = path.extname(targetFile).substring(1);
+                        this._view?.webview.postMessage({
+                            type: 'addContext',
+                            file: data.file, // Keep the syntax (e.g., App.tsx:10-50) for the UI chip
+                            code: code,
+                            language: ext || 'text'
+                        });
+                    }
+                    catch (e) {
+                        console.error("Failed to read file for context:", e);
+                    }
+                    break;
+                }
+                case "executeAllTasks": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) {
+                        return;
+                    }
+                    vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: "NexusCode: Drafting Atomic Plan...",
+                        cancellable: true
+                    }, async (progress, token) => {
+                        try {
+                            const contextRoot = this._isMetaMode ? this._extensionUri.fsPath : undefined;
+                            const projectContext = await (0, projectContext_1.getProjectContext)(contextRoot);
+                            const allEdits = [];
+                            const BATCH_SIZE = 5;
+                            for (let i = 0; i < data.tasks.length; i += BATCH_SIZE) {
+                                if (token.isCancellationRequested) {
+                                    break;
+                                }
+                                const batch = data.tasks.slice(i, i + BATCH_SIZE);
+                                const batchNum = Math.ceil((i + 1) / BATCH_SIZE);
+                                const totalBatches = Math.ceil(data.tasks.length / BATCH_SIZE);
+                                progress.report({ message: `Drafting batch ${batchNum}/${totalBatches}...` });
+                                this._view?.webview.postMessage({ type: 'statusUpdate', message: `Drafting batch ${batchNum}/${totalBatches}: ${batch[0]}...` });
+                                try {
+                                    const batchEdits = await (0, llmService_1.askQwenForAtomicEdits)(batch, projectContext, data.codingStyle);
+                                    allEdits.push(...batchEdits);
+                                }
+                                catch (e) { }
+                            }
+                            if (token.isCancellationRequested) {
+                                return;
+                            }
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "Compiling Final Review..." });
+                            this._view?.webview.postMessage({ type: 'reviewEdits', edits: allEdits, tasks: data.tasks });
+                            vscode.window.showInformationMessage(`Draft complete. Generated code for ${allEdits.length} files.`);
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                        }
+                        catch (error) {
+                            vscode.window.showErrorMessage(`Drafting Failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                        }
+                    });
+                    break;
+                }
+                case "commitAtomicEdits": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders || !data.edits) {
+                        return;
+                    }
+                    vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: "NexusCode: Committing Changes...",
+                        cancellable: false
+                    }, async () => {
+                        const workspaceEdit = new vscode.WorkspaceEdit();
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        for (const edit of data.edits) {
+                            const fileUri = vscode.Uri.joinPath(rootUri, edit.filepath);
+                            const aiHeader = (0, commentStyles_1.getAIHeader)(edit.filepath, "Atomic Implementation");
+                            const finalCode = aiHeader + edit.code;
+                            try {
+                                await vscode.workspace.fs.stat(fileUri);
+                            }
+                            catch {
+                                await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
+                            }
+                            const document = await vscode.workspace.openTextDocument(fileUri);
+                            workspaceEdit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), finalCode);
+                        }
+                        if (await vscode.workspace.applyEdit(workspaceEdit)) {
+                            const dirtyDocs = vscode.workspace.textDocuments.filter(d => d.isDirty);
+                            for (const doc of dirtyDocs)
+                                await doc.save();
+                            this._view?.webview.postMessage({ type: 'allTasksCompleted', status: 'approved' });
+                            vscode.window.showInformationMessage("Atomic Transaction Committed with AI Metadata.");
+                        }
+                    });
+                    break;
+                }
+                case "generateAndRunTests": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    const activeEditor = vscode.window.activeTextEditor;
+                    if (!workspaceFolders || !activeEditor) {
+                        return;
+                    }
+                    const workspacePath = workspaceFolders[0].uri.fsPath;
+                    vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: "NexusCode is writing and executing tests...",
+                        cancellable: false
+                    }, async () => {
+                        try {
+                            this._view?.webview.postMessage({ type: 'clearTerminalStream', task: "Auto-Test Setup" });
+                            this._view?.webview.postMessage({ type: 'clearTerminalStream', task: "Auto-Test Execution" });
+                            const relativeFileName = vscode.workspace.asRelativePath(activeEditor.document.uri);
+                            let customRules = "";
+                            try {
+                                const rulesUri = vscode.Uri.joinPath(workspaceFolders[0].uri, '.nexusrules');
+                                customRules = new TextDecoder().decode(await vscode.workspace.fs.readFile(rulesUri));
+                            }
+                            catch (e) {
+                                // No rules file exists yet, perfectly fine.
+                            }
+                            const testPlan = await (0, llmService_1.askQwenForTests)(relativeFileName, activeEditor.document.getText(), customRules);
+                            if (activeEditor.document.isDirty) {
+                                await activeEditor.document.save();
+                            }
+                            if (testPlan.installCommand) {
+                                const installResult = await this.confirmAndRunCommand(testPlan.installCommand, workspacePath, 'Installing dependencies...', data.autopilot, 
+                                //  THE UI STREAMER: Send the live npm install text to the chat window!
+                                (chunk) => {
+                                    this._view?.webview.postMessage({ type: 'streamTerminal', task: "Auto-Test Setup", text: chunk });
+                                });
+                                if (!installResult || !installResult.success) {
+                                    vscode.window.showErrorMessage("Dependency installation failed. Aborting tests.");
+                                    this._view?.webview.postMessage({ type: 'statusUpdate', message: '⚠️ Tests aborted due to install failure.' });
+                                    return;
+                                }
+                            }
+                            const parsedPath = path.parse(relativeFileName);
+                            // Strip "src/" from the folder path if it exists so we don't end up with "tests/src/..."
+                            let cleanDir = parsedPath.dir;
+                            if (cleanDir.startsWith('src/') || cleanDir === 'src') {
+                                cleanDir = cleanDir.replace(/^src\/?/, '');
+                            }
+                            // Force the .test extension (e.g. auth.ts -> auth.test.ts)
+                            const testFileName = `${parsedPath.name}.test${parsedPath.ext}`;
+                            // Hardcode the route to the root 'tests/' directory
+                            const deterministicPath = path.join('tests', cleanDir, testFileName);
+                            const testFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, deterministicPath);
+                            const createEdit = new vscode.WorkspaceEdit();
+                            createEdit.createFile(testFileUri, { ignoreIfExists: true });
+                            await vscode.workspace.applyEdit(createEdit);
+                            const doc = await vscode.workspace.openTextDocument(testFileUri);
+                            const replaceEdit = new vscode.WorkspaceEdit();
+                            // Overwrite from line 0 to the very end of the file
+                            replaceEdit.replace(testFileUri, new vscode.Range(0, 0, doc.lineCount, 0), testPlan.code);
+                            await vscode.workspace.applyEdit(replaceEdit);
+                            await vscode.window.showTextDocument(doc);
+                            await doc.save();
+                            const result = await this.confirmAndRunCommand(testPlan.testCommand, workspacePath, 'Running tests...', data.autopilot, 
+                            //  THE UI STREAMER: Send the live test results to the chat window!
+                            (chunk) => {
+                                this._view?.webview.postMessage({ type: 'streamTerminal', task: "Auto-Test Execution", text: chunk });
+                            });
+                            if (!result) {
+                                this._view?.webview.postMessage({ type: 'statusUpdate', message: '' });
+                                return;
+                            }
+                            if (!result.success) {
+                                this._view?.webview.postMessage({ type: 'statusUpdate', message: 'Tests failed. Auto-healing...' });
+                                try {
+                                    const fixResult = await (0, llmService_1.askQwenToFixError)(result.output, relativeFileName, activeEditor.document.getText(), deterministicPath, testPlan.code);
+                                    const fileToFixUri = vscode.Uri.joinPath(workspaceFolders[0].uri, fixResult.filepath);
+                                    const fixEdit = new vscode.WorkspaceEdit();
+                                    const docToFix = await vscode.workspace.openTextDocument(fileToFixUri);
+                                    fixEdit.replace(fileToFixUri, new vscode.Range(0, 0, docToFix.lineCount, 0), fixResult.code);
+                                    await vscode.workspace.applyEdit(fixEdit);
+                                    await docToFix.save();
+                                    this._view?.webview.postMessage({ type: 'statusUpdate', message: 'Re-running tests after heal...' });
+                                    const retryResult = await this._terminalManager?.runCommandWithCapture(testPlan.testCommand, workspacePath);
+                                    if (retryResult?.success) {
+                                        vscode.window.showInformationMessage(`Auto-Heal successful! Fixed ${fixResult.filepath}`);
+                                    }
+                                    else {
+                                        vscode.window.showErrorMessage("Auto-Heal attempted, but tests still failing.");
+                                    }
+                                }
+                                catch (e) {
+                                    vscode.window.showErrorMessage("Auto-heal failed to parse LLM output.");
+                                }
+                            }
+                            else {
+                                vscode.window.showInformationMessage("All tests passed on the first try!");
+                            }
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: '' });
+                        }
+                        catch (error) {
+                            vscode.window.showErrorMessage("Failed to generate or run tests.");
+                        }
+                    });
+                    break;
+                }
+                case "executeCommand": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders)
+                        return;
+                    const workspacePath = workspaceFolders[0].uri.fsPath;
+                    const maxRetries = 3;
+                    let currentAttempt = 1;
+                    let success = false;
+                    this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'reviewing' });
+                    while (currentAttempt <= maxRetries && !success) {
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Running \`${data.command}\` (Attempt ${currentAttempt}/${maxRetries})...` });
+                        // 1. Run the headless terminal and stream to the UI
+                        const result = await this._terminalManager?.runCommandWithCapture(data.command, workspacePath, (chunk) => {
+                            // Stream the live terminal output to the React UI!
+                            this._view?.webview.postMessage({ type: 'streamTerminal', task: data.task, text: chunk });
+                        });
+                        if (!result)
+                            break;
+                        if (result.success) {
+                            success = true;
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'approved', summary: `✅ Command executed flawlessly.` });
+                            break;
+                        }
+                        // 2. INTERCEPTOR TRIGGERED: Command Failed!
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: `🚨 Command Failed. Intercepting Error for Auto-Heal...` });
+                        this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'error', description: `Execution Failed (Code ${result.code})`, details: result.output.substring(0, 1000) });
+                        if (currentAttempt === maxRetries) {
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: `❌ Failed after ${maxRetries} attempts.` });
+                            break;
+                        }
+                        // 3. The Auto-Heal LLM Call
+                        this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Architecting fix for terminal error...` });
+                        try {
+                            const { askQwenToHealGlobalBuild } = await import('./llmService.js');
+                            // We pass the exact terminal error back to the AI
+                            const fixes = await askQwenToHealGlobalBuild(result.output, "Fix the terminal crash.", data.codingStyle);
+                            if (fixes && fixes.length > 0) {
+                                const workspaceEdit = new vscode.WorkspaceEdit();
+                                for (const edit of fixes) {
+                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, edit.filepath);
+                                    const document = await vscode.workspace.openTextDocument(fileUri);
+                                    workspaceEdit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), edit.code);
+                                }
+                                await vscode.workspace.applyEdit(workspaceEdit);
+                                // Save files so the next terminal run sees the changes!
+                                const dirtyDocs = vscode.workspace.textDocuments.filter(d => d.isDirty);
+                                for (const doc of dirtyDocs)
+                                    await doc.save();
+                                this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'heal', description: `Auto-Heal Applied to ${fixes.length} files.` });
+                            }
+                            else {
+                                throw new Error("AI could not determine a safe patch.");
+                            }
+                        }
+                        catch (e) {
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: `❌ Auto-heal failed: ${e instanceof Error ? e.message : 'Unknown'}` });
+                            break;
+                        }
+                        currentAttempt++;
+                    }
+                    this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                    break;
+                }
+                case "requestModels": {
+                    const models = await (0, llmService_1.getAvailableModels)();
+                    const currentModel = vscode.workspace.getConfiguration('nexuscode').get('model');
+                    this._view?.webview.postMessage({
+                        type: 'updateModelsList',
+                        models: models,
+                        currentModel: currentModel
+                    });
+                    break;
+                }
+                case "setModel": {
+                    await vscode.workspace.getConfiguration('nexuscode').update('model', data.value, vscode.ConfigurationTarget.Global);
+                    vscode.window.setStatusBarMessage(`NexusCode: Model set to ${data.value}`, 3000);
+                    break;
+                }
+                case "approveCommand": {
+                    if (this._pendingCommandResolver)
+                        this._pendingCommandResolver(true);
+                    break;
+                }
+                case "rejectCommand": {
+                    if (this._pendingCommandResolver)
+                        this._pendingCommandResolver(false);
+                    break;
+                }
+            }
+        });
+    }
     _getHtmlForWebview(webview) {
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "webview-ui", "build", "assets", "index.js"));
         const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "webview-ui", "build", "assets", "style.css"));
