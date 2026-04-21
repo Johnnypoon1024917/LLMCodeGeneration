@@ -51,69 +51,24 @@ const hybridSearch_1 = require("./context/hybridSearch");
 const commentStyles_1 = require("./utilities/commentStyles");
 const pathUtils_1 = require("./utilities/pathUtils");
 const workspaceManager_1 = require("./workspaceManager");
-function injectCodeIntoContent(originalContent, target, newCode, action) {
-    // 🔥 THE FIX: Aggressively strip any accidental markdown or XML leakage 
-    // to prevent syntax hallucinations from entering the source code.
-    let cleanedCode = newCode
-        .replace(/```[a-z]*\n?/gi, '')
-        .replace(/```/g, '')
-        .replace(/<\/?(target|filepath|action|plan|reasoning|command|self_critique)[^>]*>/gi, '')
-        .trim();
-    // 🚀 DETERMINISTIC OVERWRITE: 
-    // If the action is 'replace' (triggered by the Rewriter agent), 
-    // ignore the old content and return the new code as the full file.
-    if (action === 'replace') {
-        return cleanedCode;
+function applySearchReplace(originalContent, searchBlock, replaceBlock, fullBuffer) {
+    // 1. Clean the blocks of any accidental markdown formatting the LLM might have included
+    const cleanSearch = searchBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
+    const cleanReplace = replaceBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
+    // 2. If no search block was found by the regex, the LLM likely generated the whole file.
+    // We fallback to just returning the cleaned full buffer.
+    if (!cleanSearch) {
+        return fullBuffer.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
     }
-    if (action === 'append') {
-        return originalContent + "\n\n" + cleanedCode;
+    // 3. Strict substring replacement
+    if (originalContent.includes(cleanSearch)) {
+        return originalContent.replace(cleanSearch, cleanReplace);
     }
-    // Fallback if no target is provided
-    if (!target) {
-        return originalContent + "\n\n" + cleanedCode;
+    else {
+        // 🔥 THE POISON PILL: If the SEARCH block doesn't perfectly match the file, we abort.
+        // This prevents the agent from corrupting the file with hallucinatory edits.
+        throw new Error("Target SEARCH block not found in file. The AI hallucinated the existing code. Aborting to prevent corruption.");
     }
-    const lines = originalContent.split('\n');
-    let startIdx = -1;
-    // Locate the exact target line for AST Splicing
-    for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes(target)) {
-            startIdx = i;
-            break;
-        }
-    }
-    if (startIdx === -1) {
-        // 🔥 THE POISON PILL: Strict verification to prevent misaligned edits.
-        throw new Error(`Target "${target}" not found in file. Aborting injection to prevent code corruption.`);
-    }
-    // Handle "insert_before" (typically for new routes or imports)
-    if (action === 'insert_before') {
-        const before = lines.slice(0, startIdx).join('\n');
-        const after = lines.slice(startIdx).join('\n');
-        return before + "\n" + cleanedCode + "\n\n" + after;
-    }
-    // Handle block replacement (finding matching braces for functions/classes)
-    let endIdx = startIdx;
-    let braces = 0;
-    let foundBrace = false;
-    for (let i = startIdx; i < lines.length; i++) {
-        const line = lines[i];
-        for (let char of line) {
-            if (char === '{') {
-                braces++;
-                foundBrace = true;
-            }
-            if (char === '}') {
-                braces--;
-            }
-        }
-        if (foundBrace && braces === 0) {
-            endIdx = i;
-            break;
-        }
-    }
-    const before = lines.slice(0, startIdx).join('\n');
-    const after = lines.slice(endIdx + 1).join('\n');
-    return before + "\n" + cleanedCode + "\n" + after;
 }
 class SidebarProvider {
     _extensionUri;
@@ -710,12 +665,10 @@ class SidebarProvider {
                             const messagesToCompact = historyToSave.slice(0, historyToSave.length - RECENT_KEEP_COUNT);
                             const recentMessages = historyToSave.slice(historyToSave.length - RECENT_KEEP_COUNT);
                             const summary = await (0, llmService_1.compactConversationHistory)(messagesToCompact);
-                            // Replace old history with the compressed memory block!
                             historyToSave = [
                                 { role: 'assistant', isCompacted: true, content: summary },
                                 ...recentMessages
                             ];
-                            // Push the newly compacted array back to the React UI
                             this._view?.webview.postMessage({ type: 'historyCompacted', messages: historyToSave });
                         }
                         catch (e) {
@@ -893,118 +846,133 @@ class SidebarProvider {
                     }, async (progress, token) => {
                         token.onCancellationRequested(() => this._activeTaskController?.abort());
                         const taskStartTime = Date.now();
-                        const gitCheck = await this._terminalManager?.runCommandWithCapture("git status", rootUri.fsPath);
-                        const isGitRepo = gitCheck && gitCheck.success;
-                        this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Generating MCTS Execution Branches...` });
-                        let approaches = [originalTaskQuery];
-                        if (isGitRepo) {
-                            approaches = await (0, llmService_1.generateMCTSApproaches)(originalTaskQuery, "Generating alternative architectures...");
-                        }
-                        let success = false;
-                        let winningApproach = 0;
-                        let finalMergedFilepath = "";
-                        for (let i = 0; i < approaches.length; i++) {
-                            if (success || token.isCancellationRequested)
-                                break;
-                            const approachNum = i + 1;
-                            const isMCTSActive = approaches.length > 1;
-                            const currentApproachPrompt = isMCTSActive ? `Original Task: ${originalTaskQuery}\n\nImplementation Directive (Approach ${approachNum}):\n${approaches[i]}` : originalTaskQuery;
-                            const sandboxBranch = `nexus-mcts-sandbox-${Date.now()}`;
-                            try {
-                                if (isMCTSActive) {
-                                    await this._terminalManager?.runCommandWithCapture(`git stash`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git checkout -b ${sandboxBranch}`, rootUri.fsPath);
-                                }
-                                let previousFailures = "";
+                        // 🚀 MASTER TRY-CATCH: Protects the UI from freezing on catastrophic Node.js crashes
+                        try {
+                            const gitCheck = await this._terminalManager?.runCommandWithCapture("git status", rootUri.fsPath);
+                            const isGitRepo = gitCheck && gitCheck.success;
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Generating MCTS Execution Branches...` });
+                            let approaches = [originalTaskQuery];
+                            if (isGitRepo) {
+                                approaches = await (0, llmService_1.generateMCTSApproaches)(originalTaskQuery, "Generating alternative architectures...");
+                            }
+                            let success = false;
+                            let winningApproach = 0;
+                            let finalMergedFilepath = "";
+                            for (let i = 0; i < approaches.length; i++) {
+                                if (success || token.isCancellationRequested)
+                                    break;
+                                const approachNum = i + 1;
+                                const isMCTSActive = approaches.length > 1;
+                                const currentApproachPrompt = isMCTSActive ? `Original Task: ${originalTaskQuery}\n\nImplementation Directive (Approach ${approachNum}):\n${approaches[i]}` : originalTaskQuery;
+                                const sandboxBranch = `nexus-mcts-sandbox-${Date.now()}`;
                                 try {
-                                    const failData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, 'nexuscode', 'NEXUS_FAILURES.md'));
-                                    previousFailures = new TextDecoder().decode(failData);
-                                }
-                                catch { }
-                                //  THE FIX: Define the missing variables for the Swarm Coordinator
-                                const currentFileContent = "";
-                                const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
-                                //  THE SWARM ORCHESTRATOR 
-                                const finalDiff = await Coordinator_1.SwarmCoordinator.executeTask(currentApproachPrompt, rootUri.fsPath, currentFileContent, lspBlastRadiusContext, this._activeRequirements, this._activeDesign, previousFailures, data.codingStyle || 'precise', (msg, stepType, details) => {
-                                    // Always update the tiny status bar
-                                    this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
-                                    //  ONLY drop a persistent UI card if stepType is provided!
-                                    if (stepType && details) {
-                                        this._view?.webview.postMessage({
-                                            type: 'agentStep',
-                                            task: data.task,
-                                            stepType: stepType,
-                                            description: msg.replace('Coordinator: ', ''),
-                                            details: details
-                                        });
+                                    if (isMCTSActive) {
+                                        await this._terminalManager?.runCommandWithCapture(`git stash`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git checkout -b ${sandboxBranch}`, rootUri.fsPath);
                                     }
-                                }, (streamToken) => {
-                                    this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: streamToken });
-                                });
-                                if (!finalDiff)
-                                    throw new Error("Swarm failed to generate verified code.");
-                                const realFilepath = finalDiff.filepath;
-                                const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
-                                let fileContent = "";
-                                try {
-                                    const fileData = await vscode.workspace.fs.readFile(fileUri);
-                                    fileContent = new TextDecoder().decode(fileData);
+                                    let previousFailures = "";
+                                    try {
+                                        const failData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, 'nexuscode', 'NEXUS_FAILURES.md'));
+                                        previousFailures = new TextDecoder().decode(failData);
+                                    }
+                                    catch { }
+                                    const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
+                                    //  THE SWARM ORCHESTRATOR (PHASE 4: Array of Diffs)
+                                    const finalDiffs = await Coordinator_1.SwarmCoordinator.executeTask(currentApproachPrompt, rootUri.fsPath, "", // Deprecated content parameter, dynamic fetch handled by Swarm
+                                    lspBlastRadiusContext, this._activeRequirements, this._activeDesign, previousFailures, data.codingStyle || 'precise', (msg, stepType, details) => {
+                                        this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
+                                        if (stepType && details) {
+                                            this._view?.webview.postMessage({
+                                                type: 'agentStep',
+                                                task: data.task,
+                                                stepType: stepType,
+                                                description: msg.replace('Coordinator: ', ''),
+                                                details: details
+                                            });
+                                        }
+                                    }, (streamToken) => {
+                                        this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: streamToken });
+                                    });
+                                    if (!finalDiffs || finalDiffs.length === 0)
+                                        throw new Error("Swarm failed to generate verified code.");
+                                    // 🚀 UPGRADED: Loop through every diff generated by the Swarm and apply them!
+                                    for (const finalDiff of finalDiffs) {
+                                        const realFilepath = finalDiff.filepath;
+                                        const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
+                                        let fileContent = "";
+                                        try {
+                                            const fileData = await vscode.workspace.fs.readFile(fileUri);
+                                            fileContent = new TextDecoder().decode(fileData);
+                                        }
+                                        catch {
+                                            await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
+                                        }
+                                        // Apply the Phase 1 Search/Replace logic
+                                        const finalPerfectCode = applySearchReplace(fileContent, finalDiff.searchBlock, finalDiff.replaceBlock, finalDiff.fullOutputBuffer);
+                                        const document = await vscode.workspace.openTextDocument(fileUri);
+                                        const editor = await vscode.window.showTextDocument(document, { preview: false });
+                                        const mergedHeader = (0, commentStyles_1.getAIHeader)(realFilepath, currentApproachPrompt, fileContent) + "\n";
+                                        const finalCodePayload = mergedHeader + finalPerfectCode;
+                                        await editor.edit(b => {
+                                            b.delete(new vscode.Range(0, 0, document.lineCount, 0));
+                                            b.insert(new vscode.Position(0, 0), finalCodePayload);
+                                        });
+                                        await document.save();
+                                        // Track provenance for EACH file edited in the Sub-Task graph
+                                        if (this._tracker) {
+                                            this._tracker.trackStreamedReview(editor, fileContent, data.task, 0, document.lineCount);
+                                        }
+                                        finalMergedFilepath = realFilepath; // Keep the last one for the UI success message
+                                    }
+                                    // MCTS Success Merge
+                                    if (isMCTSActive) {
+                                        await this._terminalManager?.runCommandWithCapture(`git add . && git commit -m "chore: nexus mcts approach ${approachNum}"`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git merge ${sandboxBranch} --squash`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git stash pop`, rootUri.fsPath);
+                                    }
+                                    success = true;
+                                    winningApproach = approachNum;
                                 }
-                                catch {
-                                    await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0));
+                                catch (error) {
+                                    if (isMCTSActive) {
+                                        await this._terminalManager?.runCommandWithCapture(`git reset --hard`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
+                                    }
+                                    else {
+                                        vscode.window.showErrorMessage(`Execution failed: ${error.message}`);
+                                    }
                                 }
-                                const finalPerfectCode = injectCodeIntoContent(fileContent, finalDiff.targetLine || '', finalDiff.code, finalDiff.action);
-                                const document = await vscode.workspace.openTextDocument(fileUri);
-                                const editor = await vscode.window.showTextDocument(document, { preview: false });
-                                const mergedHeader = (0, commentStyles_1.getAIHeader)(realFilepath, currentApproachPrompt, fileContent) + "\n";
-                                const finalCodePayload = mergedHeader + finalPerfectCode;
-                                await editor.edit(b => {
-                                    b.delete(new vscode.Range(0, 0, document.lineCount, 0));
-                                    b.insert(new vscode.Position(0, 0), finalCodePayload);
-                                });
-                                // We save the document so the Adversarial node.js script can test it on disk...
-                                await document.save();
-                                //  THE FIX: RESTORE HUMAN INLINE APPROVAL 
-                                // Register the AI's action with the ProvenanceTracker using the exact method signature!
-                                if (this._tracker) {
-                                    this._tracker.trackStreamedReview(editor, fileContent, // The original content before the AI touched it
-                                    data.task, // The taskId to bind to the Accept/Reject buttons
-                                    0, // Start line of the edit
-                                    document.lineCount // End line of the edit
-                                    );
-                                }
-                                // MCTS Success Merge
-                                if (isMCTSActive) {
-                                    await this._terminalManager?.runCommandWithCapture(`git add . && git commit -m "chore: nexus mcts approach ${approachNum}"`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git merge ${sandboxBranch} --squash`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git stash pop`, rootUri.fsPath);
-                                }
-                                success = true;
-                                winningApproach = approachNum;
-                                finalMergedFilepath = realFilepath;
+                            } // End of MCTS approaches loop
+                            // 🚀 THE FIX: Aggressively update the task status so the UI spinner stops!
+                            if (success) {
+                                const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
+                                // Trigger the green checkmark
+                                this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: "approved", filepath: finalMergedFilepath, summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)` });
+                                // Guarantee state sync
+                                this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'approved', summary: `Updated ${finalMergedFilepath}` });
                             }
-                            catch (error) {
-                                if (isMCTSActive) {
-                                    await this._terminalManager?.runCommandWithCapture(`git reset --hard`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
-                                }
-                                else {
-                                    vscode.window.showErrorMessage(`Execution failed: ${error.message}`);
-                                }
+                            else {
+                                const errorSummary = approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.`;
+                                // 🔥 The UI expects taskStatusUpdate to kill the spinner on failure
+                                this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: errorSummary });
+                                this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: errorSummary });
                             }
                         }
-                        if (success) {
-                            const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
-                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: "approved", filepath: finalMergedFilepath, summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)` });
+                        catch (fatalError) {
+                            // Catch catastrophic Node.js crashes so the UI doesn't hang forever
+                            const safeErrorMessage = fatalError instanceof Error ? fatalError.message : "Unknown Fatal Error";
+                            vscode.window.showErrorMessage(`Nexus Catastrophic Failure: ${safeErrorMessage}`);
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Fatal Crash: ${safeErrorMessage}` });
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error' });
                         }
-                        else {
-                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.` });
+                        finally {
+                            // Always clean up the execution state
+                            this._activeTaskController = undefined;
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                         }
-                        this._activeTaskController = undefined;
-                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                     });
                     break;
                 }

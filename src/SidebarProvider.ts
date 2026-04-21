@@ -53,75 +53,25 @@ import { createWorkspaceStructure } from "./workspaceManager";
 import { TerminalManager } from './terminalManager';
 import { MetaContextManager } from "./metaContextManager";
 
-function injectCodeIntoContent(originalContent: string, target: string, newCode: string, action: string): string {
-    // 🔥 THE FIX: Aggressively strip any accidental markdown or XML leakage 
-    // to prevent syntax hallucinations from entering the source code.
-    let cleanedCode = newCode
-        .replace(/```[a-z]*\n?/gi, '')
-        .replace(/```/g, '')
-        .replace(/<\/?(target|filepath|action|plan|reasoning|command|self_critique)[^>]*>/gi, '')
-        .trim();
+function applySearchReplace(originalContent: string, searchBlock: string, replaceBlock: string, fullBuffer: string): string {
+    // 1. Clean the blocks of any accidental markdown formatting the LLM might have included
+    const cleanSearch = searchBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
+    const cleanReplace = replaceBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
 
-    // 🚀 DETERMINISTIC OVERWRITE: 
-    // If the action is 'replace' (triggered by the Rewriter agent), 
-    // ignore the old content and return the new code as the full file.
-    if (action === 'replace') {
-        return cleanedCode;
+    // 2. If no search block was found by the regex, the LLM likely generated the whole file.
+    // We fallback to just returning the cleaned full buffer.
+    if (!cleanSearch) {
+        return fullBuffer.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
     }
 
-    if (action === 'append') {
-        return originalContent + "\n\n" + cleanedCode;
+    // 3. Strict substring replacement
+    if (originalContent.includes(cleanSearch)) {
+        return originalContent.replace(cleanSearch, cleanReplace);
+    } else {
+        // 🔥 THE POISON PILL: If the SEARCH block doesn't perfectly match the file, we abort.
+        // This prevents the agent from corrupting the file with hallucinatory edits.
+        throw new Error("Target SEARCH block not found in file. The AI hallucinated the existing code. Aborting to prevent corruption.");
     }
-
-    // Fallback if no target is provided
-    if (!target) {
-        return originalContent + "\n\n" + cleanedCode;
-    }
-
-    const lines = originalContent.split('\n');
-    let startIdx = -1;
-
-    // Locate the exact target line for AST Splicing
-    for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes(target)) {
-            startIdx = i;
-            break;
-        }
-    }
-
-    if (startIdx === -1) {
-        // 🔥 THE POISON PILL: Strict verification to prevent misaligned edits.
-        throw new Error(`Target "${target}" not found in file. Aborting injection to prevent code corruption.`);
-    }
-
-    // Handle "insert_before" (typically for new routes or imports)
-    if (action === 'insert_before') {
-        const before = lines.slice(0, startIdx).join('\n');
-        const after = lines.slice(startIdx).join('\n');
-        return before + "\n" + cleanedCode + "\n\n" + after;
-    }
-
-    // Handle block replacement (finding matching braces for functions/classes)
-    let endIdx = startIdx;
-    let braces = 0;
-    let foundBrace = false;
-
-    for (let i = startIdx; i < lines.length; i++) {
-        const line = lines[i];
-        for (let char of line) {
-            if (char === '{') { braces++; foundBrace = true; }
-            if (char === '}') { braces--; }
-        }
-        if (foundBrace && braces === 0) {
-            endIdx = i;
-            break;
-        }
-    }
-
-    const before = lines.slice(0, startIdx).join('\n');
-    const after = lines.slice(endIdx + 1).join('\n');
-
-    return before + "\n" + cleanedCode + "\n" + after;
 }
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -169,9 +119,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private async confirmAndRunCommand(
-        command: string, 
-        workspacePath: string, 
-        progressMessage: string, 
+        command: string,
+        workspacePath: string,
+        progressMessage: string,
         isAutopilot: boolean = false,
         onStream?: (chunk: string) => void
     ): Promise<{ success: boolean, output: string } | undefined> {
@@ -187,16 +137,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         if (isAutopilot || this._isMetaMode) {
             this._view?.webview.postMessage({ type: 'statusUpdate', message: `🤖 Autopilot Executing: ${command}` });
-            return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream); 
+            return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream);
         }
 
         // 🔥 THE PROMISE LOCK: Halt Node.js execution until the human clicks Allow or Block!
         const isApproved = await new Promise<boolean>((resolve) => {
             this._pendingCommandResolver = resolve;
-            this._view?.webview.postMessage({ 
-                type: 'requestCommandApproval', 
-                command: command, 
-                message: progressMessage 
+            this._view?.webview.postMessage({
+                type: 'requestCommandApproval',
+                command: command,
+                message: progressMessage
             });
         });
 
@@ -204,7 +154,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         if (isApproved) {
             this._view?.webview.postMessage({ type: 'statusUpdate', message: progressMessage });
-            return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream); 
+            return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream);
         } else {
             vscode.window.showInformationMessage("Command execution blocked by user.");
             return { success: false, output: "USER_BLOCKED" };
@@ -753,13 +703,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             const summary = await compactConversationHistory(messagesToCompact);
 
-                            // Replace old history with the compressed memory block!
                             historyToSave = [
                                 { role: 'assistant', isCompacted: true, content: summary },
                                 ...recentMessages
                             ];
 
-                            // Push the newly compacted array back to the React UI
                             this._view?.webview.postMessage({ type: 'historyCompacted', messages: historyToSave });
                         } catch (e) {
                             console.error("Compaction failed", e);
@@ -855,19 +803,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             this._view?.webview.postMessage({ type: "structureResponse", value: result.plan });
 
-                        } else if (intent === 'explore'){
+                        } else if (intent === 'explore') {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "🔍 Agentic Exploration: Investigating..." });
-                            
+
                             // 🔥 Create a dummy task ID so the UI renders the beautiful Swarm Logs
                             const exploreTaskId = "Exploration-" + Date.now();
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: exploreTaskId, status: 'reviewing', summary: 'Gathering forensic evidence...' });
 
                             const workspacePath = await this.getTargetContext();
-                            
+
                             // 🤖 THE CLAUDE CODE LOOP: It will now use grep and read_file autonomously!
                             const explorationContext = await runAgenticExploration(
-                                data.text, 
-                                workspacePath, 
+                                data.text,
+                                workspacePath,
                                 (stepType, desc, details) => {
                                     this._view?.webview.postMessage({
                                         type: 'agentStep',
@@ -886,15 +834,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             // Stream the final analysis back to the chat window
                             await streamQwenChat(
-                                data.text, 
+                                data.text,
                                 fullContext,
-                                data.history || [], 
+                                data.history || [],
                                 (token) => { this._view?.webview.postMessage({ type: 'chatToken', token: token }); },
                                 this._activeTaskController.signal
                             );
-                            
+
                             this._view?.webview.postMessage({ type: 'taskCompleted', task: exploreTaskId, status: 'approved', summary: 'Exploration Complete' });
-                        }else {
+                        } else {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Gathering context..." });
 
                             const workspacePath = await this.getTargetContext();
@@ -976,145 +924,165 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         token.onCancellationRequested(() => this._activeTaskController?.abort());
                         const taskStartTime = Date.now();
 
-                        const gitCheck = await this._terminalManager?.runCommandWithCapture("git status", rootUri.fsPath);
-                        const isGitRepo = gitCheck && gitCheck.success;
+                        // 🚀 MASTER TRY-CATCH: Protects the UI from freezing on catastrophic Node.js crashes
+                        try {
+                            const gitCheck = await this._terminalManager?.runCommandWithCapture("git status", rootUri.fsPath);
+                            const isGitRepo = gitCheck && gitCheck.success;
 
-                        this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Generating MCTS Execution Branches...` });
-                        let approaches = [originalTaskQuery];
-                        if (isGitRepo) {
-                            approaches = await generateMCTSApproaches(originalTaskQuery, "Generating alternative architectures...");
-                        }
-
-                        let success = false;
-                        let winningApproach = 0;
-                        let finalMergedFilepath = "";
-
-                        for (let i = 0; i < approaches.length; i++) {
-                            if (success || token.isCancellationRequested) break;
-
-                            const approachNum = i + 1;
-                            const isMCTSActive = approaches.length > 1;
-                            const currentApproachPrompt = isMCTSActive ? `Original Task: ${originalTaskQuery}\n\nImplementation Directive (Approach ${approachNum}):\n${approaches[i]}` : originalTaskQuery;
-
-                            const sandboxBranch = `nexus-mcts-sandbox-${Date.now()}`;
-
-                            try {
-                                if (isMCTSActive) {
-                                    await this._terminalManager?.runCommandWithCapture(`git stash`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git checkout -b ${sandboxBranch}`, rootUri.fsPath);
-                                }
-
-                                let previousFailures = "";
-                                try {
-                                    const failData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, 'nexuscode', 'NEXUS_FAILURES.md'));
-                                    previousFailures = new TextDecoder().decode(failData);
-                                } catch { }
-
-                                //  THE FIX: Define the missing variables for the Swarm Coordinator
-                                const currentFileContent = "";
-                                const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
-
-                                //  THE SWARM ORCHESTRATOR 
-                                const finalDiff = await SwarmCoordinator.executeTask(
-                                    currentApproachPrompt,
-                                    rootUri.fsPath,
-                                    currentFileContent,
-                                    lspBlastRadiusContext,
-                                    this._activeRequirements,
-                                    this._activeDesign,
-                                    previousFailures,
-                                    data.codingStyle || 'precise',
-                                    (msg, stepType, details) => {
-                                        // Always update the tiny status bar
-                                        this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
-
-                                        //  ONLY drop a persistent UI card if stepType is provided!
-                                        if (stepType && details) {
-                                            this._view?.webview.postMessage({
-                                                type: 'agentStep',
-                                                task: data.task,
-                                                stepType: stepType,
-                                                description: msg.replace('Coordinator: ', ''),
-                                                details: details
-                                            });
-                                        }
-                                    },
-                                    (streamToken) => {
-                                        this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: streamToken });
-                                    }
-                                );
-
-                                if (!finalDiff) throw new Error("Swarm failed to generate verified code.");
-
-                                const realFilepath = finalDiff.filepath;
-                                const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
-
-                                let fileContent = "";
-                                try {
-                                    const fileData = await vscode.workspace.fs.readFile(fileUri);
-                                    fileContent = new TextDecoder().decode(fileData);
-                                } catch { await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0)); }
-
-                                const finalPerfectCode = injectCodeIntoContent(fileContent, finalDiff.targetLine || '', finalDiff.code, finalDiff.action);
-
-                                const document = await vscode.workspace.openTextDocument(fileUri);
-                                const editor = await vscode.window.showTextDocument(document, { preview: false });
-                                const mergedHeader = getAIHeader(realFilepath, currentApproachPrompt, fileContent) + "\n";
-                                const finalCodePayload = mergedHeader + finalPerfectCode;
-
-                                await editor.edit(b => {
-                                    b.delete(new vscode.Range(0, 0, document.lineCount, 0));
-                                    b.insert(new vscode.Position(0, 0), finalCodePayload);
-                                });
-
-                                // We save the document so the Adversarial node.js script can test it on disk...
-                                await document.save();
-
-                                //  THE FIX: RESTORE HUMAN INLINE APPROVAL 
-                                // Register the AI's action with the ProvenanceTracker using the exact method signature!
-                                if (this._tracker) {
-                                    this._tracker.trackStreamedReview(
-                                        editor,
-                                        fileContent,     // The original content before the AI touched it
-                                        data.task,      // The taskId to bind to the Accept/Reject buttons
-                                        0,              // Start line of the edit
-                                        document.lineCount // End line of the edit
-                                    );
-                                }
-
-                                // MCTS Success Merge
-                                if (isMCTSActive) {
-                                    await this._terminalManager?.runCommandWithCapture(`git add . && git commit -m "chore: nexus mcts approach ${approachNum}"`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git merge ${sandboxBranch} --squash`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git stash pop`, rootUri.fsPath);
-                                }
-
-                                success = true;
-                                winningApproach = approachNum;
-                                finalMergedFilepath = realFilepath;
-
-                            } catch (error: any) {
-                                if (isMCTSActive) {
-                                    await this._terminalManager?.runCommandWithCapture(`git reset --hard`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
-                                    await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
-                                } else {
-                                    vscode.window.showErrorMessage(`Execution failed: ${error.message}`);
-                                }
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: `Nexus: Generating MCTS Execution Branches...` });
+                            let approaches = [originalTaskQuery];
+                            if (isGitRepo) {
+                                approaches = await generateMCTSApproaches(originalTaskQuery, "Generating alternative architectures...");
                             }
-                        }
 
-                        if (success) {
-                            const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
-                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: "approved", filepath: finalMergedFilepath, summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)` });
-                        } else {
-                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.` });
-                        }
+                            let success = false;
+                            let winningApproach = 0;
+                            let finalMergedFilepath = "";
 
-                        this._activeTaskController = undefined;
-                        this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                            for (let i = 0; i < approaches.length; i++) {
+                                if (success || token.isCancellationRequested) break;
+
+                                const approachNum = i + 1;
+                                const isMCTSActive = approaches.length > 1;
+                                const currentApproachPrompt = isMCTSActive ? `Original Task: ${originalTaskQuery}\n\nImplementation Directive (Approach ${approachNum}):\n${approaches[i]}` : originalTaskQuery;
+
+                                const sandboxBranch = `nexus-mcts-sandbox-${Date.now()}`;
+
+                                try {
+                                    if (isMCTSActive) {
+                                        await this._terminalManager?.runCommandWithCapture(`git stash`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git checkout -b ${sandboxBranch}`, rootUri.fsPath);
+                                    }
+
+                                    let previousFailures = "";
+                                    try {
+                                        const failData = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, 'nexuscode', 'NEXUS_FAILURES.md'));
+                                        previousFailures = new TextDecoder().decode(failData);
+                                    } catch { }
+
+                                    const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
+
+                                    //  THE SWARM ORCHESTRATOR (PHASE 4: Array of Diffs)
+                                    const finalDiffs = await SwarmCoordinator.executeTask(
+                                        currentApproachPrompt,
+                                        rootUri.fsPath,
+                                        "", // Deprecated content parameter, dynamic fetch handled by Swarm
+                                        lspBlastRadiusContext,
+                                        this._activeRequirements,
+                                        this._activeDesign,
+                                        previousFailures,
+                                        data.codingStyle || 'precise',
+                                        (msg, stepType, details) => {
+                                            this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
+                                            if (stepType && details) {
+                                                this._view?.webview.postMessage({
+                                                    type: 'agentStep',
+                                                    task: data.task,
+                                                    stepType: stepType,
+                                                    description: msg.replace('Coordinator: ', ''),
+                                                    details: details
+                                                });
+                                            }
+                                        },
+                                        (streamToken) => {
+                                            this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: streamToken });
+                                        }
+                                    );
+
+                                    if (!finalDiffs || finalDiffs.length === 0) throw new Error("Swarm failed to generate verified code.");
+
+                                    // 🚀 UPGRADED: Loop through every diff generated by the Swarm and apply them!
+                                    for (const finalDiff of finalDiffs) {
+                                        const realFilepath = finalDiff.filepath;
+                                        const fileUri = vscode.Uri.joinPath(rootUri, realFilepath);
+
+                                        let fileContent = "";
+                                        try {
+                                            const fileData = await vscode.workspace.fs.readFile(fileUri);
+                                            fileContent = new TextDecoder().decode(fileData);
+                                        } catch { await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0)); }
+
+                                        // Apply the Phase 1 Search/Replace logic
+                                        const finalPerfectCode = applySearchReplace(fileContent, finalDiff.searchBlock, finalDiff.replaceBlock, finalDiff.fullOutputBuffer);
+
+                                        const document = await vscode.workspace.openTextDocument(fileUri);
+                                        const editor = await vscode.window.showTextDocument(document, { preview: false });
+                                        const mergedHeader = getAIHeader(realFilepath, currentApproachPrompt, fileContent) + "\n";
+                                        const finalCodePayload = mergedHeader + finalPerfectCode;
+
+                                        await editor.edit(b => {
+                                            b.delete(new vscode.Range(0, 0, document.lineCount, 0));
+                                            b.insert(new vscode.Position(0, 0), finalCodePayload);
+                                        });
+
+                                        await document.save();
+
+                                        // Track provenance for EACH file edited in the Sub-Task graph
+                                        if (this._tracker) {
+                                            this._tracker.trackStreamedReview(
+                                                editor,
+                                                fileContent,     
+                                                data.task,      
+                                                0,              
+                                                document.lineCount 
+                                            );
+                                        }
+                                        
+                                        finalMergedFilepath = realFilepath; // Keep the last one for the UI success message
+                                    }
+
+                                    // MCTS Success Merge
+                                    if (isMCTSActive) {
+                                        await this._terminalManager?.runCommandWithCapture(`git add . && git commit -m "chore: nexus mcts approach ${approachNum}"`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git merge ${sandboxBranch} --squash`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git stash pop`, rootUri.fsPath);
+                                    }
+
+                                    success = true;
+                                    winningApproach = approachNum;
+
+                                } catch (error: any) {
+                                    if (isMCTSActive) {
+                                        await this._terminalManager?.runCommandWithCapture(`git reset --hard`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
+                                        await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
+                                    } else {
+                                        vscode.window.showErrorMessage(`Execution failed: ${error.message}`);
+                                    }
+                                }
+                            } // End of MCTS approaches loop
+
+                            // 🚀 THE FIX: Aggressively update the task status so the UI spinner stops!
+                            if (success) {
+                                const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
+                                
+                                // Trigger the green checkmark
+                                this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: "approved", filepath: finalMergedFilepath, summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)` });
+                                
+                                // Guarantee state sync
+                                this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'approved', summary: `Updated ${finalMergedFilepath}` });
+                            } else {
+                                const errorSummary = approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.`;
+                                
+                                // 🔥 The UI expects taskStatusUpdate to kill the spinner on failure
+                                this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: errorSummary });
+                                this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: errorSummary });
+                            }
+
+                        } catch (fatalError: any) {
+                            // Catch catastrophic Node.js crashes so the UI doesn't hang forever
+                            const safeErrorMessage = fatalError instanceof Error ? fatalError.message : "Unknown Fatal Error";
+                            vscode.window.showErrorMessage(`Nexus Catastrophic Failure: ${safeErrorMessage}`);
+                            
+                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Fatal Crash: ${safeErrorMessage}` });
+                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error' });
+                        } finally {
+                            // Always clean up the execution state
+                            this._activeTaskController = undefined;
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
+                        }
                     });
                     break;
                 }

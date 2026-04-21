@@ -33,6 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.resilientFetch = resilientFetch;
 exports.getLLMConfig = getLLMConfig;
 exports.safeParseJSON = safeParseJSON;
 exports.determineIntent = determineIntent;
@@ -60,6 +61,8 @@ exports.generateMCTSApproaches = generateMCTSApproaches;
 const vscode = __importStar(require("vscode"));
 const agentTools_1 = require("./agentTools");
 const extension_1 = require("./extension");
+const RetryManager_1 = require("./infrastructure/RetryManager");
+const RateLimitManager_1 = require("./infrastructure/RateLimitManager");
 function decodeHTMLEntities(text) {
     const entities = {
         '&amp;': '&',
@@ -71,6 +74,20 @@ function decodeHTMLEntities(text) {
     let decoded = text.replace(/&[a-z0-9]+;/gi, (match) => entities[match] || match);
     decoded = decoded.replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(dec));
     return decoded;
+}
+async function resilientFetch(url, options, logCallback) {
+    return await RetryManager_1.RetryManager.executeWithExponentialBackoff(async () => {
+        const response = await fetch(url, options);
+        // Let the RateLimitManager inspect the headers. If it's a 429, it will pause the thread
+        // and throw an error to trigger the RetryManager to try again.
+        return await RateLimitManager_1.RateLimitManager.handleThrottling(response, logCallback);
+    }, 3, 1000, (attempt, delay, error) => {
+        const msg = `⚠️ Nexus API Hiccup (${error.message}). Retrying in ${delay / 1000}s (Attempt ${attempt}/3)...`;
+        if (logCallback)
+            logCallback(msg);
+        else
+            console.warn(msg);
+    });
 }
 async function getLLMConfig() {
     const config = vscode.workspace.getConfiguration('nexuscode');
@@ -235,7 +252,7 @@ Analyze the user's prompt and classify it into EXACTLY ONE of these four categor
 Reply ONLY with the exact word: "build", "explore", "explain", or "ask".`;
     const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await fetch(endpoint, {
+        const response = await resilientFetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
             body: JSON.stringify({
@@ -291,7 +308,7 @@ Always format your response in clean, highly readable Markdown. Use bullet point
         return { role: msg.role === 'user' ? 'user' : 'assistant', content: safeContent };
     });
     try {
-        const response = await fetch(endpoint, {
+        const response = await resilientFetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
             body: JSON.stringify({
@@ -391,7 +408,7 @@ async function askQwenForRequirements(rawIdea, contextStr = "", abortSignal) {
     5. PERFECT JSON SYNTAX: Properly close all arrays and strings.`;
     const userPrompt = contextStr ? `--- ATTACHED DOCUMENTATION CONTEXT ---\n${contextStr}\n\n--- RAW IDEA ---\n${rawIdea}` : `Raw Idea: ${rawIdea}`;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -433,7 +450,7 @@ async function askQwenForStructure(prompt, projectContext) {
     }
     \`\`\``;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -476,7 +493,7 @@ async function askQwenForTargetFile(taskDescription, projectContext, lastActiveF
     ${contextHint}
     Return ONLY valid JSON: { "filepath": "src/file.ts", "reasoning": "..." }`;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -525,7 +542,7 @@ async function runAgenticExploration(taskDescription, workspaceRoot, statusCallb
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 15000);
-            const response = await fetch(endpoint, {
+            const response = await resilientFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
                 body: JSON.stringify({ model: model, messages: messages, tools: dynamicTools, tool_choice: "auto", temperature: 0.1 }),
@@ -624,7 +641,7 @@ async function askQwenForTests(fileName, fileContent, projectRules = "") {
     
     Return valid JSON: { "installCommand": "...", "testCommand": "...", "filepath": "...", "code": "..." }`;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -650,7 +667,7 @@ async function askQwenToFixError(errorOutput, sourceFilePath, sourceCode, testFi
     Respond with valid XML: <filepath>path/to/file</filepath> <code>...</code>`;
     const userPrompt = `Source: ${sourceFilePath}\n\`\`\`\n${sourceCode}\n\`\`\`\nTest: ${testFilePath}\n\`\`\`\n${testCode}\n\`\`\`\nError:\n\`\`\`\n${errorOutput}\n\`\`\``;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1 })
@@ -668,7 +685,7 @@ async function askQwenToFixError(errorOutput, sourceFilePath, sourceCode, testFi
 async function askQwenForAtomicEdits(tasks, projectContext, codingStyle) {
     const systemPrompt = `Return a JSON array of edits: [{ "filepath": "...", "code": "...", "action": "replace" }]`;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -736,7 +753,7 @@ async function streamQwenForCode(taskDescription, availableFiles = [], currentFi
     \`\`\`
     <command></command>`;
     const userPrompt = currentFileContent.trim() ? `Task: ${taskDescription}\n\nEXISTING FILE:\n\`\`\`\n${currentFileContent}\n\`\`\`` : `Task: ${taskDescription}`;
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1, stream: true }),
@@ -879,7 +896,7 @@ async function askQwenForDesign(requirements, abortSignal) {
 Analyze the provided PRD and design a highly scalable System Architecture.
 
 CRITICAL INSTRUCTION - AGENT-NATIVE FORMATTING:
-You must wrap your output in XML structural tags so that other AI agents can parse it deterministically.
+You must wrap your top-level sections in XML structural tags so that other AI agents can parse it deterministically.
 Use YAML frontmatter at the very top.
 
 Follow this exact format:
@@ -892,20 +909,26 @@ type: architecture_design
 
 <architecture_components>
 ## Core Components
-(Detail your frontend, backend, database layers here)
+(Use standard Markdown to detail your frontend, backend, and database layers)
 </architecture_components>
 
 <data_models>
 ## Data Models
-(Detail your schemas, e.g., <model id="User">...</model>)
+(Use Markdown tables to define schemas. DO NOT use nested XML tags like <field> for properties.
+Example:
+### User Model
+| Field | Type | Description |
+|---|---|---|
+| id | UUID | Unique ID |
+)
 </data_models>
 
 <api_routes>
 ## API Specs
-(Detail your endpoints, e.g., <api method="POST" route="/login">...</api>)
+(Use standard Markdown lists or tables to describe routes. DO NOT use <request> or <param> XML tags.)
 </api_routes>`;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -995,7 +1018,7 @@ async function askQwenForProjectTasks(requirements, design, existingStructure, a
       ]
     }`;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -1094,7 +1117,7 @@ async function askQwenToVerifyTask(taskDescription, requirements, codebaseContex
         "reasoning": "Explain exactly what criteria were met, or what is missing if you reject it."
     }`;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -1136,7 +1159,7 @@ async function askQwenToUpdatePRD(prdContext, taskDescription, filepath, newCode
     CRITICAL: If the code does NOT fully satisfy a criteria, do not include it. Return an empty array [] if nothing was fully completed.`;
     const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await fetch(endpoint, {
+        const response = await resilientFetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
             body: JSON.stringify({
@@ -1180,7 +1203,7 @@ async function reviewCodeCompleteness(taskDescription, prdContext, generatedCode
     const userPrompt = `TASK:\n${taskDescription}\n\nPRD CONTEXT:\n${prdContext}\n\nGENERATED CODE TO REVIEW:\n\`\`\`\n${generatedCode}\n\`\`\``;
     const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await fetch(endpoint, {
+        const response = await resilientFetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
             body: JSON.stringify({
@@ -1223,7 +1246,7 @@ async function askQwenToHealGlobalBuild(buildErrors, filesContext, codingStyle) 
     const userPrompt = `COMPILER ERRORS:\n\`\`\`\n${buildErrors}\n\`\`\`\n\nBROKEN FILES CONTEXT:\n${filesContext}`;
     const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await fetch(endpoint, {
+        const response = await resilientFetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
             body: JSON.stringify({
@@ -1257,7 +1280,7 @@ async function askSecurityMonitor(command) {
     If the command violates the threat model, reply ONLY with: BLOCK`;
     const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await fetch(endpoint, {
+        const response = await resilientFetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
             body: JSON.stringify({
@@ -1284,7 +1307,7 @@ async function generateAdversarialTest(task, filepath, code) {
     If the tests pass, the script MUST console.log("VERIFICATION_PASSED").
     If they fail, it MUST throw an Error.`;
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -1314,7 +1337,7 @@ async function compactConversationHistory(messages) {
     </memory_state>`;
     const formattedHistory = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await fetch(endpoint, {
+    const response = await resilientFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -1348,7 +1371,7 @@ async function generateMCTSApproaches(task, context) {
     }`;
     const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await fetch(endpoint, {
+        const response = await resilientFetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
             body: JSON.stringify({

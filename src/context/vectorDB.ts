@@ -2,10 +2,15 @@
 import * as vscode from 'vscode';
 import { getLLMConfig } from '../llmService';
 
-interface DocumentChunk {
+export interface DocumentChunk {
     filepath: string;
     content: string;
     embedding: number[];
+}
+
+// 🚀 ADD THIS: Create a type specifically for search results
+export interface ScoredChunk extends DocumentChunk {
+    score: number;
 }
 
 export class VectorDatabase {
@@ -79,7 +84,7 @@ export class VectorDatabase {
     /**
      * Performs a K-Nearest Neighbors (KNN) search across the high-dimensional space.
      */
-    public async search(query: string, topK: number = 5): Promise<DocumentChunk[]> {
+    public async search(query: string, topK: number = 5): Promise<ScoredChunk[]> {
         if (this.chunks.length === 0) return [];
 
         const queryEmbedding = await this.getEmbedding(query);

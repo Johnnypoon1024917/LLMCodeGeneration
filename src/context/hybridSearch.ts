@@ -1,7 +1,7 @@
 // src/context/hybridSearch.ts
 import * as vscode from 'vscode';
-import { retrieveContext } from './ragIndexer';
-import { getSmartASTContext } from './codeGraph'; // 🔥 Brought in the AST Graph!
+import { globalVectorDB } from './vectorDB'; // 🔥 Bypass the markdown formatter and hit the DB directly
+import { getSmartASTContext } from './codeGraph';
 
 export interface SearchResult {
     filepath: string;
@@ -10,36 +10,31 @@ export interface SearchResult {
 }
 
 /**
- * 🔍 PILLAR 1: Lexical Search (Ripgrep equivalent)
- * Uses VS Code's native, highly optimized C++ text search engine.
+ * 🔍 PILLAR 1: Lexical Search (Keyword Matching)
+ * Uses VS Code's native text search engine for exact symbol matches.
  */
 async function performLexicalSearch(query: string, maxResults: number = 10): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
     
-    // Extract the most important keyword from the query (words longer than 4 chars)
     const keywords = query.split(' ').filter(w => w.length > 4);
     if (keywords.length === 0) return [];
     
     const primaryKeyword = keywords[0].toLowerCase();
     
-    // 1. Find all relevant files in the workspace (Fast & respects .gitignore)
     const excludePattern = '{**/node_modules/**,**/dist/**,**/build/**,**/out/**,**/.git/**,**/.vscode/**}';
-    const files = await vscode.workspace.findFiles('**/*', excludePattern, 1000); // Limit scan pool for speed
+    const files = await vscode.workspace.findFiles('**/*', excludePattern, 1000); 
     
-    // 2. Scan file contents in memory
     let matchCount = 0;
     for (const fileUri of files) {
         if (matchCount >= maxResults) break;
         
         try {
-            // Ignore heavy binary/image files
             if (fileUri.fsPath.match(/\.(png|jpg|jpeg|gif|ico|svg|mp4|webm|wasm|exe|dll)$/i)) continue;
 
             const fileData = await vscode.workspace.fs.readFile(fileUri);
             const content = new TextDecoder().decode(fileData);
             
             if (content.toLowerCase().includes(primaryKeyword)) {
-                // Extract a targeted 10-line chunk around the match so we don't blow up the LLM token limit
                 const lines = content.split('\n');
                 const matchLineIndex = lines.findIndex(line => line.toLowerCase().includes(primaryKeyword));
                 
@@ -49,13 +44,13 @@ async function performLexicalSearch(query: string, maxResults: number = 10): Pro
 
                 results.push({
                     filepath: vscode.workspace.asRelativePath(fileUri),
-                    content: chunk,
-                    score: 1 // BM25 rank placeholder for RRF fusion
+                    content: chunk.trim(),
+                    score: 1 
                 });
                 matchCount++;
             }
         } catch (e) {
-            // Silently ignore locked/unreadable files
+            // Silently ignore locked files
         }
     }
 
@@ -64,43 +59,21 @@ async function performLexicalSearch(query: string, maxResults: number = 10): Pro
 
 /**
  * 🧠 PILLAR 2: Vector Search (Semantic Dense Embeddings)
- * Hooks into our new in-memory Cosine Similarity VectorDB via ragIndexer.
+ * Hits the in-memory Cosine Similarity Database.
  */
-async function performVectorSearch(query: string): Promise<SearchResult[]> {
+async function performVectorSearch(query: string, maxResults: number = 10): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
     try {
-        // 1. Call our new Dense Vector Embedding Engine!
-        const rawRagString = await retrieveContext(query);
+        // 🔥 THE FIX: Query the raw chunk data directly from the Vector DB
+        const vectorHits = await globalVectorDB.search(query, maxResults);
         
-        if (!rawRagString || rawRagString.includes("No semantic context found")) {
-            return [];
-        }
-        
-        // 2. Parse the formatted string returned by the VectorDB back into objects
-        const chunks = rawRagString.split('📍 File:'); 
-        
-        for (let i = 1; i < chunks.length; i++) {
-            const chunk = chunks[i];
-            const lines = chunk.split('\n');
-            
-            // Extract filepath and clean the markdown code blocks
-            const filepath = lines[0].trim();
-            const content = lines.slice(1).join('\n')
-                                 .replace(/```[a-zA-Z]*\n?/g, '')
-                                 .replace(/```/g, '')
-                                 .trim();
-            
-            if (filepath && content) {
-                results.push({
-                    filepath: filepath,
-                    content: content,
-                    // Vector DB already sorted these by highest similarity.
-                    // We give the first result the highest mock vector score, descending for the rest, 
-                    // so the RRF formula knows how to rank them against the Lexical Search!
-                    score: Math.max(0.1, 1.0 - (i * 0.1)) 
-                });
-            }
-        }
+        vectorHits.forEach((hit) => {
+            results.push({
+                filepath: hit.filepath,
+                content: hit.content.trim(),
+                score: hit.score // Raw cosine similarity score
+            });
+        });
     } catch (e) {
         console.error("[DEBUG-RAG] Dense Vector search failed:", e);
     }
@@ -108,57 +81,53 @@ async function performVectorSearch(query: string): Promise<SearchResult[]> {
 }
 
 /**
- * 🧬 THE FUSION: Tri-Factor Context Injection
+ * 🧬 THE FUSION: Tri-Factor Context Injection via RRF
  * Combines Lexical RRF, Semantic Vectors, and AST Logic.
  */
 export async function retrieveHybridContext(query: string, topK: number = 5): Promise<string> {
     console.log("[DEBUG-RAG] 🔍 Starting Tri-Factor Hybrid Search...");
 
     try {
-        // 🔥 THE FIX: Wrap the AST function in Promise.resolve() so it safely handles both sync and async executions!
         const astPromise = Promise.resolve(getSmartASTContext(query)).catch((e: any) => {
             console.warn("[DEBUG-RAG] AST CodeGraph search failed silently:", e);
             return "";
         });
 
-        // 🔥 THE FIX: Explicitly type the destructured array so TypeScript knows exactly what these are
         const [lexicalResults, vectorResults, astContext]: [SearchResult[], SearchResult[], string] = await Promise.all([
-            performLexicalSearch(query).catch((e: any) => {
-                console.warn("[DEBUG-RAG] Lexical search failed silently:", e);
-                return [] as SearchResult[];
-            }),
-            performVectorSearch(query).catch((e: any) => {
-                console.warn("[DEBUG-RAG] Vector search failed silently:", e);
-                return [] as SearchResult[];
-            }),
+            performLexicalSearch(query).catch(() => [] as SearchResult[]),
+            performVectorSearch(query).catch(() => [] as SearchResult[]),
             astPromise
         ]);
 
-        const rrfScores = new Map<string, { score: number, content: string }>();
-        const K = 60; // Standard RRF smoothing constant
+        // 🔥 THE RRF MATHEMATICS ENGINE
+        // We use a Set for content to deduplicate overlapping chunks found by both algorithms!
+        interface RRFNode {
+            score: number;
+            chunks: Set<string>;
+        }
+        
+        const rrfScores = new Map<string, RRFNode>();
+        const K = 60; // Industry standard smoothing constant
 
-        // 🔥 THE FIX: Explicitly type the parameters to satisfy 'noImplicitAny'
-        // Score Lexical Results
+        // 1. Process Lexical Ranks
         lexicalResults.forEach((result: SearchResult, index: number) => {
             const rank = index + 1;
-            const currentScore = rrfScores.get(result.filepath)?.score || 0;
-            rrfScores.set(result.filepath, {
-                score: currentScore + (1 / (K + rank)),
-                content: result.content
-            });
+            const node = rrfScores.get(result.filepath) || { score: 0, chunks: new Set<string>() };
+            node.score += (1 / (K + rank));
+            node.chunks.add(result.content);
+            rrfScores.set(result.filepath, node);
         });
 
-        // Score Dense Vector Results
+        // 2. Process Vector Ranks
         vectorResults.forEach((result: SearchResult, index: number) => {
             const rank = index + 1;
-            const currentScore = rrfScores.get(result.filepath)?.score || 0;
-            rrfScores.set(result.filepath, {
-                score: currentScore + (1 / (K + rank)),
-                content: result.content
-            });
+            const node = rrfScores.get(result.filepath) || { score: 0, chunks: new Set<string>() };
+            node.score += (1 / (K + rank));
+            node.chunks.add(result.content);
+            rrfScores.set(result.filepath, node);
         });
 
-        // Sort by highest RRF score and take top K
+        // 3. Sort by highest combined RRF score and take top K
         const fusedResults = Array.from(rrfScores.entries())
             .sort((a, b) => b[1].score - a[1].score)
             .slice(0, topK);
@@ -166,16 +135,16 @@ export async function retrieveHybridContext(query: string, topK: number = 5): Pr
         let contextPayload = "=== HYBRID SEARCH RESULTS (Lexical + Vector) ===\n";
         
         if (fusedResults.length === 0) {
-            console.log("[DEBUG-RAG] ⚠️ Hybrid Search found no chunk context. Relying purely on AST.");
+            console.log("[DEBUG-RAG] ⚠️ Hybrid Search found no chunks. Relying purely on AST.");
             contextPayload += "No direct file chunks found.\n";
         } else {
             fusedResults.forEach(([filepath, data]) => {
-                contextPayload += `\n📍 File: ${filepath} (RRF Score: ${data.score.toFixed(4)})\n\`\`\`\n${data.content}\n\`\`\`\n`;
+                const combinedChunks = Array.from(data.chunks).join('\n...\n');
+                contextPayload += `\n📍 File: ${filepath} (RRF Score: ${data.score.toFixed(4)})\n\`\`\`\n${combinedChunks}\n\`\`\`\n`;
             });
-            console.log(`[DEBUG-RAG] ✅ Fused ${fusedResults.length} highly relevant chunks.`);
+            console.log(`[DEBUG-RAG] ✅ Fused ${fusedResults.length} highly relevant documents.`);
         }
 
-        // Inject the AST graph logic at the very bottom
         if (astContext) {
             contextPayload += `\n=== STRUCTURAL AST CONTEXT ===\n${astContext}\n`;
         }
@@ -183,7 +152,6 @@ export async function retrieveHybridContext(query: string, topK: number = 5): Pr
         return contextPayload;
 
     } catch (criticalError: any) {
-        // The Ultimate Guardrail
         console.error("[DEBUG-RAG] 💥 CRITICAL HYBRID SEARCH FAILURE:", criticalError);
         return "";
     }

@@ -9,6 +9,58 @@ let lastChatUpdate = Date.now();
 let reasoningTokenBuffer = "";
 let lastReasoningUpdate = Date.now();
 
+const cleanTraceabilityTags = (text: string) => {
+    if (!text) return '';
+    
+    let cleaned = text;
+
+    // 1. Format Models & APIs using standard Markdown Headers
+    cleaned = cleaned.replace(/<model\s+id="([^"]+)">/gi, '\n### 🗄️ Model: `$1`\n\n');
+    cleaned = cleaned.replace(/<\/model>/gi, '\n\n');
+
+    cleaned = cleaned.replace(/<api\s+method="([^"]+)"\s+route="([^"]+)">/gi, '\n### 🔌 `$1` `$2`\n\n');
+    cleaned = cleaned.replace(/<\/api>/gi, '\n\n');
+
+    // 2. Consolidate Responses into clean, single-line bullets (No asterisks)
+    cleaned = cleaned.replace(/<response>[\s\S]*?<code>([^<]+)<\/code>[\s\S]*?<description>([^<]+)<\/description>[\s\S]*?<\/response>/gi, '- 📤 Status `$1`: $2\n');
+
+    // 3. Format Params & Fields as minimalist code elements
+    cleaned = cleaned.replace(/<(field|param)\s+([^>]+)\/?>/gi, (match, tag, attrs) => {
+        const nameMatch = attrs.match(/name="([^"]+)"/i);
+        const typeMatch = attrs.match(/type="([^"]+)"/i);
+        const descMatch = attrs.match(/description="([^"]+)"/i);
+        const requiredMatch = attrs.match(/required="([^"]+)"/i);
+        
+        const name = nameMatch ? nameMatch[1] : 'unknown';
+        const type = typeMatch ? typeMatch[1] : '';
+        const desc = descMatch ? descMatch[1] : '';
+        
+        let reqBadge = '';
+        if (requiredMatch) {
+            reqBadge = requiredMatch[1] === 'true' ? ' `Required`' : ' `Optional`';
+        }
+        
+        const typeStr = type ? ` (${type})` : '';
+        return `- \`${name}\`${typeStr}${reqBadge} — ${desc}\n`;
+    });
+
+    // 4. Use actual Markdown sub-headers (####) instead of bolding for sections
+    cleaned = cleaned.replace(/<(request)>/gi, '\n####Request Body\n\n');
+    cleaned = cleaned.replace(/<(query)>/gi, '\n####Query Parameters\n\n');
+    cleaned = cleaned.replace(/<\/(request|query)>/gi, '\n\n');
+    
+    // 5. Format descriptions as standard blockquotes
+    cleaned = cleaned.replace(/<description>([^<]+)<\/description>/gi, '\n> $1\n\n');
+
+    // 6. Strip all REMAINING invisible structural matrix tags
+    cleaned = cleaned.replace(/<\/?(epic|story|criteria|metadata|target_audience|nfr_list|architecture_components|data_models|api_routes|folder_structure|tasks|task|instructions)[^>]*>/gi, '');
+    
+    // 7. Enforce strict Markdown spacing (fixes ReactMarkdown choking on lists)
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+
+    return cleaned.trim();
+};
+
 interface ProjectTask {
     step: string;
     file: string;
@@ -1078,7 +1130,7 @@ export default function App() {
                                 <div style={{ display: 'flex', gap: '8px' }}>
                                     <button className="btn-primary" style={{ flex: 1 }} onClick={() => {
                                         // 🔥 UX FIX: Wipe all old terminal streams so the new execution starts on a clean slate!
-                                        setTerminalStreams({}); 
+                                        setTerminalStreams({});
                                         vscode.postMessage({ type: 'approveCommand', command: pendingCommand.command });
                                         setPendingCommand(null);
                                     }}>Allow</button>
@@ -1373,7 +1425,7 @@ export default function App() {
 
                         {!isEditingReqs ? (
                             <div className="markdown-body" style={{ flex: 1, overflowY: 'auto', padding: '15px', background: 'var(--vscode-editor-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', marginBottom: '15px' }}>
-                                <ReactMarkdown>{requirements}</ReactMarkdown>
+                                <ReactMarkdown>{cleanTraceabilityTags(requirements)}</ReactMarkdown>
                             </div>
                         ) : (
                             <textarea
@@ -1417,10 +1469,10 @@ export default function App() {
                         {!isEditingDesign ? (
                             <div className="markdown-body" style={{ flex: 1, overflowY: 'auto', padding: '15px', background: 'var(--vscode-editor-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', marginBottom: '15px' }}>
                                 <h2>1. Product Requirements</h2>
-                                <ReactMarkdown>{requirements}</ReactMarkdown>
+                                <ReactMarkdown>{cleanTraceabilityTags(requirements)}</ReactMarkdown>
                                 <hr />
                                 <h2>2. System Design</h2>
-                                <ReactMarkdown>{design}</ReactMarkdown>
+                                <ReactMarkdown>{cleanTraceabilityTags(design)}</ReactMarkdown>
                             </div>
                         ) : (
                             <textarea
