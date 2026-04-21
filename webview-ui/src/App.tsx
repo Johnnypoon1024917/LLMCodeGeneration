@@ -11,7 +11,7 @@ let lastReasoningUpdate = Date.now();
 
 const cleanTraceabilityTags = (text: string) => {
     if (!text) return '';
-    
+
     let cleaned = text;
 
     // 1. Format Models & APIs using standard Markdown Headers
@@ -30,16 +30,16 @@ const cleanTraceabilityTags = (text: string) => {
         const typeMatch = attrs.match(/type="([^"]+)"/i);
         const descMatch = attrs.match(/description="([^"]+)"/i);
         const requiredMatch = attrs.match(/required="([^"]+)"/i);
-        
+
         const name = nameMatch ? nameMatch[1] : 'unknown';
         const type = typeMatch ? typeMatch[1] : '';
         const desc = descMatch ? descMatch[1] : '';
-        
+
         let reqBadge = '';
         if (requiredMatch) {
             reqBadge = requiredMatch[1] === 'true' ? ' `Required`' : ' `Optional`';
         }
-        
+
         const typeStr = type ? ` (${type})` : '';
         return `- \`${name}\`${typeStr}${reqBadge} — ${desc}\n`;
     });
@@ -48,13 +48,13 @@ const cleanTraceabilityTags = (text: string) => {
     cleaned = cleaned.replace(/<(request)>/gi, '\n####Request Body\n\n');
     cleaned = cleaned.replace(/<(query)>/gi, '\n####Query Parameters\n\n');
     cleaned = cleaned.replace(/<\/(request|query)>/gi, '\n\n');
-    
+
     // 5. Format descriptions as standard blockquotes
     cleaned = cleaned.replace(/<description>([^<]+)<\/description>/gi, '\n> $1\n\n');
 
     // 6. Strip all REMAINING invisible structural matrix tags
     cleaned = cleaned.replace(/<\/?(epic|story|criteria|metadata|target_audience|nfr_list|architecture_components|data_models|api_routes|folder_structure|tasks|task|instructions)[^>]*>/gi, '');
-    
+
     // 7. Enforce strict Markdown spacing (fixes ReactMarkdown choking on lists)
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
 
@@ -1591,12 +1591,37 @@ export default function App() {
 
                     {/* LEFT SIDE: WebGL 3D Canvas (60% Width) */}
                     <div ref={graphContainerRef} style={{ flex: 3, position: 'relative', borderRight: '1px solid #30363d', overflow: 'hidden' }}>
-                        {isGraphLoading && activeMapType !== 'codeMap' ? (
-                            <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
-                                <div className="spin" style={{ transform: 'scale(1.5)' }}>{Icons.Loader}</div>
-                                <div>Calculating Semantic Matrix via LLM...</div>
+
+                        {/* 🚀 THE NEW HUD OVERLAY: Shows exactly what the LLM is doing in the background! */}
+                        {isGraphLoading && (
+                            <div style={{
+                                position: 'absolute',
+                                bottom: '30px',
+                                left: '50%',
+                                transform: 'translateX(-50%)',
+                                background: 'rgba(13, 17, 23, 0.95)',
+                                border: '1px solid #58a6ff',
+                                borderRadius: '8px',
+                                padding: '16px 24px',
+                                zIndex: 1000,
+                                boxShadow: '0 8px 32px rgba(0,0,0,0.6), 0 0 15px rgba(88, 166, 255, 0.15)',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                gap: '8px',
+                                minWidth: '320px'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    <div style={{ color: '#58a6ff' }} className="spin">{Icons.Loader}</div>
+                                    <span style={{ color: 'white', fontWeight: 'bold', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>AI Matrix Synthesis</span>
+                                </div>
+                                <div style={{ color: '#58a6ff', fontSize: '11px', fontFamily: 'monospace', opacity: 0.9, textAlign: 'center', padding: '4px 0' }}>
+                                    {agentStatus || 'Vectorizing abstract requirements...'}
+                                </div>
                             </div>
-                        ) : !graphData ? (
+                        )}
+
+                        {!graphData ? (
                             <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>Scanning workspace geometry...</div>
                         ) : (
                             <ForceGraph3D
@@ -1608,13 +1633,10 @@ export default function App() {
                                 nodeLabel="name"
                                 linkDirectionalArrowLength={4}
                                 linkDirectionalArrowRelPos={1}
-                                linkWidth={(link: any) => link.isSemantic ? 0.5 : 1.5} // Thinner line for AI semantic links
-
-                                //  THE FIX: Use pulsing WebGL particles instead of dashes!
+                                linkWidth={(link: any) => link.isSemantic ? 0.5 : 1.5}
                                 linkDirectionalParticles={(link: any) => link.isSemantic ? 3 : 0}
                                 linkDirectionalParticleWidth={2}
                                 linkDirectionalParticleSpeed={0.005}
-
                                 linkColor={(link: any) => link.color}
                                 nodeVal="val"
                                 backgroundColor="#0d1117"
@@ -1635,7 +1657,16 @@ export default function App() {
                     </div>
 
                     {/* RIGHT SIDE: Text Detail Sidebar (40% Width) */}
-                    <div style={{ flex: 2, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '15px', background: 'var(--vscode-editor-background)' }}>
+                    <div style={{ flex: 2, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '15px', background: 'var(--vscode-editor-background)', position: 'relative' }}>
+                        {isGraphLoading && (
+                            <div style={{ background: 'rgba(88, 166, 255, 0.1)', border: '1px solid rgba(88, 166, 255, 0.3)', borderRadius: '6px', padding: '10px', display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                <div style={{ color: '#58a6ff' }} className="spin">{Icons.Loader}</div>
+                                <div style={{ fontSize: '11px', color: '#c9d1d9', lineHeight: '1.4' }}>
+                                    <strong>Matrix Computing:</strong> The graph currently shows physical files. Semantic AI links are being calculated in the background and will appear here shortly.
+                                </div>
+                            </div>
+                        )}
+
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
                             <div style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--nexus-subtext)', textTransform: 'uppercase' }}>
                                 {activeMapType === 'codeMap' ? 'File Anatomy' : 'Relational Node Data'}
@@ -1645,12 +1676,7 @@ export default function App() {
                             </div>
                         </div>
 
-                        {isGraphLoading && activeMapType !== 'codeMap' ? (
-                            <div style={{ textAlign: 'center', color: 'var(--nexus-subtext)', marginTop: '40px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
-                                <div className="spin">{Icons.Loader}</div>
-                                <div>Generating Relational Data...</div>
-                            </div>
-                        ) : !graphData ? null :
+                        {!graphData ? null :
                             Array.isArray(graphData.nodes) ? (
                                 graphData.nodes.length === 0 ? (
                                     <div style={{ textAlign: 'center', color: 'var(--nexus-subtext)', marginTop: '40px', padding: '20px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
@@ -1685,13 +1711,13 @@ export default function App() {
                                                     <span style={{ background: badge.bg, color: badge.color, padding: '2px 8px', borderRadius: '12px', fontSize: '10px', fontWeight: 'bold', textTransform: 'uppercase', flexShrink: 0, marginTop: '2px' }}>
                                                         {badge.icon} {node.group}
                                                     </span>
-                                                    <div style={{ color: 'var(--vscode-foreground)', fontWeight: 'bold', fontSize: '13px', lineHeight: '1.4' }}>
+                                                    <div style={{ color: 'var(--vscode-foreground)', fontWeight: 'bold', fontSize: '13px', lineHeight: '1.4', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
                                                         {node.label || node.id}
                                                     </div>
                                                 </div>
 
                                                 {/* System ID */}
-                                                <div style={{ fontSize: '10px', color: 'var(--nexus-subtext)', marginTop: '8px', fontFamily: 'monospace', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '4px' }}>
+                                                <div style={{ fontSize: '10px', color: 'var(--nexus-subtext)', marginTop: '8px', fontFamily: 'monospace', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '4px', wordBreak: 'break-all' }}>
                                                     ID: {node.id}
                                                 </div>
 
@@ -1754,7 +1780,8 @@ export default function App() {
 
                                             {/* Beautiful Header Layout */}
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
-                                                <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', paddingRight: '10px' }}>
+                                                {/* 🚀 THE FIX: Added flex: 1 and minWidth: 0 to force the ellipsis to trigger */}
+                                                <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', paddingRight: '10px', flex: 1, minWidth: 0 }}>
                                                     <span style={{ color: 'var(--vscode-foreground)', fontWeight: 'bold', fontSize: '13px', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }} title={fileName}>
                                                         📄 {fileName}
                                                     </span>
