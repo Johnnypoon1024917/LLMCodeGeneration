@@ -1,31 +1,30 @@
 // src/agents/verificationAgent.ts
-import * as vscode from 'vscode';
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import * as path from 'path';
 import { CodeDiff } from './Coordinator';
 import { askQwenToVerifyTask } from '../llmService';
-
-const execAsync = promisify(exec);
+import { IEnvironment } from '../interfaces/IEnvironment';
 
 export async function runVerificationAgent(
+    env: IEnvironment,
     techSpec: string,
     draftDiff: CodeDiff,
     workspaceRoot: string,
+    testCommand: string | undefined, // 🚀 TDD PARAMETER
     logCallback: (msg: string, stepType?: string, details?: string) => void
 ): Promise<{ passed: boolean; critique: string }> {
 
     logCallback(`Verifier: Starting real-world verification for ${draftDiff.filepath}...`, "tool", "Applying patch to sandbox and compiling.");
 
-    const fileUri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), draftDiff.filepath);
+    // Use standard path instead of vscode.Uri
+    const absolutePath = path.join(workspaceRoot, draftDiff.filepath);
     let originalContent = "";
     let fileExisted = true;
 
-    // 1. Snapshot the current state of the file
+    // 1. Snapshot via Environment
     try {
-        const fileData = await vscode.workspace.fs.readFile(fileUri);
-        originalContent = new TextDecoder().decode(fileData);
+        originalContent = await env.readFile(absolutePath);
     } catch (e) {
-        fileExisted = false; // It's a new file being created
+        fileExisted = false; 
     }
 
     try {
@@ -40,51 +39,83 @@ export async function runVerificationAgent(
                 return { passed: false, critique: "SEARCH block did not match the file. You hallucinated the code. Look at the file and try again." };
             }
         } else {
-            // Fallback for complete file overwrite
             newContent = draftDiff.fullOutputBuffer.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
         }
 
-        await vscode.workspace.fs.writeFile(fileUri, Buffer.from(newContent, 'utf8'));
+        // Use env instead of vscode
+        await env.writeFile(absolutePath, newContent);
 
         // 3. REAL-WORLD TERMINAL VERIFICATION
-        // We run a dry-run TypeScript check. (In Phase 6, we will pull this command dynamically from .nexusrules)
-        try {
-            await execAsync('npx tsc --noEmit', { cwd: workspaceRoot });
-        } catch (error: any) {
-            // If the error contains TS error codes, it's a real compiler error!
-            if (error.stdout && error.stdout.includes('error TS')) {
-                // Revert the file before rejecting
-                if (fileExisted) await vscode.workspace.fs.writeFile(fileUri, Buffer.from(originalContent, 'utf8'));
-                else await vscode.workspace.fs.delete(fileUri);
+        let compiled = false;
+        let compilerOutput = "";
+        let retryCount = 0;
+        const MAX_INSTALL_RETRIES = 2;
 
+        while (!compiled && retryCount <= MAX_INSTALL_RETRIES) {
+            try {
+                // 🚀 THE FIX: Force npx to use the 'typescript' package so it doesn't download the fake 'tsc' stub
+                await env.runCommand('npx -p typescript tsc --noEmit', workspaceRoot);
+                compiled = true; 
+            } catch (error: any) {
+                compilerOutput = error.stdout || error.message;
+
+                const missingModuleMatch = compilerOutput.match(/Cannot find module '([^']+)'/);
+                if (missingModuleMatch && retryCount < MAX_INSTALL_RETRIES) {
+                    const moduleName = missingModuleMatch[1];
+                    logCallback(`Verifier: 📦 Auto-installing missing dependency '${moduleName}'...`, "tool", `npm install ${moduleName}`);
+                    try {
+                        await env.runCommand(`npm install ${moduleName}`, workspaceRoot);
+                        await env.runCommand(`npm install -D @types/${moduleName}`, workspaceRoot).catch(() => {});
+                        retryCount++;
+                        continue;
+                    } catch (installErr: any) {
+                        compilerOutput = `Failed to auto-install ${moduleName}: ${installErr.message}\n\nCompiler Error:\n${compilerOutput}`;
+                        break;
+                    }
+                }
+                break; 
+            }
+        }
+
+        if (!compiled) {
+            if (fileExisted) await env.writeFile(absolutePath, originalContent);
+            else await env.deleteFile(absolutePath);
+            return { passed: false, critique: `🚨 COMPILER ERROR DETECTED 🚨\n\n${compilerOutput}\n\nYou MUST fix these exact errors in your next attempt.` };
+        }
+
+        // 🚀 THE TDD VERIFICATION GATE
+        if (testCommand) {
+            logCallback(`Verifier: Code compiled. Running TDD Suite...`, "tool", testCommand);
+            try {
+                const testResult = await env.runCommand(testCommand, workspaceRoot);
+                logCallback(`Verifier: 🧪 All TDD tests passed!`, "success");
+            } catch (testErr: any) {
+                const failureLog = testErr.stdout || testErr.stderr || testErr.message;
+                
+                // Revert the file because it failed business logic
+                if (fileExisted) await env.writeFile(absolutePath, originalContent);
+                else await env.deleteFile(absolutePath);
+                
                 return { 
                     passed: false, 
-                    critique: `🚨 COMPILER ERROR DETECTED 🚨\n\n${error.stdout}\n\nYou MUST fix these exact TypeScript errors in your next attempt.` 
+                    critique: `🚨 TDD TEST FAILURE 🚨\n\nYour code compiled, but it FAILED the PRD Business Rules.\n\nTest Output:\n${failureLog}\n\nYou MUST rewrite the logic to make the tests pass.` 
                 };
             }
         }
 
         // 4. LOGICAL LLM VERIFICATION
         logCallback(`Verifier: Code compiled successfully. Running logical PRD review...`, "analyze", "Checking against business rules.");
-        
-        // We use our resilient LLM service to check the business logic
         const llmVerification = await askQwenToVerifyTask(techSpec, "Review the technical spec.", newContent);
 
         // 5. REVERT THE SANDBOX
-        // We revert the file so the SidebarProvider can apply it cleanly through the VS Code Editor API for the user to see.
-        if (fileExisted) await vscode.workspace.fs.writeFile(fileUri, Buffer.from(originalContent, 'utf8'));
-        else await vscode.workspace.fs.delete(fileUri);
+        if (fileExisted) await env.writeFile(absolutePath, originalContent);
+        else await env.deleteFile(absolutePath);
 
-        return {
-            passed: llmVerification.verified,
-            critique: llmVerification.reasoning
-        };
+        return { passed: llmVerification.verified, critique: llmVerification.reasoning };
 
     } catch (err: any) {
-        // Ensure we revert the file if the verification loop crashes catastrophically
-        if (fileExisted) await vscode.workspace.fs.writeFile(fileUri, Buffer.from(originalContent, 'utf8'));
-        else await vscode.workspace.fs.delete(fileUri);
-        
+        if (fileExisted) await env.writeFile(absolutePath, originalContent);
+        else await env.deleteFile(absolutePath);
         return { passed: false, critique: `Catastrophic Patch Error: ${err.message}` };
     }
 }

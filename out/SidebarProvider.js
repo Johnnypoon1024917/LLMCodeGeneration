@@ -38,8 +38,12 @@ exports.SidebarProvider = void 0;
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const extension_1 = require("./extension");
+const diffProvider_1 = require("./diffProvider");
 const codeGraph_1 = require("./context/codeGraph");
+const skillsManager_1 = require("./skillsManager");
 const Coordinator_1 = require("./agents/Coordinator");
+const VSCodeEnvironment_1 = require("./adapters/VSCodeEnvironment");
+const testAgent_1 = require("./agents/testAgent");
 // AI Services & Tools
 const llmService_1 = require("./llmService");
 // Context Managers
@@ -81,10 +85,12 @@ class SidebarProvider {
     _activeDesign = "";
     _lastActiveFile;
     _isMetaMode = false;
+    _skillsManager;
     _undoStack = new Map();
     _pendingCommandResolver;
     constructor(_extensionUri) {
         this._extensionUri = _extensionUri;
+        this._skillsManager = new skillsManager_1.SkillsManager();
     }
     setTerminalManager(manager) { this._terminalManager = manager; }
     setProvenanceTracker(tracker) { this._tracker = tracker; }
@@ -178,8 +184,9 @@ class SidebarProvider {
         }
         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
     }
-    async resolveWebviewView(webviewView) {
+    resolveWebviewView(webviewView, context, _token) {
         this._view = webviewView;
+        vscode.workspace.registerTextDocumentContentProvider('nexus-diff', diffProvider_1.originalContentProvider);
         this._tracker?.setView(webviewView);
         webviewView.webview.options = { enableScripts: true };
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
@@ -877,9 +884,9 @@ class SidebarProvider {
                                     }
                                     catch { }
                                     const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
+                                    const env = new VSCodeEnvironment_1.VSCodeEnvironment();
                                     //  THE SWARM ORCHESTRATOR (PHASE 4: Array of Diffs)
-                                    const finalDiffs = await Coordinator_1.SwarmCoordinator.executeTask(currentApproachPrompt, rootUri.fsPath, "", // Deprecated content parameter, dynamic fetch handled by Swarm
-                                    lspBlastRadiusContext, this._activeRequirements, this._activeDesign, previousFailures, data.codingStyle || 'precise', (msg, stepType, details) => {
+                                    const finalDiffs = await Coordinator_1.SwarmCoordinator.executeTask(env, currentApproachPrompt, rootUri.fsPath, lspBlastRadiusContext, this._activeRequirements, this._activeDesign, previousFailures, data.codingStyle || 'precise', (msg, stepType, details) => {
                                         this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
                                         if (stepType && details) {
                                             this._view?.webview.postMessage({
@@ -1457,6 +1464,43 @@ class SidebarProvider {
                 case "rejectCommand": {
                     if (this._pendingCommandResolver)
                         this._pendingCommandResolver(false);
+                    break;
+                }
+                case "generateProjectTests": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders)
+                        return;
+                    const rootUri = workspaceFolders[0].uri;
+                    vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: `Nexus: Architecting Master Project TDD Suite...`,
+                        cancellable: false
+                    }, async (progress) => {
+                        try {
+                            const env = new VSCodeEnvironment_1.VSCodeEnvironment();
+                            // 🚀 Gather the ENTIRE codebase context using our existing Explorer tooling
+                            const projectContext = await (0, projectContext_1.getProjectContext)(rootUri.fsPath);
+                            // Run the Global Two-Phase Test Agent
+                            const testResult = await (0, testAgent_1.runProjectTestAgent)(env, this._activeRequirements, projectContext, rootUri.fsPath, (msg) => progress.report({ message: msg }));
+                            if (testResult) {
+                                // Pop open the Master Markdown Plan on the left
+                                const planUri = vscode.Uri.joinPath(rootUri, testResult.testPlanFilepath);
+                                const planDoc = await vscode.workspace.openTextDocument(planUri);
+                                await vscode.window.showTextDocument(planDoc, { viewColumn: vscode.ViewColumn.One, preview: false });
+                                // Pop open the Master Jest Code on the right
+                                const testUri = vscode.Uri.joinPath(rootUri, testResult.filepath);
+                                const testDoc = await vscode.workspace.openTextDocument(testUri);
+                                await vscode.window.showTextDocument(testDoc, { viewColumn: vscode.ViewColumn.Two, preview: false });
+                                vscode.window.showInformationMessage(`✅ Master TDD Suite successfully generated in /nexuscode!`);
+                            }
+                            else {
+                                vscode.window.showErrorMessage(`Failed to generate master TDD suite.`);
+                            }
+                        }
+                        catch (error) {
+                            vscode.window.showErrorMessage(`TDD Generation Error: ${error.message}`);
+                        }
+                    });
                     break;
                 }
             }

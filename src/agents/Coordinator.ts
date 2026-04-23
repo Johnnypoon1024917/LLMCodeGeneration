@@ -1,9 +1,10 @@
 // src/agents/Coordinator.ts
-import * as vscode from 'vscode'; // 🚀 We need this to dynamically read files during the loop
+import * as path from 'path';
 import { runExplorerAgent } from './exploreAgent';
 import { runPlannerAgent } from './planAgent';
 import { runVerificationAgent } from './verificationAgent';
-import { streamQwenForCode } from '../llmService';
+import { getLLMConfig, resilientFetch } from '../llmService';
+import { IEnvironment } from '../interfaces/IEnvironment';
 
 export interface CodeDiff {
     filepath: string;
@@ -12,105 +13,166 @@ export interface CodeDiff {
     fullOutputBuffer: string; 
 }
 
+async function swarmDraftCode(
+    techSpec: string,
+    filepath: string,
+    fileContent: string,
+    streamCallback?: (token: string) => void
+): Promise<string> {
+    const { endpoint, model, apiKey } = await getLLMConfig();
+    
+    const systemPrompt = `You are an elite AI Coder Agent executing an autonomous sub-task. 
+Your sole purpose is to modify a single file based on the Technical Spec.
+You MUST use the EXACT SEARCH/REPLACE block format to modify the file safely.
+
+Output Format:
+<<<<SEARCH
+[exact code to replace from the existing file]
+====
+[new syntactically correct code to insert]
+>>>>REPLACE
+
+CRITICAL RULES:
+1. The SEARCH block MUST match the existing file content exactly.
+2. If you are creating a completely new file, simply output the code directly (no SEARCH/REPLACE blocks needed).
+3. Do NOT output conversational filler. Output the code.`;
+
+    const userPrompt = `Task Spec:\n${techSpec}\n\nTarget File: ${filepath}\n\nCurrent Content:\n\`\`\`\n${fileContent}\n\`\`\``;
+
+    const response = await resilientFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+            model: model,
+            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
+            temperature: 0.1,
+            stream: true
+        })
+    });
+
+    if (!response.body) throw new Error("No readable stream");
+    
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                try {
+                    const dataStr = line.substring(6).trim();
+                    if (!dataStr) continue;
+                    
+                    const data = JSON.parse(dataStr);
+                    const token = data.choices[0]?.delta?.content || "";
+                    buffer += token;
+                    
+                    if (streamCallback && token) streamCallback(token);
+                } catch (e) {}
+            }
+        }
+    }
+    
+    return buffer;
+}
+
 export class SwarmCoordinator {
-    // 🚀 UPGRADED: Now returns Promise<CodeDiff[]>
-    public static async executeTask(
-        task: string, 
-        workspaceRoot: string, 
-        _deprecatedInitialContent: string, // No longer used, we fetch dynamically
-        lspBlastRadiusContext: string,
+    static async executeTask(
+        env: IEnvironment,
+        task: string,
+        workspaceRoot: string,
+        lspContext: string,
         activeRequirements: string,
         activeDesign: string,
         previousFailures: string,
         codingStyle: string,
         logCallback: (msg: string, stepType?: string, details?: string) => void,
-        streamCallback: (token: string) => void
+        streamCallback?: (token: string) => void
     ): Promise<CodeDiff[] | null> {
+        
         logCallback("Coordinator: Task received. Initiating Swarm Orchestration...", "analyze", "Booting Swarm Agents");
 
         try {
-            // 1. EXPLORE & PLAN (Phase 3 ReAct Engine)
             const codebaseContext = await runExplorerAgent(task, workspaceRoot, logCallback);
-            let techSpec = await runPlannerAgent(task, workspaceRoot, codebaseContext, activeRequirements, activeDesign, previousFailures, logCallback);
-
-            // 2. PARSE THE DAG (Extract Target Files)
-            const filesToModifyMatch = techSpec.match(/<files_to_modify>([\s\S]*?)<\/files_to_modify>/);
-            let targetFiles: string[] = [];
             
-            if (filesToModifyMatch) {
-                const fileRegex = /<file>(.*?)<\/file>/g;
+            let techSpec = await runPlannerAgent(
+                task, 
+                codebaseContext, 
+                activeRequirements, 
+                activeDesign, 
+                previousFailures, 
+                codingStyle, 
+                logCallback
+            );
+
+            const filesToModify: string[] = [];
+            const filesMatch = techSpec.match(/<files_to_modify>([\s\S]*?)<\/files_to_modify>/);
+            
+            if (filesMatch) {
+                const fileRegex = /<file>([^<]+)<\/file>/g;
                 let match;
-                while ((match = fileRegex.exec(filesToModifyMatch[1])) !== null) {
-                    targetFiles.push(match[1].trim());
+                while ((match = fileRegex.exec(filesMatch[1])) !== null) {
+                    filesToModify.push(match[1].trim());
                 }
             }
 
-            if (targetFiles.length === 0) {
-                logCallback("Coordinator: Warning - No <files_to_modify> found. Defaulting to autonomous hunt.", "warning");
-                targetFiles.push("unknown"); 
+            if (filesToModify.length === 0) {
+                logCallback("Coordinator: No explicit files to modify found in plan. Falling back to dynamic inference.", "analyze");
+                filesToModify.push("unknown");
             }
 
-            let allDiffs: CodeDiff[] = [];
+            const allDiffs: CodeDiff[] = [];
+            const MAX_RETRIES = 3;
 
-            // 3. THE SUB-TASK LOOP: Spawn a fresh Coder for EACH file!
-            for (const filepath of targetFiles) {
-                logCallback(`Coordinator: Spawning Coder for ${filepath}...`, "analyze", `Executing sub-task for ${filepath}`);
+            for (const filepath of filesToModify) {
+                logCallback(`Coordinator: Spawning Coder Agent for [${filepath}]...`, "code");
 
-                // Read the exact state of the file right now (in case a previous Coder in the loop modified a shared dependency)
-                let currentFileContent = "";
-                if (filepath !== 'unknown') {
+                let fileContentStr = "";
+                if (filepath !== "unknown") {
                     try {
-                        const fileUri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), filepath);
-                        const fileData = await vscode.workspace.fs.readFile(fileUri);
-                        currentFileContent = new TextDecoder().decode(fileData);
+                        const absolutePath = path.join(workspaceRoot, filepath);
+                        fileContentStr = await env.readFile(absolutePath);
                     } catch (e) {
-                        logCallback(`Coordinator: ${filepath} is a new file. Proceeding with creation.`, "analyze");
+                        logCallback(`Coordinator: File ${filepath} not found on disk. Assuming new file creation.`, "analyze");
                     }
                 }
 
-                let finalDiff: CodeDiff | null = null;
                 let attempts = 0;
-                const MAX_RETRIES = 3;
+                let finalDiff: CodeDiff | null = null;
 
                 while (attempts < MAX_RETRIES) {
                     attempts++;
-                    logCallback(`Coder [${filepath}]: Drafting code (Attempt ${attempts}/${MAX_RETRIES})...`, "analyze", `Drafting ${filepath}`);
+                    logCallback(`Coordinator: Drafting ${filepath} (Attempt ${attempts}/${MAX_RETRIES})...`, "code", "Coder Agent activated.");
                     
-                    let shadowCodeBuffer = "";
-                    let parsedFilepath = filepath;
-
-                    // 🚀 The Phase 1 Search/Replace prompt, now forcefully scoped to a SINGLE file
-                    const coderPrompt = `EXECUTION PLAN:\n${techSpec}\n\nLSP BLAST RADIUS:\n${lspBlastRadiusContext}\n\n` +
-                    `CRITICAL: You are currently executing the sub-task for ONE file: ${filepath}\n` +
-                    `Output EXACTLY ONE SEARCH/REPLACE block for this specific file. DO NOT output code for any other file right now.\n\n` +
-                    `<filepath>${filepath}</filepath>\n` +
-                    `<<<<SEARCH\n[exact existing code you want to replace]\n====\n[the new code you are inserting]\n>>>>REPLACE\n\n`;
-
-                    await streamQwenForCode(
-                        coderPrompt, [], currentFileContent, codingStyle, [],
-                        {
-                            onSetup: async (action: string, fp: string) => { parsedFilepath = fp; },
-                            onToken: async (token: string) => {
-                                shadowCodeBuffer += token;
-                                streamCallback(token);
-                            }
-                        },
-                        undefined,
-                        attempts === 1 ? 'creator' : 'rewriter'
+                    const shadowCodeBuffer = await swarmDraftCode(
+                        techSpec, 
+                        filepath,
+                        fileContentStr,
+                        streamCallback
                     );
-
+                    
                     const searchMatch = shadowCodeBuffer.match(/<<<<SEARCH\n([\s\S]*?)\n====/);
                     const replaceMatch = shadowCodeBuffer.match(/====\n([\s\S]*?)\n>>>>REPLACE/);
+                    
+                    const parsedFilepathMatch = shadowCodeBuffer.match(/```[a-z]*\n\/\/\s*(.*)\n/);
+                    const parsedFilepath = parsedFilepathMatch ? parsedFilepathMatch[1].trim() : filepath;
 
                     const draftDiff: CodeDiff = {
-                        filepath: parsedFilepath !== 'unknown' ? parsedFilepath : filepath,
+                        filepath: filepath === 'unknown' ? parsedFilepath : filepath,
                         searchBlock: searchMatch ? searchMatch[1] : "",
                         replaceBlock: replaceMatch ? replaceMatch[1] : "",
                         fullOutputBuffer: shadowCodeBuffer
                     };
                     
-                    const verification = await runVerificationAgent(techSpec, draftDiff, workspaceRoot, logCallback);
-                    
+                    // 🚀 Pass undefined for the testCommand so it runs fast!
+                    const verification = await runVerificationAgent(env, techSpec, draftDiff, workspaceRoot, undefined, logCallback);
+
                     if (verification.passed) {
                         finalDiff = draftDiff;
                         logCallback(`Coder [${filepath}]: QA Passed.`, "success");
@@ -129,6 +191,7 @@ export class SwarmCoordinator {
             }
 
             return allDiffs;
+            
         } catch (error: any) {
             logCallback(`Coordinator Error: ${error.message}`, "error", error.message);
             return null;

@@ -7,6 +7,8 @@ import { getSmartASTContext, getGraphJSON, buildWorkspaceGraph } from './context
 import { SkillsManager } from './skillsManager';
 import { SwarmCoordinator } from './agents/Coordinator';
 import { parseRequirementGraph, buildCombinedGraph } from './context/traceabilityGraph';
+import { VSCodeEnvironment } from './adapters/VSCodeEnvironment';
+import { runProjectTestAgent } from './agents/testAgent';
 
 // AI Services & Tools
 import {
@@ -84,9 +86,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _activeDesign: string = "";
     private _lastActiveFile?: string;
     private _isMetaMode: boolean = false;
+    private _skillsManager: SkillsManager;
+    
     private _undoStack = new Map<string, { filepath: string, originalContent: string }>();
     private _pendingCommandResolver?: (approved: boolean) => void;
-    constructor(private readonly _extensionUri: vscode.Uri) { }
+
+    constructor(private readonly _extensionUri: vscode.Uri) {
+        this._skillsManager = new SkillsManager();
+    }
 
     public setTerminalManager(manager: TerminalManager) { this._terminalManager = manager; }
     public setProvenanceTracker(tracker: ProvenanceTracker) { this._tracker = tracker; }
@@ -193,8 +200,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
     }
 
-    public async resolveWebviewView(webviewView: vscode.WebviewView) {
+    public resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken,
+    ) {
         this._view = webviewView;
+        vscode.workspace.registerTextDocumentContentProvider('nexus-diff', originalContentProvider);
         this._tracker?.setView(webviewView);
         webviewView.webview.options = { enableScripts: true };
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
@@ -446,6 +458,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'approved', summary: `✅ VERIFIED: ${verification.reasoning}` });
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                         } else {
+                            
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'rejected', summary: `❌ REJECTED: ${verification.reasoning}` });
                         }
 
@@ -961,12 +974,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     } catch { }
 
                                     const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
+                                    const env = new VSCodeEnvironment();
 
                                     //  THE SWARM ORCHESTRATOR (PHASE 4: Array of Diffs)
                                     const finalDiffs = await SwarmCoordinator.executeTask(
+                                        env,
                                         currentApproachPrompt,
                                         rootUri.fsPath,
-                                        "", // Deprecated content parameter, dynamic fetch handled by Swarm
                                         lspBlastRadiusContext,
                                         this._activeRequirements,
                                         this._activeDesign,
@@ -1021,13 +1035,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         if (this._tracker) {
                                             this._tracker.trackStreamedReview(
                                                 editor,
-                                                fileContent,     
-                                                data.task,      
-                                                0,              
-                                                document.lineCount 
+                                                fileContent,
+                                                data.task,
+                                                0,
+                                                document.lineCount
                                             );
                                         }
-                                        
+
                                         finalMergedFilepath = realFilepath; // Keep the last one for the UI success message
                                     }
 
@@ -1057,15 +1071,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // 🚀 THE FIX: Aggressively update the task status so the UI spinner stops!
                             if (success) {
                                 const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
-                                
+
                                 // Trigger the green checkmark
                                 this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: "approved", filepath: finalMergedFilepath, summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)` });
-                                
+
                                 // Guarantee state sync
                                 this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'approved', summary: `Updated ${finalMergedFilepath}` });
                             } else {
                                 const errorSummary = approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.`;
-                                
+
                                 // 🔥 The UI expects taskStatusUpdate to kill the spinner on failure
                                 this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: errorSummary });
                                 this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: errorSummary });
@@ -1075,7 +1089,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // Catch catastrophic Node.js crashes so the UI doesn't hang forever
                             const safeErrorMessage = fatalError instanceof Error ? fatalError.message : "Unknown Fatal Error";
                             vscode.window.showErrorMessage(`Nexus Catastrophic Failure: ${safeErrorMessage}`);
-                            
+
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Fatal Crash: ${safeErrorMessage}` });
                             this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error' });
                         } finally {
@@ -1626,6 +1640,53 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 case "rejectCommand": {
                     if (this._pendingCommandResolver) this._pendingCommandResolver(false);
+                    break;
+                }
+
+                case "generateProjectTests": {
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) return;
+                    const rootUri = workspaceFolders[0].uri;
+
+                    vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: `Nexus: Architecting Master Project TDD Suite...`,
+                        cancellable: false
+                    }, async (progress) => {
+                        try {
+                            const env = new VSCodeEnvironment();
+                            
+                            // 🚀 Gather the ENTIRE codebase context using our existing Explorer tooling
+                            const projectContext = await getProjectContext(rootUri.fsPath);
+
+                            // Run the Global Two-Phase Test Agent
+                            const testResult = await runProjectTestAgent(
+                                env,
+                                this._activeRequirements,
+                                projectContext,
+                                rootUri.fsPath,
+                                (msg) => progress.report({ message: msg })
+                            );
+
+                            if (testResult) {
+                                // Pop open the Master Markdown Plan on the left
+                                const planUri = vscode.Uri.joinPath(rootUri, testResult.testPlanFilepath);
+                                const planDoc = await vscode.workspace.openTextDocument(planUri);
+                                await vscode.window.showTextDocument(planDoc, { viewColumn: vscode.ViewColumn.One, preview: false });
+
+                                // Pop open the Master Jest Code on the right
+                                const testUri = vscode.Uri.joinPath(rootUri, testResult.filepath);
+                                const testDoc = await vscode.workspace.openTextDocument(testUri);
+                                await vscode.window.showTextDocument(testDoc, { viewColumn: vscode.ViewColumn.Two, preview: false });
+
+                                vscode.window.showInformationMessage(`✅ Master TDD Suite successfully generated in /nexuscode!`);
+                            } else {
+                                vscode.window.showErrorMessage(`Failed to generate master TDD suite.`);
+                            }
+                        } catch (error: any) {
+                            vscode.window.showErrorMessage(`TDD Generation Error: ${error.message}`);
+                        }
+                    });
                     break;
                 }
             }

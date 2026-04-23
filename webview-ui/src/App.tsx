@@ -1255,7 +1255,7 @@ export default function App() {
                                 style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-charts-orange)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.9, padding: 0 }}
                                 onClick={() => vscode.postMessage({ type: 'generateAndRunTests', autopilot: isAutopilot })}
                                 title="Auto-Generate & Run Tests for the currently open file">
-                                🧪 Auto-Test
+                                Auto-Test
                             </button>
 
                             <button
@@ -1667,13 +1667,34 @@ export default function App() {
                             </div>
                         )}
 
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '5px' }}>
-                            <div style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--nexus-subtext)', textTransform: 'uppercase' }}>
-                                {activeMapType === 'codeMap' ? 'File Anatomy' : 'Relational Node Data'}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                <div style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--nexus-subtext)', textTransform: 'uppercase' }}>
+                                    {activeMapType === 'codeMap' ? 'File Anatomy' : 'Relational Node Data'}
+                                </div>
+                                <div style={{ fontSize: '10px', color: 'var(--nexus-subtext)' }}>
+                                    {activeMapType === 'combinedMap' && 'Showing Tasks & Vector Math'}
+                                </div>
                             </div>
-                            <div style={{ fontSize: '10px', color: 'var(--nexus-subtext)' }}>
-                                {activeMapType === 'combinedMap' && 'Showing Tasks & Vector Math'}
-                            </div>
+
+                            {/* 🚀 GLOBAL PROJECT TDD BUTTON */}
+                            <button 
+                                onClick={() => vscode.postMessage({ type: 'generateProjectTests' })}
+                                title="Generate Master TDD Suite (Markdown Plan + Code) in /nexuscode"
+                                style={{ 
+                                    background: '#238636', 
+                                    border: '1px solid rgba(240, 246, 252, 0.1)', 
+                                    color: '#ffffff', 
+                                    borderRadius: '6px', 
+                                    padding: '6px 12px', 
+                                    cursor: 'pointer', 
+                                    fontSize: '12px', 
+                                    fontWeight: 'bold', 
+                                    boxShadow: '0 2px 5px rgba(0,0,0,0.2)' 
+                                }}
+                            >
+                                🧪 Generate Project TDD
+                            </button>
                         </div>
 
                         {!graphData ? null :
@@ -1791,6 +1812,7 @@ export default function App() {
                                                         </span>
                                                     )}
                                                 </div>
+                                                
                                                 <button
                                                     style={{ background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: '1px solid var(--vscode-button-border, transparent)', cursor: 'pointer', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', flexShrink: 0 }}
                                                     title="Open File in Editor"
