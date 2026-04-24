@@ -115,6 +115,9 @@ export default function App() {
     const [activeMapType, setActiveMapType] = useState<'codeMap' | 'reqMap' | 'combinedMap'>('combinedMap');
     const [isGraphLoading, setIsGraphLoading] = useState<boolean>(false);
 
+    const [globalTokens, setGlobalTokens] = useState({ prompt: 0, completion: 0 });
+    const [taskTokens, setTaskTokens] = useState<Record<string, { prompt: number, completion: number }>>({});
+
     const [taskSteps, setTaskSteps] = useState<Record<string, AgentStep[]>>({});
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
@@ -322,6 +325,27 @@ export default function App() {
         const messageHandler = (event: MessageEvent) => {
             const data = event.data;
 
+            if (data.type === 'tokenUsage') {
+                // Accumulate Global Tokens
+                setGlobalTokens(prev => ({
+                    prompt: prev.prompt + (data.usage.prompt_tokens || 0),
+                    completion: prev.completion + (data.usage.completion_tokens || 0)
+                }));
+                // Accumulate Task Tokens
+                if (data.task) {
+                    setTaskTokens(prev => {
+                        const current = prev[data.task] || { prompt: 0, completion: 0 };
+                        return {
+                            ...prev,
+                            [data.task]: {
+                                prompt: current.prompt + (data.usage.prompt_tokens || 0),
+                                completion: current.completion + (data.usage.completion_tokens || 0)
+                            }
+                        };
+                    });
+                }
+            }
+
             if (data.type === 'historyCompacted') {
                 setMessages(data.messages);
             }
@@ -393,10 +417,27 @@ export default function App() {
             }
 
             if (data.type === 'agentStep') {
-                setTaskSteps(prev => ({
-                    ...prev,
-                    [data.task]: [...(prev[data.task] || []), { type: data.stepType, description: data.description, details: data.details }]
-                }));
+                setTaskSteps(prev => {
+                    const currentSteps = prev[data.task] || [];
+                    const lastStep = currentSteps[currentSteps.length - 1];
+
+                    // 🚀 THE UI FIX: Bundle consecutive identical steps together!
+                    if (lastStep && lastStep.description === data.description && lastStep.type === data.stepType) {
+                        const newSteps = [...currentSteps];
+                        newSteps[newSteps.length - 1] = {
+                            ...lastStep,
+                            // Concat the tool executions with a clean newline
+                            details: lastStep.details ? `${lastStep.details}\n${data.details}` : data.details
+                        };
+                        return { ...prev, [data.task]: newSteps };
+                    }
+
+                    // Otherwise, append as a brand new step card
+                    return {
+                        ...prev,
+                        [data.task]: [...currentSteps, { type: data.stepType, description: data.description, details: data.details }]
+                    };
+                });
             }
 
             if (data.type === 'searchResults') {
@@ -1027,10 +1068,16 @@ export default function App() {
                                                                     <div style={{ fontSize: '11px', color: 'var(--vscode-textLink-foreground)' }}>ℹ️ {taskSummaries[taskKey]}</div>
                                                                 ) : <div />}
 
-                                                                <div style={{ display: 'flex', gap: '8px' }}>
-                                                                    {status === 'rejected' && <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle: codingStyleRef.current })}>Revise</button>}
-                                                                    {status === 'error' && <button className="micro-btn" style={{ borderColor: 'var(--vscode-testing-iconFailed)', color: 'var(--vscode-testing-iconFailed)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }}>Retry</button>}
+                                                                {/* 🚀 Render Task-Specific Tokens */}
+                                                                {taskTokens[taskKey] && (
+                                                                    <div style={{ fontSize: '10px', color: 'var(--nexus-subtext)', display: 'flex', gap: '8px', background: 'var(--vscode-editor-inactiveSelectionBackground)', padding: '2px 6px', borderRadius: '4px' }}>
+                                                                        <span title="Task Input Tokens">📥 {taskTokens[taskKey].prompt.toLocaleString()}</span>
+                                                                        <span title="Task Output Tokens">📤 {taskTokens[taskKey].completion.toLocaleString()}</span>
+                                                                    </div>
+                                                                )}
 
+                                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                                    {/* 1. Approved State: Diff and Undo */}
                                                                     {status === 'approved' && taskFiles[taskKey] && (
                                                                         <>
                                                                             <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })} title="Compare Changes">⚖️ Diff</button>
@@ -1038,10 +1085,23 @@ export default function App() {
                                                                         </>
                                                                     )}
 
-                                                                    {!status && (
+                                                                    {/* 2. Rejected State: Allow Manual Feedback */}
+                                                                    {status === 'rejected' && (
+                                                                        <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle: codingStyleRef.current })}>💬 Provide Feedback</button>
+                                                                    )}
+
+                                                                    {/* 3. Executable States: Empty, Rejected, or Error */}
+                                                                    {(!status || status === 'rejected' || status === 'error') && (
                                                                         <>
-                                                                            <button className="micro-btn" onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt }); }} title="Verify manual code">👁️ Verify</button>
-                                                                            <button className="micro-btn btn-primary" style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }} title="Auto-execute task">▶ Execute</button>
+                                                                            {/* Only show Verify if it has never been run */}
+                                                                            {!status && (
+                                                                                <button className="micro-btn" onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt }); }} title="Verify manual code">👁️ Verify</button>
+                                                                            )}
+                                                                            
+                                                                            {/* Main Execution / Retry Button */}
+                                                                            <button className="micro-btn btn-primary" style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }} title="Auto-execute task">
+                                                                                {status === 'rejected' || status === 'error' ? '▶ Retry Execution' : '▶ Execute'}
+                                                                            </button>
                                                                         </>
                                                                     )}
                                                                 </div>
@@ -1279,6 +1339,12 @@ export default function App() {
                                 title="Refresh UI">
                                 {Icons.Refresh}
                             </button>
+
+                            {/* 🚀 Render Global Tokens */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '10px', color: 'var(--nexus-subtext)', borderLeft: '1px solid var(--vscode-widget-border)', paddingLeft: '8px', marginLeft: '4px' }}>
+                                <span title="Total Input Tokens">📥 {globalTokens.prompt.toLocaleString()}</span>
+                                <span title="Total Output Tokens">📤 {globalTokens.completion.toLocaleString()}</span>
+                            </div>
                         </div>
                     </div>
                 </div>

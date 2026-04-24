@@ -36,13 +36,29 @@ function decodeHTMLEntities(text: string): string {
 
 export async function resilientFetch(url: string, options: any, logCallback?: (msg: string) => void): Promise<Response> {
     return await RetryManager.executeWithExponentialBackoff(async () => {
-        
-        const response = await fetch(url, options);
-        
-        // Let the RateLimitManager inspect the headers. If it's a 429, it will pause the thread
-        // and throw an error to trigger the RetryManager to try again.
-        return await RateLimitManager.handleThrottling(response, logCallback);
-        
+        // 🚀 FIX: Pre-check if the user already clicked cancel
+        if (options?.signal?.aborted) {
+            const e: any = new Error("This operation was aborted");
+            e.name = 'AbortError';
+            e.status = 400; // Force RetryManager to fast-fail
+            throw e;
+        }
+
+        try {
+            const response = await fetch(url, options);
+            
+            // Let the RateLimitManager inspect the headers. If it's a 429, it will pause the thread
+            // and throw an error to trigger the RetryManager to try again.
+            return await RateLimitManager.handleThrottling(response, logCallback);
+        } catch (error: any) {
+            // 🚀 FIX: Catch Fetch Abort (from Cancel button or Timeout) and force fast-fail
+            if (error.name === 'AbortError' || error.message?.includes('aborted') || options?.signal?.aborted) {
+                error.name = 'AbortError';
+                error.status = 400; // 400 causes RetryManager to skip retries!
+                throw error;
+            }
+            throw error;
+        }
     }, 3, 1000, (attempt, delay, error) => {
         const msg = `⚠️ Nexus API Hiccup (${error.message}). Retrying in ${delay / 1000}s (Attempt ${attempt}/3)...`;
         if (logCallback) logCallback(msg);
@@ -509,7 +525,13 @@ export async function askQwenForTargetFile(taskDescription: string, projectConte
     return safeParseJSON<{ filepath: string, reasoning: string }>(content);
 }
 
-export async function runAgenticExploration(taskDescription: string, workspaceRoot: string, statusCallback: (stepType: string, desc: string, details?: string) => void): Promise<string> {
+export async function runAgenticExploration(
+    taskDescription: string, 
+    projectContext: string, // 🚀 NEW: Accept the pre-fetched AST
+    workspaceRoot: string, 
+    statusCallback: (stepType: string, desc: string, details?: string) => void,
+    abortSignal?: AbortSignal
+): Promise<string> {
     const { endpoint, model, apiKey, enableTools } = await getLLMConfig();
 
     if (!enableTools) return "";
@@ -517,14 +539,18 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
     const explorePrompt = `You are the Explorer Agent. Your role is EXCLUSIVELY to search and analyze the codebase dynamically using tools.
     
      CRITICAL RULES 
-    1. YOU ARE STRICTLY PROHIBITED FROM: Creating new files, modifying files, or writing code.
-    2. Use 'grep_search' to find where specific functions, classes, or variables are defined and used across the whole project.
-    3. Use 'read_file' to extract the exact implementation logic.
-    4. Once you have enough context, reply with: "READY_TO_CODE".`;
+    1. NO SEQUENTIAL SPAMMING: You MUST request all necessary 'read_file' calls simultaneously in your VERY FIRST turn. Do not ask for files one by one.
+    2. EARLY EXIT: The absolute moment you have read the core files required for the task, you MUST STOP. Output exactly "READY_TO_CODE" and nothing else. Do not search aimlessly.
+    3. NO HALLUCINATIONS: Do not use 'search_codebase' with generic terms like "directory". Only search for highly specific function names.
+    
+    🚀 FAST-TRACK CONTEXT (AST PRE-FETCH): 
+    You already know the directory structure! Do not waste time trying to discover files.
+    Here is the existing layout:
+    ${projectContext}`;
 
     let messages: any[] = [
         { role: "system", content: explorePrompt },
-        { role: "user", content: `Task: ${taskDescription}\nHunt down the required context.` }
+        { role: "user", content: `Task: ${taskDescription}\nYou already know the file paths. Call 'read_file' on the targets immediately in a single batch, then exit with READY_TO_CODE!` }
     ];
 
     //  Inject the Claude-Style Dynamic Grep Tool
@@ -543,18 +569,15 @@ export async function runAgenticExploration(taskDescription: string, workspaceRo
     let gatheredContext = "";
     statusCallback('analyze', 'Initializing Dynamic Search');
 
-    for (let step = 0; step < 4; step++) {
+    for (let step = 0; step < 2; step++) {
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000);
-
+            // 🚀 FIX: Removed the 15-second AbortController. Replaced with the user's AbortSignal!
             const response = await resilientFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
                 body: JSON.stringify({ model: model, messages: messages, tools: dynamicTools, tool_choice: "auto", temperature: 0.1 }),
-                signal: controller.signal
+                signal: abortSignal 
             });
-            clearTimeout(timeoutId);
 
             const data = await response.json() as any;
             const aiMessage = data.choices[0].message;
@@ -956,7 +979,7 @@ type: architecture_design
 
 <data_models>
 ## Data Models
-(Use Markdown tables to define schemas. DO NOT use nested XML tags like <field> for properties.
+(CRITICAL: Use Markdown tables to define schemas. You MUST use proper newlines (\n) for every single row in the table. DO NOT output the table on a single continuous line. DO NOT use nested XML tags like <field> for properties.
 Example:
 ### User Model
 | Field | Type | Description |
@@ -964,6 +987,16 @@ Example:
 | id | UUID | Unique ID |
 )
 </data_models>
+
+<er_diagram>
+## Entity-Relationship (ER) Diagram
+(Use Mermaid.js \`erDiagram\` syntax to map out the database relations. Wrap it in a \`\`\`mermaid code block.)
+</er_diagram>
+
+<business_interaction>
+## Business Interaction Flow
+(Use Mermaid.js \`sequenceDiagram\` syntax to show the core business logic and system interactions. Wrap it in a \`\`\`mermaid code block.)
+</business_interaction>
 
 <api_routes>
 ## API Specs
@@ -1157,39 +1190,72 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
     return parsedPlan as AIPlan;
 }
 
-export async function askQwenToVerifyTask(taskDescription: string, requirements: string, codebaseContext: string): Promise<{ verified: boolean, reasoning: string }> {
-    const systemPrompt = `You are a strict, elite QA Automation Engineer and Code Reviewer.
-    The user (a human developer) claims to have manually completed a task.
-    
-    You must review their current codebase context against the Task Instructions and the PRD Acceptance Criteria.
-    
-    Return ONLY valid JSON matching this schema:
-    {
-        "verified": true, 
-        "reasoning": "Explain exactly what criteria were met, or what is missing if you reject it."
-    }`;
-
+export async function askQwenToVerifyTask(
+    techSpec: string, 
+    taskQuery: string, 
+    fileContent: string
+): Promise<{ verified: boolean; reasoning: string; usage?: any }> { // 🚀 Added usage to return type
     const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({
-            model: model,
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `TASK INSTRUCTIONS:\n${taskDescription}\n\nSTRICT PRD:\n${requirements}\n\nCURRENT CODEBASE CONTEXT:\n${codebaseContext}` }
-            ],
-            temperature: 0.1
-        })
-    });
 
-    const data = await response.json() as any;
-    if (data.error) throw new Error(data.error.message);
+    // 🚀 THE FIX: Titanium-clad QA Prompting
+    const systemPrompt = `You are an elite, ruthlessly objective Enterprise QA Verifier.
+Your ONLY job is to verify if the provided code satisfies the Technical Spec.
 
-    const content = data.choices[0].message.content;
-    const jsonStart = content.indexOf('{');
-    const jsonEnd = content.lastIndexOf('}');
-    return safeParseJSON<{ verified: boolean, reasoning: string }>(content.substring(jsonStart, jsonEnd + 1));
+CRITICAL RULES:
+1. STRICT ADHERENCE: You must evaluate the code strictly against the Technical Spec. Do NOT invent new business rules, best practices, or personal preferences.
+2. NO CONTRADICTIONS: If the spec requires a String, accept a String. If it requires a Date, accept a Date. 
+3. MONGOOSE TOLERANCE: Mongoose typing can be tricky. Accept valid variations (e.g., 'mongoose.Schema.Types.UUID', 'String' if UUID is represented as string, 'mongoose.Types.Decimal128').
+4. PASS CONDITIONS: If the code is syntactically valid and meets the explicit core requirements of the Spec, YOU MUST PASS IT. Do not reject code for minor stylistic choices.
+
+Output ONLY a JSON object in this exact format:
+{
+  "verified": boolean,
+  "reasoning": "A concise explanation of why it passed or failed. If failed, give exact actionable steps."
+}`;
+
+    const userPrompt = `--- TECHNICAL SPEC ---
+${techSpec}
+
+--- TARGET TASK ---
+${taskQuery}
+
+--- PROPOSED CODE ---
+\`\`\`
+${fileContent}
+\`\`\`
+
+Evaluate the code and return the JSON.`;
+
+    try {
+        const response = await resilientFetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify({
+                model: model,
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: userPrompt }
+                ],
+                temperature: 0.0, // 🚀 FIX: Force temperature to 0 for deterministic QA
+                response_format: { type: "json_object" } 
+            })
+        });
+
+        const data:any = await response.json();
+        const content = data.choices[0]?.message?.content || "{}";
+        
+        try {
+            const parsed = JSON.parse(content);
+            return { ...parsed, usage: data?.usage }; // 🚀 Inject usage
+        } catch (e) {
+            // Fallback regex parsing if the LLM wraps it in markdown
+            const match = content.match(/\{[\s\S]*\}/);
+            if (match) return { ...JSON.parse(match[0]), usage: data?.usage }; // 🚀 Inject usage
+            throw new Error("Failed to parse QA JSON.");
+        }
+    } catch (error: any) {
+        return { verified: false, reasoning: `System QA Error: ${error.message}` };
+    }
 }
 
 //  ENHANCEMENT A: The Living PRD QA Agent

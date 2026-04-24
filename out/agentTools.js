@@ -122,20 +122,33 @@ async function executeAgentTool(toolCall, workspaceRoot) {
         }
         else if (toolName === "search_codebase") {
             const query = args.keyword;
-            const uris = await vscode.workspace.findFiles('**/*.{ts,tsx,js,jsx,py,go,rs,css,html}', '**/node_modules/**', 20);
+            // 🚀 POLYGLOT SEARCH: Search ALL text files, aggressively ignoring binary/compiled directories
+            const uris = await vscode.workspace.findFiles('**/*.*', '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/out/**,**/bin/**,**/.idea/**,**/__pycache__/**,**/*.class,**/*.o,**/*.pyc,**/*.exe,**/*.dll}');
             let results = [];
             for (const uri of uris) {
-                const fileData = await vscode.workspace.fs.readFile(uri);
-                const content = new TextDecoder().decode(fileData);
-                const lines = content.split('\n');
-                for (let i = 0; i < lines.length; i++) {
-                    if (lines[i].includes(query)) {
-                        const relativePath = vscode.workspace.asRelativePath(uri);
-                        const snippet = lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 3)).join('\n');
-                        results.push(`File: ${relativePath} (Line ${i + 1})\nSnippet:\n${snippet}\n---`);
-                        break;
+                try {
+                    const fileData = await vscode.workspace.fs.readFile(uri);
+                    const content = new TextDecoder().decode(fileData);
+                    // Fast check before splitting lines
+                    if (content.includes(query)) {
+                        const lines = content.split('\n');
+                        for (let i = 0; i < lines.length; i++) {
+                            if (lines[i].includes(query)) {
+                                const relativePath = vscode.workspace.asRelativePath(uri);
+                                const snippet = lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 3)).join('\n');
+                                results.push(`File: ${relativePath} (Line ${i + 1})\nSnippet:\n${snippet}\n---`);
+                                // 🚀 FIX: Cap results to prevent token window overflow
+                                if (results.length >= 15)
+                                    break;
+                            }
+                        }
                     }
                 }
+                catch (e) {
+                    continue; // Skip unreadable or binary files safely
+                }
+                if (results.length >= 15)
+                    break; // Break outer loop if limit reached
             }
             return results.length > 0 ? results.join('\n') : `No results found for '${query}'.`;
         }

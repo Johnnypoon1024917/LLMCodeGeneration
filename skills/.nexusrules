@@ -1,0 +1,6 @@
+# Mongoose Coding Standards
+- For UUIDs, always use `type: String` with a comment `// UUID`. Do not use `Types.UUID`.
+- For Decimals, always use `type: mongoose.Schema.Types.Decimal128`.
+- Always use `{ timestamps: true }` instead of manually defining createdAt/updatedAt.
+- When instantiating an ObjectId, you MUST use the `new` keyword (e.g., `new mongoose.Types.ObjectId()`). Do not call it as a function.
+- When defining a Mongoose Schema, avoid `type: Object`. Define the strict interface or use `Schema.Types.Mixed`.

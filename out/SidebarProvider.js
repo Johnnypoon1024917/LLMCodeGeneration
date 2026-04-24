@@ -56,21 +56,26 @@ const commentStyles_1 = require("./utilities/commentStyles");
 const pathUtils_1 = require("./utilities/pathUtils");
 const workspaceManager_1 = require("./workspaceManager");
 function applySearchReplace(originalContent, searchBlock, replaceBlock, fullBuffer) {
-    // 1. Clean the blocks of any accidental markdown formatting the LLM might have included
-    const cleanSearch = searchBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
-    const cleanReplace = replaceBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
-    // 2. If no search block was found by the regex, the LLM likely generated the whole file.
-    // We fallback to just returning the cleaned full buffer.
-    if (!cleanSearch) {
-        return fullBuffer.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
+    const normalizeNL = (str) => str.replace(/\r\n/g, '\n');
+    const normOriginal = normalizeNL(originalContent);
+    // 1. If no search block was found by the parser, fallback to full file rewrite
+    if (!searchBlock || !replaceBlock) {
+        const markdownMatch = fullBuffer.match(/```[a-z]*\n([\s\S]*?)```/i);
+        if (markdownMatch) {
+            return normalizeNL(markdownMatch[1].trim());
+        }
+        return normalizeNL(fullBuffer.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim());
     }
-    // 3. Strict substring replacement
-    if (originalContent.includes(cleanSearch)) {
-        return originalContent.replace(cleanSearch, cleanReplace);
+    // 2. Clean the blocks of any accidental markdown formatting
+    const cleanSearch = normalizeNL(searchBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim());
+    const cleanReplace = normalizeNL(replaceBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim());
+    // 3. Strict substring replacement with $ protection
+    if (normOriginal.includes(cleanSearch)) {
+        // 🚀 FIX: Use () => cleanReplace to prevent JavaScript from interpreting '$' as regex tokens
+        return normOriginal.replace(cleanSearch, () => cleanReplace);
     }
     else {
-        // 🔥 THE POISON PILL: If the SEARCH block doesn't perfectly match the file, we abort.
-        // This prevents the agent from corrupting the file with hallucinatory edits.
+        // 🔥 THE POISON PILL
         throw new Error("Target SEARCH block not found in file. The AI hallucinated the existing code. Aborting to prevent corruption.");
     }
 }
@@ -194,10 +199,11 @@ class SidebarProvider {
             switch (data.type) {
                 //  THE FIX: The Webview Handshake. Loads chat history, PRDs, AND .nexusrules
                 case "webviewReady": {
-                    const chatHistory = extension_1.globalContext.globalState.get('nexus_chat_history') || [];
-                    const taskStatuses = extension_1.globalContext.globalState.get('nexus_task_statuses') || {};
-                    const taskSummaries = extension_1.globalContext.globalState.get('nexus_task_summaries') || {};
-                    const taskFiles = extension_1.globalContext.globalState.get('nexus_task_files') || {};
+                    // 🚀 FIX: Migrate from globalState to workspaceState so task statuses are permanently bound to the specific project!
+                    const chatHistory = extension_1.globalContext.workspaceState.get('nexus_chat_history') || [];
+                    const taskStatuses = extension_1.globalContext.workspaceState.get('nexus_task_statuses') || {};
+                    const taskSummaries = extension_1.globalContext.workspaceState.get('nexus_task_summaries') || {};
+                    const taskFiles = extension_1.globalContext.workspaceState.get('nexus_task_files') || {};
                     const hasApiKey = !!(await extension_1.globalContext.secrets.get('nexuscode_apikey'));
                     let savedReqs = "";
                     let savedDesign = "";
@@ -685,17 +691,18 @@ class SidebarProvider {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                         }
                     }
-                    await extension_1.globalContext.globalState.update('nexus_chat_history', historyToSave);
-                    await extension_1.globalContext.globalState.update('nexus_task_statuses', data.taskStatuses);
-                    await extension_1.globalContext.globalState.update('nexus_task_summaries', data.taskSummaries);
-                    await extension_1.globalContext.globalState.update('nexus_task_files', data.taskFiles);
+                    // 🚀 FIX: Use workspaceState to save data safely without overwriting other projects
+                    await extension_1.globalContext.workspaceState.update('nexus_chat_history', historyToSave);
+                    await extension_1.globalContext.workspaceState.update('nexus_task_statuses', data.taskStatuses);
+                    await extension_1.globalContext.workspaceState.update('nexus_task_summaries', data.taskSummaries);
+                    await extension_1.globalContext.workspaceState.update('nexus_task_files', data.taskFiles);
                     break;
                 }
                 case "clearHistory":
-                    await extension_1.globalContext.globalState.update('nexus_chat_history', []);
-                    await extension_1.globalContext.globalState.update('nexus_task_statuses', {});
-                    await extension_1.globalContext.globalState.update('nexus_task_summaries', {});
-                    await extension_1.globalContext.globalState.update('nexus_task_files', {});
+                    await extension_1.globalContext.workspaceState.update('nexus_chat_history', []);
+                    await extension_1.globalContext.workspaceState.update('nexus_task_statuses', {});
+                    await extension_1.globalContext.workspaceState.update('nexus_task_summaries', {});
+                    await extension_1.globalContext.workspaceState.update('nexus_task_files', {});
                     break;
                 case "saveApiKey":
                     await extension_1.globalContext.secrets.store('nexuscode_apikey', data.value);
@@ -766,8 +773,11 @@ class SidebarProvider {
                             const exploreTaskId = "Exploration-" + Date.now();
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: exploreTaskId, status: 'reviewing', summary: 'Gathering forensic evidence...' });
                             const workspacePath = await this.getTargetContext();
-                            // 🤖 THE CLAUDE CODE LOOP: It will now use grep and read_file autonomously!
-                            const explorationContext = await (0, llmService_1.runAgenticExploration)(data.text, workspacePath, (stepType, desc, details) => {
+                            // 🚀 FAST-TRACK: Pre-fetch the AST so the AI doesn't have to guess!
+                            const projectContext = await (0, projectContext_1.getProjectContext)(workspacePath);
+                            // 🤖 THE CLAUDE CODE LOOP: Now augmented with pre-fetched knowledge!
+                            const explorationContext = await (0, llmService_1.runAgenticExploration)(data.text, projectContext, // 🚀 Inject the AST map here!
+                            workspacePath, (stepType, desc, details) => {
                                 this._view?.webview.postMessage({
                                     type: 'agentStep',
                                     task: exploreTaskId,
@@ -885,8 +895,14 @@ class SidebarProvider {
                                     catch { }
                                     const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
                                     const env = new VSCodeEnvironment_1.VSCodeEnvironment();
+                                    let globalRules = "";
+                                    try {
+                                        const rulesUri = vscode.Uri.joinPath(rootUri, '.nexusrules');
+                                        globalRules = new TextDecoder().decode(await vscode.workspace.fs.readFile(rulesUri));
+                                    }
+                                    catch { }
                                     //  THE SWARM ORCHESTRATOR (PHASE 4: Array of Diffs)
-                                    const finalDiffs = await Coordinator_1.SwarmCoordinator.executeTask(env, currentApproachPrompt, rootUri.fsPath, lspBlastRadiusContext, this._activeRequirements, this._activeDesign, previousFailures, data.codingStyle || 'precise', (msg, stepType, details) => {
+                                    const finalDiffs = await Coordinator_1.SwarmCoordinator.executeTask(env, currentApproachPrompt, rootUri.fsPath, lspBlastRadiusContext, this._activeRequirements, this._activeDesign, previousFailures, globalRules, (msg, stepType, details) => {
                                         this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
                                         if (stepType && details) {
                                             this._view?.webview.postMessage({
@@ -899,6 +915,8 @@ class SidebarProvider {
                                         }
                                     }, (streamToken) => {
                                         this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: streamToken });
+                                    }, this._activeTaskController?.signal, (usage) => {
+                                        this._view?.webview.postMessage({ type: 'tokenUsage', task: data.task, usage });
                                     });
                                     if (!finalDiffs || finalDiffs.length === 0)
                                         throw new Error("Swarm failed to generate verified code.");
@@ -943,6 +961,9 @@ class SidebarProvider {
                                     winningApproach = approachNum;
                                 }
                                 catch (error) {
+                                    if (error.name === 'AbortError') {
+                                        throw error; // 🚀 FIX: Bubble the abort up immediately!
+                                    }
                                     if (isMCTSActive) {
                                         await this._terminalManager?.runCommandWithCapture(`git reset --hard`, rootUri.fsPath);
                                         await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
@@ -956,6 +977,19 @@ class SidebarProvider {
                             // 🚀 THE FIX: Aggressively update the task status so the UI spinner stops!
                             if (success) {
                                 const totalTime = ((Date.now() - taskStartTime) / 1000).toFixed(1);
+                                // 🚀 FIX: Explicitly check off the task in tasks.md on the hard drive
+                                try {
+                                    const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
+                                    const tasksMdUri = vscode.Uri.joinPath(nexusDir, 'tasks.md');
+                                    let mdContent = new TextDecoder().decode(await vscode.workspace.fs.readFile(tasksMdUri));
+                                    // Handle both bolded and unbolded variants just in case
+                                    mdContent = mdContent.replace(`[ ] **${data.task}**`, `[x] **${data.task}**`);
+                                    mdContent = mdContent.replace(`[ ] ${data.task}`, `[x] ${data.task}`);
+                                    await vscode.workspace.fs.writeFile(tasksMdUri, Buffer.from(mdContent, 'utf8'));
+                                }
+                                catch (e) {
+                                    console.warn("Could not auto-update tasks.md", e);
+                                }
                                 // Trigger the green checkmark
                                 this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: "approved", filepath: finalMergedFilepath, summary: `Updated ${finalMergedFilepath} (Total: ${totalTime}s)` });
                                 // Guarantee state sync
@@ -969,11 +1003,18 @@ class SidebarProvider {
                             }
                         }
                         catch (fatalError) {
-                            // Catch catastrophic Node.js crashes so the UI doesn't hang forever
-                            const safeErrorMessage = fatalError instanceof Error ? fatalError.message : "Unknown Fatal Error";
-                            vscode.window.showErrorMessage(`Nexus Catastrophic Failure: ${safeErrorMessage}`);
-                            this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Fatal Crash: ${safeErrorMessage}` });
-                            this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error' });
+                            // 🚀 FIX: Catch the explicit abort and gracefully update the UI to "error" (which triggers the Retry button)
+                            if (fatalError.name === 'AbortError' || token.isCancellationRequested) {
+                                this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: '🛑 Task Cancelled by User.' });
+                                this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: '🛑 Task Cancelled by User.' });
+                            }
+                            else {
+                                // Catch catastrophic Node.js crashes so the UI doesn't hang forever
+                                const safeErrorMessage = fatalError instanceof Error ? fatalError.message : "Unknown Fatal Error";
+                                vscode.window.showErrorMessage(`Nexus Catastrophic Failure: ${safeErrorMessage}`);
+                                this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Fatal Crash: ${safeErrorMessage}` });
+                                this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error' });
+                            }
                         }
                         finally {
                             // Always clean up the execution state
@@ -1019,8 +1060,30 @@ class SidebarProvider {
                     }
                     const workspacePath = workspaceFolders[0].uri.fsPath;
                     this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Running Global Workspace Compiler..." });
-                    // Run the dry-run build
-                    const buildCommand = "npx tsc --noEmit";
+                    // 🚀 POLYGLOT GLOBAL COMPILER: Sniff the workspace to find the right command
+                    let buildCommand = "";
+                    try {
+                        const files = await vscode.workspace.fs.readDirectory(workspaceFolders[0].uri);
+                        const fileNames = files.map(f => f[0]);
+                        if (fileNames.includes('pom.xml'))
+                            buildCommand = "mvn clean compile";
+                        else if (fileNames.includes('build.gradle'))
+                            buildCommand = "gradle build -x test";
+                        else if (fileNames.includes('go.mod'))
+                            buildCommand = "go build ./...";
+                        else if (fileNames.includes('requirements.txt'))
+                            buildCommand = "python -m compileall .";
+                        else if (fileNames.includes('tsconfig.json'))
+                            buildCommand = "npx -p typescript tsc --noEmit";
+                        else if (fileNames.includes('package.json'))
+                            buildCommand = "npm run build";
+                        else
+                            buildCommand = "echo 'No standard build file found (e.g., tsconfig.json, pom.xml). Skipping build.'";
+                    }
+                    catch (e) {
+                        // 🚀 FIX: Do not assume TypeScript if the environment is completely unknown!
+                        buildCommand = "echo 'No standard build system detected (e.g., tsconfig.json, pom.xml). Skipping global compilation.'";
+                    }
                     const result = await this._terminalManager?.runCommandWithCapture(buildCommand, workspacePath);
                     if (result && result.success) {
                         vscode.window.showInformationMessage("✅ Global Compiler Passed! The app is structurally sound.");
@@ -1320,8 +1383,18 @@ class SidebarProvider {
                             if (cleanDir.startsWith('src/') || cleanDir === 'src') {
                                 cleanDir = cleanDir.replace(/^src\/?/, '');
                             }
-                            // Force the .test extension (e.g. auth.ts -> auth.test.ts)
-                            const testFileName = `${parsedPath.name}.test${parsedPath.ext}`;
+                            // 🚀 POLYGLOT TEST NAMING: Adapt to exact language conventions
+                            let testFileName = `${parsedPath.name}.test${parsedPath.ext}`; // Default JS/TS/General
+                            if (parsedPath.ext === '.go')
+                                testFileName = `${parsedPath.name}_test.go`;
+                            else if (parsedPath.ext === '.py')
+                                testFileName = `test_${parsedPath.name}.py`;
+                            else if (parsedPath.ext === '.rs')
+                                testFileName = `${parsedPath.name}_test.rs`;
+                            else if (parsedPath.ext === '.java')
+                                testFileName = `${parsedPath.name.charAt(0).toUpperCase() + parsedPath.name.slice(1)}Test.java`;
+                            else if (parsedPath.ext === '.rb')
+                                testFileName = `test_${parsedPath.name}.rb`;
                             // Hardcode the route to the root 'tests/' directory
                             const deterministicPath = path.join('tests', cleanDir, testFileName);
                             const testFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, deterministicPath);
