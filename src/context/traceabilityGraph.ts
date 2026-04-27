@@ -1,5 +1,5 @@
 // src/context/traceabilityGraph.ts
-import { getLLMConfig, safeParseJSON } from '../llmService';
+import { getLLMConfig, safeParseJSON,authHeaders } from '../llmService';
 
 export interface GraphNode { id: string; label: string; group: string; val?: number; }
 export interface GraphEdge { source: string; target: string; color?: string; isSemantic?: boolean; weight?: number; }
@@ -90,7 +90,7 @@ export async function parseRequirementGraph(prdContent: string): Promise<GraphDa
     try {
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prdContent }], temperature: 0.1, stream: true })
         });
         
@@ -151,7 +151,7 @@ export async function parseDesignGraph(designContent: string): Promise<GraphData
     try {
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: designContent }], temperature: 0.1, stream: true })
         });
         

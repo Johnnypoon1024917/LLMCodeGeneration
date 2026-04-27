@@ -34,73 +34,31 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getInjectionPosition = getInjectionPosition;
-// src/utilities/symbolManager.ts
+// src/utilities/symbolManager.ts (REPLACEMENT)
 const vscode = __importStar(require("vscode"));
-const Parser = __importStar(require("web-tree-sitter"));
-// FIX: Use 'any' type for the instance variable to avoid namespace-as-type errors
-let parser;
-/**
- * Initializes the parser and loads the language-specific WASM grammar.
- */
-async function initParser(extensionUri, languageId) {
-    if (!parser) {
-        // FIX: Cast to 'any' to access .init() and the constructor safely
-        await Parser.init();
-        parser = new Parser();
-    }
-    const wasmMapping = {
-        'typescript': 'tree-sitter-typescript.wasm',
-        'typescriptreact': 'tree-sitter-tsx.wasm',
-        'html': 'tree-sitter-html.wasm',
-        'python': 'tree-sitter-python.wasm',
-        'javascript': 'tree-sitter-javascript.wasm'
-    };
-    const wasmFile = wasmMapping[languageId] || 'tree-sitter-typescript.wasm';
-    const wasmPath = vscode.Uri.joinPath(extensionUri, 'parsers', wasmFile).fsPath;
-    try {
-        const lang = await Parser.Language.load(wasmPath);
-        parser.setLanguage(lang);
-    }
-    catch (e) {
-        console.error(`[AST] Failed to load WASM for ${languageId}:`, e);
-    }
-}
-/**
- * Parses the document AST and returns the exact coordinate to stream injected code.
- */
-async function getInjectionPosition(extensionUri, document, symbolName) {
-    try {
-        await initParser(extensionUri, document.languageId);
-        const tree = parser.parse(document.getText());
-        // AST Query to find the symbol name regardless of class or function type
-        const query = parser.getLanguage().query(`
-            [
-                (class_declaration name: (type_identifier) @name)
-                (function_declaration name: (identifier) @name)
-                (method_definition name: (property_identifier) @name)
-                (variable_declarator name: (identifier) @name value: (arrow_function))
-            ] @match
-        `);
-        const captures = query.captures(tree.rootNode);
-        // FIX: Explicitly type 'c' as 'any' to prevent implicit-any errors
-        const target = captures.find((c) => c.node.text === symbolName);
-        if (!target) {
-            console.warn(`[AST] Target symbol '${symbolName}' not found in file.`);
-            return null;
-        }
-        // Find the block/body child of the matched node (where the actual code goes)
-        // FIX: Explicitly type 'n' as 'any'
-        const bodyNode = (target.node.parent?.children || []).find((n) => n.type === 'class_body' || n.type === 'statement_block' || n.type === 'block');
-        if (!bodyNode || !bodyNode.lastChild)
-            return null;
-        // The last child of a block is typically the closing '}'
-        const closingBrace = bodyNode.lastChild;
-        // Return the position immediately BEFORE the closing brace
-        return document.positionAt(closingBrace.startIndex);
-    }
-    catch (error) {
-        console.error("[AST Error] Failed to calculate injection position:", error);
+async function getInjectionPosition(_extensionUri, document, symbolName) {
+    const symbols = await vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', document.uri);
+    if (!symbols)
         return null;
+    const target = findSymbol(symbols, symbolName);
+    if (!target)
+        return null;
+    // Insert just before the closing brace of the symbol body
+    const endLine = target.range.end.line;
+    const lineText = document.lineAt(endLine).text;
+    const closingBraceCol = lineText.indexOf('}');
+    if (closingBraceCol === -1)
+        return new vscode.Position(endLine, 0);
+    return new vscode.Position(endLine, closingBraceCol);
+}
+function findSymbol(symbols, name) {
+    for (const s of symbols) {
+        if (s.name === name)
+            return s;
+        const child = findSymbol(s.children, name);
+        if (child)
+            return child;
     }
+    return null;
 }
 //# sourceMappingURL=symbolManager.js.map

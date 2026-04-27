@@ -7,6 +7,7 @@ import { invalidateProjectContext } from './projectContext';
 import { originalContentProvider } from './diffProvider';
 import { activateTerminalInterceptor } from './terminalInterceptor';
 import { ASTParser } from './utilities/astParser';
+import { HookManager } from './hooks/HookManager';
 
 export let globalContext: vscode.ExtensionContext;
 
@@ -63,6 +64,30 @@ export async function activate(context: vscode.ExtensionContext) {
             tasksToClear.forEach(id => lensProvider.clearEdit(id));
         }),
 
+        vscode.commands.registerCommand('nexuscode.setApiKey', async () => {
+            const current = await context.secrets.get('nexuscode_apikey');
+            const placeholder = current
+                ? `Currently set (${current.length} chars). Type a new value to replace, or leave empty to clear.`
+                : "sk-... or leave empty for local LLMs (LM Studio / Ollama)";
+
+            const key = await vscode.window.showInputBox({
+                prompt: "NexusCode: API Key",
+                password: true,
+                ignoreFocusOut: true,
+                placeHolder: placeholder
+            });
+
+            // showInputBox returns undefined when the user presses Esc
+            if (key === undefined) return;
+
+            if (key === '') {
+                await context.secrets.delete('nexuscode_apikey');
+                vscode.window.showInformationMessage("NexusCode: API key cleared.");
+            } else {
+                await context.secrets.store('nexuscode_apikey', key);
+                vscode.window.showInformationMessage("NexusCode: API key saved to SecretStorage.");
+            }
+        }),
         // --- INLINE CODELENS COMMANDS ---
         vscode.commands.registerCommand('nexuscode.acceptEdit', async (taskId, uri) => {
             provenanceTracker.handleAccept(taskId, uri);
@@ -172,4 +197,17 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    // Start the HookManager once workspace is available.
+    // We don't fail activation if no workspace is open — hooks just won't run.
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders && folders.length > 0) {
+        HookManager.getInstance().start(context, folders[0].uri).catch(e => {
+            console.error('HookManager failed to start:', e);
+        });
+    }
+}
+
+export function deactivate(): void {
+    HookManager.getInstance().stop();
 }

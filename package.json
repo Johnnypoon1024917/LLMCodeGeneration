@@ -1,24 +1,26 @@
 {
-  "name": "Andromeda",
-  "displayName": "Andromeda",
-  "description": "LLM code generation",
-  "version": "0.0.1",
+  "name": "nexuscode",
+  "displayName": "NexusCode",
+  "publisher": "your-publisher-id",
+  "description": "Spec-driven AI coding assistant — requirements, design, tasks, and implementation in one IDE workflow.",
+  "version": "0.1.0",
   "engines": {
-    "vscode": "^1.109.0"
+    "vscode": "^1.85.0"
   },
   "categories": [
+    "AI",
+    "Programming Languages",
     "Other"
   ],
-  "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "configuration": {
-      "title": "Andromeda Agent",
+      "title": "NexusCode",
       "properties": {
         "nexuscode.apiEndpoint": {
           "type": "string",
           "default": "http://192.168.192.125:8001/v1/chat/completions",
-          "description": "The URL of your LLM provider (e.g., LM Studio, vLLM, OpenAI, or your custom API Gateway)."
+          "description": "OpenAI-compatible /v1/chat/completions endpoint (LM Studio, Ollama, vLLM, OpenAI, etc.)."
         },
         "nexuscode.model": {
           "type": "string",
@@ -27,32 +29,38 @@
         },
         "nexuscode.apiKey": {
           "type": "string",
-          "default": "lm-studio",
-          "description": "Your API Key (if using a cloud provider or authenticated gateway)."
+          "default": "",
+          "description": "API key (leave empty for local servers). Prefer the 'NexusCode: Set API Key' command — keys are stored in VS Code SecretStorage, not settings.json."
         },
         "nexuscode.enableTools": {
           "type": "boolean",
-          "default": false,
-          "description": "Enable agent tools (sends tool_choice: 'auto'). Keep this unchecked if your local server (like vLLM) does not have tool-call parsing enabled."
+          "default": true,
+          "description": "Enable function-calling tools for the planner and explorer agents. Disable only if your local server (older vLLM) does not parse tool_calls."
+        },
+        "nexuscode.maxVerificationRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Maximum times the Verifier may reject and re-prompt the Coder per file."
         }
       }
     },
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "qwen-sidebar-view",
-          "title": "Andromeda",
+          "id": "nexuscode-activitybar",
+          "title": "NexusCode",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "qwen-sidebar-view": [
+      "nexuscode-activitybar": [
         {
           "type": "webview",
-          "id": "qwen-sidebar",
-          "name": "Coding Assistant",
-          "icon": "media/icon.svg"
+          "id": "nexuscode.sidebar",
+          "name": "NexusCode"
         }
       ]
     },
@@ -91,19 +99,23 @@
       },
       {
         "command": "nexuscode.optimizeSelection",
-        "title": "Qwen: Optimize Selection"
+        "title": "NexusCode: Optimize Selection"
       },
       {
         "command": "nexuscode.addSelection",
-        "title": "Add Selection to Chat"
+        "title": "NexusCode: Add Selection to Chat"
       },
       {
         "command": "nexuscode.explainSelection",
-        "title": "Explain Selected Code"
+        "title": "NexusCode: Explain Selected Code"
       },
       {
         "command": "nexuscode.modifySelection",
-        "title": "Modify Selected Code"
+        "title": "NexusCode: Modify Selected Code"
+      },
+      {
+        "command": "nexuscode.setApiKey",
+        "title": "NexusCode: Set API Key"
       }
     ],
     "submenus": [
@@ -129,14 +141,12 @@
     "lint": "eslint src",
     "test": "vscode-test"
   },
-  "dependencies": {
-    "web-tree-sitter": "^0.26.8"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.19.17",
-    "@types/vscode": "^1.109.0",
+    "@types/vscode": "^1.85.0",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.2",

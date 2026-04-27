@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.globalContext = void 0;
 exports.activate = activate;
+exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const SidebarProvider_1 = require("./SidebarProvider");
 const provenanceTracker_1 = require("./provenanceTracker");
@@ -44,6 +45,7 @@ const projectContext_1 = require("./projectContext");
 const diffProvider_1 = require("./diffProvider");
 const terminalInterceptor_1 = require("./terminalInterceptor");
 const astParser_1 = require("./utilities/astParser");
+const HookManager_1 = require("./hooks/HookManager");
 async function activate(context) {
     console.log('LLMCodeGeneration is now active!');
     // Initialize the AST Parser on startup
@@ -81,6 +83,28 @@ async function activate(context) {
             .filter(e => e.uri.toString() === doc.uri.toString())
             .map(e => e.taskId);
         tasksToClear.forEach(id => lensProvider.clearEdit(id));
+    }), vscode.commands.registerCommand('nexuscode.setApiKey', async () => {
+        const current = await context.secrets.get('nexuscode_apikey');
+        const placeholder = current
+            ? `Currently set (${current.length} chars). Type a new value to replace, or leave empty to clear.`
+            : "sk-... or leave empty for local LLMs (LM Studio / Ollama)";
+        const key = await vscode.window.showInputBox({
+            prompt: "NexusCode: API Key",
+            password: true,
+            ignoreFocusOut: true,
+            placeHolder: placeholder
+        });
+        // showInputBox returns undefined when the user presses Esc
+        if (key === undefined)
+            return;
+        if (key === '') {
+            await context.secrets.delete('nexuscode_apikey');
+            vscode.window.showInformationMessage("NexusCode: API key cleared.");
+        }
+        else {
+            await context.secrets.store('nexuscode_apikey', key);
+            vscode.window.showInformationMessage("NexusCode: API key saved to SecretStorage.");
+        }
     }), 
     // --- INLINE CODELENS COMMANDS ---
     vscode.commands.registerCommand('nexuscode.acceptEdit', async (taskId, uri) => {
@@ -176,5 +200,16 @@ async function activate(context) {
             vscode.commands.executeCommand('qwen-sidebar.focus');
         }
     }));
+    // Start the HookManager once workspace is available.
+    // We don't fail activation if no workspace is open — hooks just won't run.
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders && folders.length > 0) {
+        HookManager_1.HookManager.getInstance().start(context, folders[0].uri).catch(e => {
+            console.error('HookManager failed to start:', e);
+        });
+    }
+}
+function deactivate() {
+    HookManager_1.HookManager.getInstance().stop();
 }
 //# sourceMappingURL=extension.js.map

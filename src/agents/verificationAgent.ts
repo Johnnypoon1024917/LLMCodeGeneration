@@ -1,7 +1,7 @@
 // src/agents/verificationAgent.ts
 import * as path from 'path';
 import { CodeDiff } from './Coordinator';
-import { askQwenToVerifyTask } from '../llmService';
+import { verifyAgainstSpec } from '../llmService';
 import { IEnvironment } from '../interfaces/IEnvironment';
 
 function getLanguageCommands(filepath: string): { 
@@ -202,7 +202,7 @@ export async function runVerificationAgent(
         }
 
         logCallback(`Verifier: Running logical PRD review...`, "analyze", "Checking against business rules.");
-        const llmVerification = await askQwenToVerifyTask(techSpec, "Review the technical spec.", newContent);
+        const llmVerification = await verifyAgainstSpec(techSpec, "Review the technical spec.", newContent);
 
         if (fileExisted) await env.writeFile(absolutePath, originalContent);
         else await env.deleteFile(absolutePath);

@@ -5,6 +5,15 @@ import { globalContext } from './extension';
 import { RetryManager } from './infrastructure/RetryManager';
 import { RateLimitManager } from './infrastructure/RateLimitManager';
 
+let _apiKeyMigrated = false;
+
+export interface LLMConfig {
+    endpoint: string;
+    model: string;
+    apiKey: string | undefined;
+    enableTools: boolean;
+}
+
 export interface AgileUserStory {
     epic: string;
     story: string;
@@ -46,7 +55,7 @@ export async function resilientFetch(url: string, options: any, logCallback?: (m
 
         try {
             const response = await fetch(url, options);
-            
+
             // Let the RateLimitManager inspect the headers. If it's a 429, it will pause the thread
             // and throw an error to trigger the RetryManager to try again.
             return await RateLimitManager.handleThrottling(response, logCallback);
@@ -66,17 +75,44 @@ export async function resilientFetch(url: string, options: any, logCallback?: (m
     });
 }
 
-export async function getLLMConfig() {
+export async function getLLMConfig(): Promise<LLMConfig> {
     const config = vscode.workspace.getConfiguration('nexuscode');
-    // Attempt to get the key from the secure vault
+
+    // ── One-shot migration: plain settings.json key → SecretStorage ──
+    if (!_apiKeyMigrated) {
+        _apiKeyMigrated = true; // set first so a failed migration can't loop
+        try {
+            const plain = config.get<string>('apiKey') ?? '';
+            const isRealKey = plain.length > 5 && plain !== 'lm-studio';
+            if (isRealKey) {
+                await globalContext.secrets.store('nexuscode_apikey', plain);
+                await config.update('apiKey', '', vscode.ConfigurationTarget.Global);
+                vscode.window.showInformationMessage(
+                    "NexusCode: API key migrated to VS Code SecretStorage. The plain 'nexuscode.apiKey' setting has been cleared."
+                );
+            }
+        } catch (e) {
+            // Migration is best-effort — never block startup on it
+            console.warn('NexusCode: API key migration skipped:', e);
+        }
+    }
+
     const secureKey = await globalContext.secrets.get('nexuscode_apikey');
 
     return {
         endpoint: config.get<string>('apiEndpoint') || 'http://127.0.0.1:1234/v1/chat/completions',
         model: config.get<string>('model') || 'qwen2.5-coder',
-        apiKey: secureKey || config.get<string>('apiKey') || 'lm-studio',
-        enableTools: config.get<boolean>('enableTools') || false
+        apiKey: secureKey || undefined,                       // <-- no placeholder
+        enableTools: config.get<boolean>('enableTools') ?? true
     };
+}
+
+export function authHeaders(apiKey: string | undefined): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey && apiKey.length > 0) {
+        headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+    return headers;
 }
 
 export function safeParseJSON<T>(jsonString: string): T {
@@ -242,11 +278,12 @@ Reply ONLY with the exact word: "build", "explore", "explain", or "ask".`;
     try {
         const response = await resilientFetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }],
-                temperature: 0.1
+                temperature: 0.1,
+                response_format: { type: "json_object" }
             })
         });
 
@@ -257,19 +294,19 @@ Reply ONLY with the exact word: "build", "explore", "explain", or "ask".`;
         if (!data.choices || data.choices.length === 0) { return 'ask'; }
 
         const intent = data.choices[0].message.content.trim().toLowerCase();
-        
+
         if (intent.includes('build')) { return 'build'; }
         // 🔥 2. Add the routing check so it actually returns 'explore'
-        if (intent.includes('explore')) { return 'explore'; } 
+        if (intent.includes('explore')) { return 'explore'; }
         if (intent.includes('explain')) { return 'explain'; }
-        
+
         return 'ask';
     } catch (e) {
         return 'ask';
     }
 }
 
-export async function streamQwenChat(
+export async function streamChat(
     prompt: string, contextStr: string,
     history: any[], onToken: (token: string) => void, abortSignal?: AbortSignal
 ): Promise<void> {
@@ -293,7 +330,7 @@ Always format your response in clean, highly readable Markdown. Use bullet point
         if (msg.isCompacted) {
             return { role: "system", content: `--- PREVIOUS CONVERSATION MEMORY ---\n${msg.content}` };
         }
-        
+
         // Strip out huge JSON plans or code attachments to save tokens
         const safeContent = msg.content || (msg.plan ? "[Implementation Plan Generated]" : "Empty Message");
         return { role: msg.role === 'user' ? 'user' : 'assistant', content: safeContent };
@@ -302,7 +339,7 @@ Always format your response in clean, highly readable Markdown. Use bullet point
     try {
         const response = await resilientFetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [
@@ -311,7 +348,8 @@ Always format your response in clean, highly readable Markdown. Use bullet point
                     { role: "user", content: userPrompt }
                 ],
                 temperature: 0.3,
-                stream: true
+                stream: true,
+                response_format: { type: "json_object" }
             }),
             signal: abortSignal
         });
@@ -365,7 +403,7 @@ Always format your response in clean, highly readable Markdown. Use bullet point
     }
 }
 
-export async function askQwenForRequirements(rawIdea: string, contextStr: string = "", abortSignal?: AbortSignal): Promise<RequirementPlan> {
+export async function generateRequirements(rawIdea: string, contextStr: string = "", abortSignal?: AbortSignal): Promise<RequirementPlan> {
     const systemPrompt = `You are an elite Staff Product Manager. 
     The user will give you a raw idea. Expand this into a strict, Agile Product Requirements Document (PRD).
     
@@ -399,11 +437,12 @@ export async function askQwenForRequirements(rawIdea: string, contextStr: string
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-            temperature: 0.2
+            temperature: 0.2,
+            response_format: { type: "json_object" }
         }),
         signal: abortSignal //  NEW: Wire the kill switch
     });
@@ -440,7 +479,7 @@ export interface TestSetupPlan { installCommand: string; testCommand: string; fi
 export interface AtomicEdit { filepath: string; code: string; action: 'replace' | 'append'; }
 interface QwenResponse { choices: { message: { content: string; }; }[]; }
 
-export async function askQwenForStructure(prompt: string, projectContext: string): Promise<{ explanation: string, plan: AIPlan }> {
+export async function generatePlan(prompt: string, projectContext: string): Promise<{ explanation: string, plan: AIPlan }> {
     const systemPrompt = `You are the Coordinator Agent (Lead Architect).
     Your job is to analyze the user's request and the EXISTING DIRECTORY STRUCTURE, then break it down into atomic tasks.
     YOU DO NOT WRITE THE FINAL CODE. You only generate the blueprint for the Coder Agent.
@@ -466,14 +505,15 @@ export async function askQwenForStructure(prompt: string, projectContext: string
 
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: `EXISTING DIRECTORY STRUCTURE:\n${projectContext}\n\nUSER REQUEST: ${prompt}` }
             ],
-            temperature: 0.1
+            temperature: 0.1,
+            response_format: { type: "json_object" }
         })
     });
 
@@ -500,7 +540,7 @@ export async function askQwenForStructure(prompt: string, projectContext: string
     return { explanation, plan: safeParseJSON<AIPlan>(jsonStr) };
 }
 
-export async function askQwenForTargetFile(taskDescription: string, projectContext: string, lastActiveFile?: string): Promise<{ filepath: string, reasoning: string }> {
+export async function inferTargetFile(taskDescription: string, projectContext: string, lastActiveFile?: string): Promise<{ filepath: string, reasoning: string }> {
     const contextHint = lastActiveFile ? `CONTEXT: You just modified "${lastActiveFile}". Unless explicitly mentioned, MUST continue working on "${lastActiveFile}".` : "";
     const systemPrompt = `You are a Senior Software Architect. Analyze the directory and the task.
     Decide exactly ONE file that needs to be reviewed, modified, or created.
@@ -510,11 +550,12 @@ export async function askQwenForTargetFile(taskDescription: string, projectConte
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Directory:\n${projectContext}\n\nTask: ${taskDescription}` }],
-            temperature: 0.1
+            temperature: 0.1,
+            response_format: { type: "json_object" }
         })
     });
 
@@ -526,9 +567,9 @@ export async function askQwenForTargetFile(taskDescription: string, projectConte
 }
 
 export async function runAgenticExploration(
-    taskDescription: string, 
+    taskDescription: string,
     projectContext: string, // 🚀 NEW: Accept the pre-fetched AST
-    workspaceRoot: string, 
+    workspaceRoot: string,
     statusCallback: (stepType: string, desc: string, details?: string) => void,
     abortSignal?: AbortSignal
 ): Promise<string> {
@@ -581,9 +622,9 @@ export async function runAgenticExploration(
         try {
             const response = await resilientFetch(endpoint, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-                body: JSON.stringify({ model: model, messages: messages, tools: dynamicTools, tool_choice: "auto", temperature: 0.1 }),
-                signal: abortSignal 
+                headers: authHeaders(apiKey),
+                body: JSON.stringify({ model: model, messages: messages, tools: dynamicTools, tool_choice: "auto", temperature: 0.1, response_format: { type: "json_object" } }),
+                signal: abortSignal
             });
 
             const data = await response.json() as any;
@@ -612,12 +653,12 @@ export async function runAgenticExploration(
 
                                 const regex = new RegExp(funcArgs.pattern, 'i');
                                 let matchCount = 0;
-                                
+
                                 await Promise.all(files.map(async (file) => {
                                     if (matchCount >= 30) return;
                                     try {
                                         const fileData = await vscode.workspace.fs.readFile(file);
-                                        
+
                                         // 🚀 INSTANT SKIP: Ignore empty files or files > 500KB without needing fs.stat
                                         if (fileData.byteLength === 0 || fileData.byteLength > 512000) return;
 
@@ -636,7 +677,7 @@ export async function runAgenticExploration(
                                         // Silently skip unreadable files
                                     }
                                 }));
-                                
+
                                 toolResult = toolResult ? toolResult : "No matches found.";
                             }
                         } catch (e) {
@@ -646,7 +687,7 @@ export async function runAgenticExploration(
                         statusCallback('search', 'Finding File', funcArgs.filename);
                         try {
                             const files = await vscode.workspace.findFiles(`**/*${funcArgs.filename}*`, '{**/node_modules/**,**/.git/**,**/dist/**}', 10);
-                            toolResult = files.length > 0 
+                            toolResult = files.length > 0
                                 ? files.map(f => vscode.workspace.asRelativePath(f)).join('\n')
                                 : "File not found. Do not guess the path.";
                         } catch (e) {
@@ -687,7 +728,7 @@ export async function runAgenticExploration(
     return gatheredContext;
 }
 
-export async function askQwenForTests(fileName: string, fileContent: string, projectRules: string = ""): Promise<TestSetupPlan> {
+export async function generateTests(fileName: string, fileContent: string, projectRules: string = ""): Promise<TestSetupPlan> {
     const systemPrompt = `You are an expert QA Engineer. Generate a comprehensive pure unit test file.
     
     ${projectRules ? `🔥 STRICT CUSTOM PROJECT RULES 🔥\n${projectRules}\n\n` : ''}
@@ -716,11 +757,12 @@ export async function askQwenForTests(fileName: string, fileContent: string, pro
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Target: ${fileName}\n\n\`\`\`\n${fileContent}\n\`\`\`` }],
-            temperature: 0.1
+            temperature: 0.1,
+            response_format: { type: "json_object" }
         })
     });
 
@@ -741,7 +783,7 @@ export async function askQwenForTests(fileName: string, fileContent: string, pro
     return safeParseJSON<TestSetupPlan>(jsonMatch[0]);
 }
 
-export async function askQwenToFixError(errorOutput: string, sourceFilePath: string, sourceCode: string, testFilePath: string, testCode: string): Promise<{ filepath: string, code: string }> {
+export async function healError(errorOutput: string, sourceFilePath: string, sourceCode: string, testFilePath: string, testCode: string): Promise<{ filepath: string, code: string }> {
     const systemPrompt = `You are an expert debugger. Determine if the error is in the source code OR the test code. Fix ONLY the file causing the error.
     Respond with valid XML: <filepath>path/to/file</filepath> <code>...</code>`;
     const userPrompt = `Source: ${sourceFilePath}\n\`\`\`\n${sourceCode}\n\`\`\`\nTest: ${testFilePath}\n\`\`\`\n${testCode}\n\`\`\`\nError:\n\`\`\`\n${errorOutput}\n\`\`\``;
@@ -749,8 +791,8 @@ export async function askQwenToFixError(errorOutput: string, sourceFilePath: str
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1 })
+        headers: authHeaders(apiKey),
+        body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1, response_format: { type: "json_object" } })
     });
 
     const data = await response.json() as any;
@@ -763,16 +805,17 @@ export async function askQwenToFixError(errorOutput: string, sourceFilePath: str
     return { filepath: filepathMatch[1].trim(), code: extractedCode };
 }
 
-export async function askQwenForAtomicEdits(tasks: string[], projectContext: string, codingStyle: string): Promise<AtomicEdit[]> {
+export async function generateAtomicEdits(tasks: string[], projectContext: string, codingStyle: string): Promise<AtomicEdit[]> {
     const systemPrompt = `Return a JSON array of edits: [{ "filepath": "...", "code": "...", "action": "replace" }]`;
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Tasks: ${tasks.join(', ')}\n\nContext:\n${projectContext}` }],
-            temperature: 0.1
+            temperature: 0.1,
+            response_format: { type: "json_object" }
         })
     });
     const data = await response.json() as any;
@@ -780,7 +823,7 @@ export async function askQwenForAtomicEdits(tasks: string[], projectContext: str
     return safeParseJSON<AtomicEdit[]>(content);
 }
 
-export async function streamQwenForCode(
+export async function streamCoder(
     taskDescription: string,
     availableFiles: string[] = [],
     currentFileContent: string = "",
@@ -857,8 +900,8 @@ export async function streamQwenForCode(
 
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1, stream: true }),
+        headers: authHeaders(apiKey),
+        body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1, stream: true, response_format: { type: "json_object" } }),
         signal: abortSignal
     });
 
@@ -999,7 +1042,7 @@ export async function getAvailableModels(): Promise<string[]> {
     return [fixedModel];
 }
 
-export async function askQwenForDesign(requirements: string, abortSignal?: AbortSignal): Promise<string> {
+export async function generateDesign(requirements: string, abortSignal?: AbortSignal): Promise<string> {
     const systemPrompt = `You are an elite FAANG Software Architect.
 Analyze the provided PRD and design a highly scalable System Architecture.
 
@@ -1051,12 +1094,13 @@ Example:
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Requirements:\n${requirements}` }],
             temperature: 0.2,
-            stream: true
+            stream: true,
+            response_format: { type: "json_object" }
         }),
         signal: abortSignal //  NEW: Wire the kill switch
     });
@@ -1115,7 +1159,7 @@ Example:
     return fullDesign.trim();
 }
 
-export async function askQwenForProjectTasks(requirements: string, design: string, existingStructure: string, abortSignal?: AbortSignal): Promise<AIPlan> {
+export async function generateTasks(requirements: string, design: string, existingStructure: string, abortSignal?: AbortSignal): Promise<AIPlan> {
     const systemPrompt = `You are the Principal Orchestrator Agent.
     The user has provided a PRD, a Technical Design Document, and the existing Directory Structure.
     YOU DO NOT WRITE CODE. Break the project down into an actionable, exhaustive implementation plan.
@@ -1145,7 +1189,7 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [
@@ -1153,7 +1197,8 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
                 { role: "user", content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
             ],
             temperature: 0.1,
-            stream: true
+            stream: true,
+            response_format: { type: "json_object" }
         }),
         signal: abortSignal
     });
@@ -1233,9 +1278,9 @@ export async function askQwenForProjectTasks(requirements: string, design: strin
     return parsedPlan as AIPlan;
 }
 
-export async function askQwenToVerifyTask(
-    techSpec: string, 
-    taskQuery: string, 
+export async function verifyAgainstSpec(
+    techSpec: string,
+    taskQuery: string,
     fileContent: string
 ): Promise<{ verified: boolean; reasoning: string; usage?: any }> { // 🚀 Added usage to return type
     const { endpoint, model, apiKey } = await getLLMConfig();
@@ -1272,21 +1317,21 @@ Evaluate the code and return the JSON.`;
     try {
         const response = await resilientFetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [
                     { role: "system", content: systemPrompt },
                     { role: "user", content: userPrompt }
                 ],
-                temperature: 0.0, // 🚀 FIX: Force temperature to 0 for deterministic QA
-                response_format: { type: "json_object" } 
+                temperature: 0.0,
+                response_format: { type: "json_object" }
             })
         });
 
-        const data:any = await response.json();
+        const data: any = await response.json();
         const content = data.choices[0]?.message?.content || "{}";
-        
+
         try {
             const parsed = JSON.parse(content);
             return { ...parsed, usage: data?.usage }; // 🚀 Inject usage
@@ -1302,7 +1347,7 @@ Evaluate the code and return the JSON.`;
 }
 
 //  ENHANCEMENT A: The Living PRD QA Agent
-export async function askQwenToUpdatePRD(prdContext: string, taskDescription: string, filepath: string, newCode: string): Promise<{ original: string, updated: string }[]> {
+export async function updateLivingPRD(prdContext: string, taskDescription: string, filepath: string, newCode: string): Promise<{ original: string, updated: string }[]> {
     const systemPrompt = `You are an elite QA Agent maintaining a "Living PRD".
     The developer just completed a task. You must read the new code and the PRD.
     Identify if ANY "- [ ]" Acceptance Criteria or Requirements were fulfilled by this specific code.
@@ -1326,14 +1371,15 @@ export async function askQwenToUpdatePRD(prdContext: string, taskDescription: st
     try {
         const response = await resilientFetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [
                     { role: "system", content: systemPrompt },
                     { role: "user", content: `TASK:\n${taskDescription}\n\nFILE: ${filepath}\n\nNEW CODE:\n\`\`\`\n${newCode.substring(0, 10000)}\n\`\`\`\n\nCURRENT PRD:\n${prdContext}` }
                 ],
-                temperature: 0.1
+                temperature: 0.1,
+                response_format: { type: "json_object" }
             })
         });
 
@@ -1373,11 +1419,12 @@ export async function reviewCodeCompleteness(taskDescription: string, prdContext
     try {
         const response = await resilientFetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-                temperature: 0.1
+                temperature: 0.1,
+                response_format: { type: "json_object" }
             })
         });
 
@@ -1393,7 +1440,7 @@ export async function reviewCodeCompleteness(taskDescription: string, prdContext
 }
 
 //  STEP 4: The Global Build-Healer Agent
-export async function askQwenToHealGlobalBuild(buildErrors: string, filesContext: string, codingStyle: string): Promise<AtomicEdit[]> {
+export async function healGlobalBuild(buildErrors: string, filesContext: string, codingStyle: string): Promise<AtomicEdit[]> {
     const systemPrompt = `You are an elite Principal DevOps Engineer. The global project build just failed.
     You will be provided with the raw compiler error log and the contents of the files mentioned in the errors.
     
@@ -1419,11 +1466,12 @@ export async function askQwenToHealGlobalBuild(buildErrors: string, filesContext
     try {
         const response = await resilientFetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-                temperature: 0.1
+                temperature: 0.1,
+                response_format: { type: "json_object" }
             })
         });
 
@@ -1455,11 +1503,12 @@ export async function askSecurityMonitor(command: string): Promise<boolean> {
     try {
         const response = await resilientFetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Command to evaluate: ${command}` }],
-                temperature: 0.0 // MUST be zero for deterministic security!
+                temperature: 0.0,
+                response_format: { type: "json_object" }
             })
         });
         const data = await response.json() as any;
@@ -1483,11 +1532,12 @@ export async function generateAdversarialTest(task: string, filepath: string, co
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Task: ${task}\nFile: ${filepath}\nCode:\n\`\`\`\n${code}\n\`\`\`` }],
-            temperature: 0.1
+            temperature: 0.1,
+            response_format: { type: "json_object" }
         })
     });
     const data = await response.json() as any;
@@ -1516,14 +1566,16 @@ export async function compactConversationHistory(messages: any[]): Promise<strin
     const { endpoint, model, apiKey } = await getLLMConfig();
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: `CONVERSATION TO COMPACT:\n\`\`\`\n${formattedHistory}\n\`\`\`` }
             ],
-            temperature: 0.1
+            temperature: 0.1,
+            response_format: { type: "json_object" }
+
         })
     });
 
@@ -1553,11 +1605,12 @@ export async function generateMCTSApproaches(task: string, context: string): Pro
     try {
         const response = await resilientFetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Task: ${task}\n\nContext:\n${context}` }],
-                temperature: 0.4
+                temperature: 0.4,
+                response_format: { type: "json_object" }
             })
         });
         const data = await response.json() as any;

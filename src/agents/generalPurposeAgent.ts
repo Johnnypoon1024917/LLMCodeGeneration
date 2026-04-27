@@ -1,5 +1,5 @@
 // src/agents/generalPurposeAgent.ts
-import { getLLMConfig } from '../llmService';
+import { getLLMConfig, authHeaders } from '../llmService';
 
 export interface CodeDiff {
     filepath: string;
@@ -41,7 +41,7 @@ You must output your modification strictly using the following XML format:
     try {
         const response = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            headers: authHeaders(apiKey),
             body: JSON.stringify({
                 model: model,
                 messages: [

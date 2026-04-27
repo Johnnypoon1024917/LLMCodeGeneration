@@ -1,6 +1,6 @@
 // src/context/vectorDB.ts
 import * as vscode from 'vscode';
-import { getLLMConfig } from '../llmService';
+import { getLLMConfig, authHeaders} from '../llmService';
 
 export interface DocumentChunk {
     filepath: string;
@@ -28,7 +28,7 @@ export class VectorDatabase {
         try {
             const response = await fetch(embedEndpoint, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+                headers: authHeaders(apiKey),
                 body: JSON.stringify({
                     model: "text-embedding-nomic-embed-text", // Standard local fallback, or text-embedding-3-small
                     input: text.replace(/\n/g, ' ') // Embeddings work better without hard linebreaks

@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import './App.css';
 import ReactMarkdown from 'react-markdown';
 import ForceGraph3D from 'react-force-graph-3d';
-import { LoginModal } from './components/LoginModal';
 
 const vscode = (window as any).acquireVsCodeApi();
 let chatTokenBuffer = "";
@@ -120,9 +119,6 @@ export default function App() {
     const [taskTokens, setTaskTokens] = useState<Record<string, { prompt: number, completion: number }>>({});
 
     const [taskSteps, setTaskSteps] = useState<Record<string, AgentStep[]>>({});
-
-    // 🚀 NEW: Enterprise Auth State (Default to true so it doesn't flash before the backend handshake)
-    const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
     const [hasKey, setHasKey] = useState<boolean>(true);
@@ -164,6 +160,10 @@ export default function App() {
     const [activeTab, setActiveTab] = useState<'coder' | 'builder' | 'rules' | 'Map'>('coder');
     const [nexusRules, setNexusRules] = useState<string>('');
     const [requirements, setRequirements] = useState<string>('');
+    // Phase-gate state (audit §11). null until first initState payload arrives.
+    type PhaseStatus = 'not_started' | 'draft' | 'approved';
+    interface PhaseState { requirements: PhaseStatus; design: PhaseStatus; tasks: PhaseStatus; updatedAt: string; }
+    const [phaseState, setPhaseState] = useState<PhaseState | null>(null);
     const [rawIdea, setRawIdea] = useState<string>('');
     const [isGeneratingReqs, setIsGeneratingReqs] = useState(false);
     const [reqLogs, setReqLogs] = useState<string[]>([]);
@@ -495,23 +495,16 @@ export default function App() {
                 });
             }
 
-            if (data.type === 'authStateChanged') {
-                setIsAuthenticated(data.isAuthenticated);
-            }
-
             if (data.type === 'initState') {
                 const loadedMsgs = data.messages || [];
                 setHasKey(data.hasKey);
-                
-                // 🚀 Catch initial auth state from backend
-                setIsAuthenticated(data.isAuthenticated ?? false); 
-
                 if (data.taskStatuses) setTaskStatuses(data.taskStatuses);
                 if (data.taskSummaries) setTaskSummaries(data.taskSummaries);
                 if (data.taskFiles) setTaskFiles(data.taskFiles);
                 if (data.requirements) setRequirements(data.requirements);
                 if (data.design) setDesign(data.design);
                 if (data.nexusRules) setNexusRules(data.nexusRules);
+                if (data.phaseState) setPhaseState(data.phaseState);
 
                 if (data.tasks) {
                     setActivePlan(data.tasks);
@@ -547,6 +540,10 @@ export default function App() {
             if (data.type === 'designGenerated') {
                 setDesign(data.text);
                 setIsGeneratingDesign(false);
+            }
+
+            if (data.type === 'phaseStateUpdated') {
+                setPhaseState(data.phaseState);
             }
 
             if (data.type === 'reqStep') {
@@ -761,10 +758,7 @@ export default function App() {
 
     return (
         <div className="app-wrapper" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
-            {/* 🚀 Mount the Security Overlay and pass vscode down! */}
-            {!isAuthenticated && <LoginModal vscode={vscode} />}
-
-            <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)' }}>
+            <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)', flexShrink: 0 }}>
                 {metaMode ? '⚠️ SELF-EVOLUTION ACTIVE' : 'Andromeda'}
             </div>
 
@@ -1355,11 +1349,6 @@ export default function App() {
                                 {Icons.Refresh}
                             </button>
 
-                            {/* 🚀 Render Logout Button */}
-                            <button className="micro-btn" style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0, marginLeft: '4px' }} onClick={() => vscode.postMessage({ type: 'logout' })} title="Log Out">
-                                Logout
-                            </button>
-
                             {/* 🚀 Render Global Tokens */}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '10px', color: 'var(--nexus-subtext)', borderLeft: '1px solid var(--vscode-widget-border)', paddingLeft: '8px', marginLeft: '4px' }}>
                                 <span title="Total Input Tokens">📥 {globalTokens.prompt.toLocaleString()}</span>
@@ -1494,7 +1483,11 @@ export default function App() {
                 {(requirements && requirements.trim() !== '') && !design && !isGeneratingReqs && !isGeneratingDesign && (
                     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
-                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold' }}>✅ Saved to nexuscode/requirements.md</span>
+                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold' }}>
+                                {phaseState?.requirements === 'approved'
+                                    ? '✅ PRD approved · .nexus/specs/main/requirements.md'
+                                    : '📝 PRD draft · .nexus/specs/main/requirements.md'}
+                            </span>
                             <div style={{ display: 'flex', gap: '10px' }}>
                                 <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px' }} onClick={() => setIsEditingReqs(!isEditingReqs)}>
                                     {isEditingReqs ? '👁️ Preview' : '✏️ Edit'}
@@ -1521,23 +1514,45 @@ export default function App() {
                             />
                         )}
 
-                        <button
-                            style={{ padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold', flexShrink: 0 }}
-                            onClick={() => {
-                                setIsGeneratingDesign(true);
-                                setReqLogs([]);
-                                vscode.postMessage({ type: 'generateDesign', requirements });
-                            }}
-                        >
-                            ✅ Approve PRD & Generate Architecture Design
-                        </button>
+                        {/* Phase-gate UX: explicit Approve / Reject before unlocking the next phase. See audit §11. */}
+                        {phaseState?.requirements !== 'approved' ? (
+                            <div style={{ display: 'flex', gap: '10px', flexShrink: 0 }}>
+                                <button
+                                    style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                    onClick={() => vscode.postMessage({ type: 'rejectPhase', phase: 'requirements' })}
+                                >
+                                    ↩️ Reject & Regenerate
+                                </button>
+                                <button
+                                    style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                    onClick={() => vscode.postMessage({ type: 'approvePhase', phase: 'requirements' })}
+                                >
+                                    ✅ Approve PRD
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                style={{ padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold', flexShrink: 0 }}
+                                onClick={() => {
+                                    setIsGeneratingDesign(true);
+                                    setReqLogs([]);
+                                    vscode.postMessage({ type: 'generateDesign', requirements });
+                                }}
+                            >
+                                🚀 Generate Architecture Design
+                            </button>
+                        )}
                     </div>
                 )}
 
                 {(requirements && design) && !isGeneratingDesign && (
                     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
-                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold' }}>✅ Saved requirements.md & design.md</span>
+                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold' }}>
+                                {phaseState?.design === 'approved'
+                                    ? '✅ Design approved · .nexus/specs/main/'
+                                    : '📝 Design draft · .nexus/specs/main/'}
+                            </span>
                             <div style={{ display: 'flex', gap: '10px' }}>
                                 <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px' }} onClick={() => setIsEditingDesign(!isEditingDesign)}>
                                     {isEditingDesign ? '👁️ Preview' : '✏️ Edit Design'}
@@ -1581,27 +1596,45 @@ export default function App() {
                                 </button>
                             </div>
                         ) : (
-                            <div style={{ display: 'flex', gap: '10px', marginTop: '15px', flexShrink: 0 }}>
-                                <button
-                                    style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
-                                    onClick={() => {
-                                        vscode.postMessage({ type: 'updateRequirements', text: requirements });
-                                        vscode.postMessage({ type: 'updateDesign', text: design });
-                                        setActiveTab('coder');
-                                    }}
-                                >
-                                    💾 Just Save
-                                </button>
-                                <button
-                                    style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
-                                    onClick={() => {
-                                        setIsGeneratingTasks(true);
-                                        vscode.postMessage({ type: 'generateProjectTasks' });
-                                    }}
-                                >
-                                    ⚡ Generate Interactive Task List
-                                </button>
-                            </div>
+                            // Phase-gate UX for the design → tasks transition. See audit §11.
+                            phaseState?.design !== 'approved' ? (
+                                <div style={{ display: 'flex', gap: '10px', marginTop: '15px', flexShrink: 0 }}>
+                                    <button
+                                        style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                        onClick={() => vscode.postMessage({ type: 'rejectPhase', phase: 'design' })}
+                                    >
+                                        ↩️ Reject & Regenerate
+                                    </button>
+                                    <button
+                                        style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                        onClick={() => vscode.postMessage({ type: 'approvePhase', phase: 'design' })}
+                                    >
+                                        ✅ Approve Design
+                                    </button>
+                                </div>
+                            ) : (
+                                <div style={{ display: 'flex', gap: '10px', marginTop: '15px', flexShrink: 0 }}>
+                                    <button
+                                        style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                        onClick={() => {
+                                            vscode.postMessage({ type: 'updateRequirements', text: requirements });
+                                            vscode.postMessage({ type: 'updateDesign', text: design });
+                                            setActiveTab('coder');
+                                        }}
+                                    >
+                                        💾 Just Save
+                                    </button>
+                                    <button
+                                        style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                        onClick={() => {
+                                            setIsGeneratingTasks(true);
+                                            vscode.postMessage({ type: 'generateProjectTasks' });
+                                        }}
+                                    >
+                                        ⚡ Generate Implementation Plan
+                                    </button>
+                                </div>
+                            )
                         )}
                     </div>
                 )}

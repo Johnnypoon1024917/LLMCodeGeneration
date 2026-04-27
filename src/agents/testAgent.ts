@@ -1,6 +1,6 @@
 // src/agents/testAgent.ts
 import * as path from 'path';
-import { getLLMConfig, resilientFetch } from '../llmService';
+import { getLLMConfig, resilientFetch,authHeaders} from '../llmService';
 import { IEnvironment } from '../interfaces/IEnvironment';
 
 export interface TestSetup {
@@ -34,7 +34,7 @@ Write the Test Plan in Markdown format using BDD (Behavior-Driven Development) s
 
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
@@ -61,19 +61,19 @@ Your job is to read the Master Test Plan and the Codebase Context, and translate
 
 EXECUTION & SYNTAX RULES:
 1. You must write a test using the standard framework for the language (e.g., Jest for TS/JS, PyTest for Python).
-2. The test file MUST be placed in the 'nexuscode' directory (e.g., 'nexuscode/system.test.ts').
+2. The test file MUST be placed in '.nexus/specs/main/tests/' (e.g., '.nexus/specs/main/tests/system.test.ts').
 3. Return ONLY a valid JSON object matching this schema:
 {
-  "filepath": "nexuscode/system.test.ts",
-  "code": "import { ... } from '../src/...';\\n\\ndescribe('System Integration Test', () => { ... });",
-  "testCommand": "npx jest nexuscode/system.test.ts"
+  "filepath": ".nexus/specs/main/tests/system.test.ts",
+  "code": "import { ... } from '../../../../src/...';\\n\\ndescribe('System Integration Test', () => { ... });",
+  "testCommand": "npx jest .nexus/specs/main/tests/system.test.ts"
 }`;
 
     const userPrompt = `Codebase Context:\n${projectContext}\n\nMaster Test Plan to Implement:\n${testPlanMarkdown}`;
 
     const response = await resilientFetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: authHeaders(apiKey),
         body: JSON.stringify({
             model: model,
             messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
@@ -103,9 +103,9 @@ export async function runProjectTestAgent(
         const testPlanMarkdown = await draftProjectTestPlan(activeRequirements, projectContext);
         
         // Force the output specifically into the nexuscode/ folder
-        const planFilepath = path.join('nexuscode', 'system.testplan.md');
+        const testsDir = path.join('.nexus', 'specs', 'main', 'tests');
+        const planFilepath = path.join(testsDir, 'system.testplan.md');
         const absolutePlanPath = path.join(workspaceRoot, planFilepath);
-        
         await env.writeFile(absolutePlanPath, testPlanMarkdown);
         logCallback(`TestAgent: 📝 Master Test Plan written to ${planFilepath}`, "success");
 
@@ -115,7 +115,7 @@ export async function runProjectTestAgent(
         
         // Ensure the LLM didn't hallucinate the path outside of nexuscode/
         const ext = path.extname(parsedTest.filepath) || '.ts';
-        parsedTest.filepath = path.join('nexuscode', `system.test${ext}`);
+        parsedTest.filepath = path.join(testsDir, `system.test${ext}`);
         
         const absoluteTestPath = path.join(workspaceRoot, parsedTest.filepath);
         await env.writeFile(absoluteTestPath, parsedTest.code);
