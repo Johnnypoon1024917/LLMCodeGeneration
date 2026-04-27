@@ -1,3 +1,15 @@
+(function() {
+       const stamp = 'BUNDLE EXECUTING ' + new Date().toISOString();
+       console.log(stamp);
+       document.title = stamp;
+       window.addEventListener('DOMContentLoaded', () => {
+           const div = document.createElement('div');
+           div.style.cssText = 'position:fixed;top:0;left:0;background:red;color:white;padding:20px;z-index:99999;font-size:18px';
+           div.textContent = stamp;
+           document.body.appendChild(div);
+       });
+   })();
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import './App.css';
 import ReactMarkdown from 'react-markdown';
@@ -1106,7 +1118,7 @@ export default function App() {
                                                                             {!status && (
                                                                                 <button className="micro-btn" onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt }); }} title="Verify manual code">👁️ Verify</button>
                                                                             )}
-                                                                            
+
                                                                             {/* Main Execution / Retry Button */}
                                                                             <button className="micro-btn btn-primary" style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }} title="Auto-execute task">
                                                                                 {status === 'rejected' || status === 'error' ? '▶ Retry Execution' : '▶ Execute'}
@@ -1797,19 +1809,19 @@ export default function App() {
                             </div>
 
                             {/* 🚀 GLOBAL PROJECT TDD BUTTON */}
-                            <button 
+                            <button
                                 onClick={() => vscode.postMessage({ type: 'generateProjectTests' })}
                                 title="Generate Master TDD Suite (Markdown Plan + Code) in /nexuscode"
-                                style={{ 
-                                    background: '#238636', 
-                                    border: '1px solid rgba(240, 246, 252, 0.1)', 
-                                    color: '#ffffff', 
-                                    borderRadius: '6px', 
-                                    padding: '6px 12px', 
-                                    cursor: 'pointer', 
-                                    fontSize: '12px', 
-                                    fontWeight: 'bold', 
-                                    boxShadow: '0 2px 5px rgba(0,0,0,0.2)' 
+                                style={{
+                                    background: '#238636',
+                                    border: '1px solid rgba(240, 246, 252, 0.1)',
+                                    color: '#ffffff',
+                                    borderRadius: '6px',
+                                    padding: '6px 12px',
+                                    cursor: 'pointer',
+                                    fontSize: '12px',
+                                    fontWeight: 'bold',
+                                    boxShadow: '0 2px 5px rgba(0,0,0,0.2)'
                                 }}
                             >
                                 🧪 Generate Project TDD
@@ -1931,7 +1943,7 @@ export default function App() {
                                                         </span>
                                                     )}
                                                 </div>
-                                                
+
                                                 <button
                                                     style={{ background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: '1px solid var(--vscode-button-border, transparent)', cursor: 'pointer', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', flexShrink: 0 }}
                                                     title="Open File in Editor"

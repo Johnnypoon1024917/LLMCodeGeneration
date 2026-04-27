@@ -116,6 +116,40 @@
       {
         "command": "nexuscode.setApiKey",
         "title": "NexusCode: Set API Key"
+      },
+      {
+        "command": "nexuscode.runHook",
+        "title": "NexusCode: Run Hook"
+      },
+      {
+        "command": "nexuscode.acceptEdit",
+        "title": "NexusCode: Accept AI Edit",
+        "category": "NexusCode",
+        "enablement": "false"
+      },
+      {
+        "command": "nexuscode.rejectEdit",
+        "title": "NexusCode: Reject AI Edit",
+        "category": "NexusCode",
+        "enablement": "false"
+      },
+      {
+        "command": "nexuscode.refreshLens",
+        "title": "NexusCode: Refresh CodeLens",
+        "category": "NexusCode",
+        "enablement": "false"
+      },
+      {
+        "command": "nexuscode.viewDiff",
+        "title": "NexusCode: View AI Diff",
+        "category": "NexusCode",
+        "enablement": "false"
+      },
+      {
+        "command": "nexuscode.reviewCode",
+        "title": "NexusCode: Review Generated Code",
+        "category": "NexusCode",
+        "enablement": "false"
       }
     ],
     "submenus": [
@@ -134,8 +168,9 @@
     ]
   },
   "scripts": {
+    "validate": "node scripts/validate-manifest.js",
+    "compile": "npm run validate && tsc -p ./",
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
