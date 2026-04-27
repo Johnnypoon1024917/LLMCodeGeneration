@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import './App.css';
 import ReactMarkdown from 'react-markdown';
 import ForceGraph3D from 'react-force-graph-3d';
+import { LoginModal } from './components/LoginModal';
 
 const vscode = (window as any).acquireVsCodeApi();
 let chatTokenBuffer = "";
@@ -119,6 +120,9 @@ export default function App() {
     const [taskTokens, setTaskTokens] = useState<Record<string, { prompt: number, completion: number }>>({});
 
     const [taskSteps, setTaskSteps] = useState<Record<string, AgentStep[]>>({});
+
+    // 🚀 NEW: Enterprise Auth State (Default to true so it doesn't flash before the backend handshake)
+    const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
     const [hasKey, setHasKey] = useState<boolean>(true);
@@ -491,9 +495,17 @@ export default function App() {
                 });
             }
 
+            if (data.type === 'authStateChanged') {
+                setIsAuthenticated(data.isAuthenticated);
+            }
+
             if (data.type === 'initState') {
                 const loadedMsgs = data.messages || [];
                 setHasKey(data.hasKey);
+                
+                // 🚀 Catch initial auth state from backend
+                setIsAuthenticated(data.isAuthenticated ?? false); 
+
                 if (data.taskStatuses) setTaskStatuses(data.taskStatuses);
                 if (data.taskSummaries) setTaskSummaries(data.taskSummaries);
                 if (data.taskFiles) setTaskFiles(data.taskFiles);
@@ -749,7 +761,10 @@ export default function App() {
 
     return (
         <div className="app-wrapper" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
-            <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)', flexShrink: 0 }}>
+            {/* 🚀 Mount the Security Overlay and pass vscode down! */}
+            {!isAuthenticated && <LoginModal vscode={vscode} />}
+
+            <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)' }}>
                 {metaMode ? '⚠️ SELF-EVOLUTION ACTIVE' : 'Andromeda'}
             </div>
 
@@ -1338,6 +1353,11 @@ export default function App() {
                                 onClick={() => vscode.postMessage({ type: 'refreshCodeLens' })}
                                 title="Refresh UI">
                                 {Icons.Refresh}
+                            </button>
+
+                            {/* 🚀 Render Logout Button */}
+                            <button className="micro-btn" style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0, marginLeft: '4px' }} onClick={() => vscode.postMessage({ type: 'logout' })} title="Log Out">
+                                Logout
                             </button>
 
                             {/* 🚀 Render Global Tokens */}

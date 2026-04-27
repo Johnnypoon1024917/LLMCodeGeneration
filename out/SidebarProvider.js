@@ -44,6 +44,7 @@ const skillsManager_1 = require("./skillsManager");
 const Coordinator_1 = require("./agents/Coordinator");
 const VSCodeEnvironment_1 = require("./adapters/VSCodeEnvironment");
 const testAgent_1 = require("./agents/testAgent");
+const EnterpriseServices_1 = require("./infrastructure/EnterpriseServices");
 // AI Services & Tools
 const llmService_1 = require("./llmService");
 // Context Managers
@@ -197,14 +198,28 @@ class SidebarProvider {
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
-                //  THE FIX: The Webview Handshake. Loads chat history, PRDs, AND .nexusrules
+                // 🚀 Handle Login & Logout from the React UI
+                case "login": {
+                    await EnterpriseServices_1.AuthManager.login(data.token);
+                    this._view?.webview.postMessage({ type: 'authStateChanged', isAuthenticated: true });
+                    vscode.window.showInformationMessage("✅ Successfully logged into Nexus Swarm.");
+                    break;
+                }
+                case "logout": {
+                    await EnterpriseServices_1.AuthManager.logout();
+                    this._view?.webview.postMessage({ type: 'authStateChanged', isAuthenticated: false });
+                    vscode.window.showInformationMessage("Logged out of Nexus Swarm.");
+                    break;
+                }
+                // THE WEBVIEW HANDSHAKE
                 case "webviewReady": {
-                    // 🚀 FIX: Migrate from globalState to workspaceState so task statuses are permanently bound to the specific project!
                     const chatHistory = extension_1.globalContext.workspaceState.get('nexus_chat_history') || [];
                     const taskStatuses = extension_1.globalContext.workspaceState.get('nexus_task_statuses') || {};
                     const taskSummaries = extension_1.globalContext.workspaceState.get('nexus_task_summaries') || {};
                     const taskFiles = extension_1.globalContext.workspaceState.get('nexus_task_files') || {};
                     const hasApiKey = !!(await extension_1.globalContext.secrets.get('nexuscode_apikey'));
+                    // 🚀 SECURE BOOT: Check OS Keyring for Auth Token
+                    const isAuthenticated = await EnterpriseServices_1.AuthManager.isAuthenticated();
                     let savedReqs = "";
                     let savedDesign = "";
                     let savedTasks = null;
@@ -245,7 +260,8 @@ class SidebarProvider {
                         design: savedDesign,
                         tasks: savedTasks,
                         nexusRules: savedRules,
-                        hasKey: hasApiKey
+                        hasKey: hasApiKey,
+                        isAuthenticated: isAuthenticated // 🚀 Pass auth state cleanly to React
                     });
                     break;
                 }

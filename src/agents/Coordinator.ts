@@ -5,6 +5,7 @@ import { runPlannerAgent } from './planAgent';
 import { runVerificationAgent } from './verificationAgent';
 import { getLLMConfig, resilientFetch } from '../llmService';
 import { IEnvironment } from '../interfaces/IEnvironment';
+import { AuditLogger } from '../infrastructure/EnterpriseServices';
 
 export interface CodeDiff {
     filepath: string;
@@ -234,6 +235,18 @@ export class SwarmCoordinator {
                     if (verification.usage && usageCallback) {
                         usageCallback(verification.usage);
                     }
+
+                    // 🚀 COMPLIANCE AUDIT LOGGING: Dump the exact prompt, response, and token usage to disk
+                    await AuditLogger.logInteraction(workspaceRoot, "LLM_GENERATION", {
+                        task: task,
+                        targetFile: filepath,
+                        attempt: attempts,
+                        verificationPassed: verification.passed,
+                        tokens: verification.usage || null,
+                        critique: verification.critique,
+                        // Truncate code in logs to save space, but capture the essence
+                        generatedPatchPreview: shadowCodeBuffer.substring(0, 500) + '...' 
+                    });
 
                     if (verification.passed) {
                         finalDiff = draftDiff;

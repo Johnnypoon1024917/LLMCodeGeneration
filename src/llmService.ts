@@ -539,13 +539,13 @@ export async function runAgenticExploration(
     const explorePrompt = `You are the Explorer Agent. Your role is EXCLUSIVELY to search and analyze the codebase dynamically using tools.
     
      CRITICAL RULES 
-    1. NO SEQUENTIAL SPAMMING: You MUST request all necessary 'read_file' calls simultaneously in your VERY FIRST turn. Do not ask for files one by one.
-    2. EARLY EXIT: The absolute moment you have read the core files required for the task, you MUST STOP. Output exactly "READY_TO_CODE" and nothing else. Do not search aimlessly.
-    3. NO HALLUCINATIONS: Do not use 'search_codebase' with generic terms like "directory". Only search for highly specific function names.
+    1. DO NOT HALLUCINATE PATHS: You already have the full Directory Tree below. ONLY call 'read_file' on files that actually exist in this tree. Do not guess folder names.
+    2. USE FIND_FILE: If you are looking for a file but don't know the exact path, use the 'find_file' tool. DO NOT guess the path.
+    3. YOU ARE STRICTLY PROHIBITED FROM: Creating new files, modifying files, or writing code.
+    4. Use 'grep_search' to find where specific functions, classes, or variables are defined.
+    5. Once you have enough context, reply with: "READY_TO_CODE".
     
-    🚀 FAST-TRACK CONTEXT (AST PRE-FETCH): 
-    You already know the directory structure! Do not waste time trying to discover files.
-    Here is the existing layout:
+    --- DIRECTORY TREE ---
     ${projectContext}`;
 
     let messages: any[] = [
@@ -553,7 +553,7 @@ export async function runAgenticExploration(
         { role: "user", content: `Task: ${taskDescription}\nYou already know the file paths. Call 'read_file' on the targets immediately in a single batch, then exit with READY_TO_CODE!` }
     ];
 
-    //  Inject the Claude-Style Dynamic Grep Tool
+    //  Inject the Claude-Style Dynamic Grep & Find Tools
     const dynamicTools = [
         {
             type: "function",
@@ -561,6 +561,14 @@ export async function runAgenticExploration(
                 name: "grep_search",
                 description: "Search the entire codebase for a regex or string pattern (like ripgrep). Use this to hunt down where functions are used.",
                 parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }
+            }
+        },
+        {
+            type: "function",
+            function: {
+                name: "find_file",
+                description: "Search the directory tree for a specific file by its name or partial name if you don't know the exact folder path.",
+                parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] }
             }
         },
         ...agentToolDefinitions.filter(t => ['read_file', 'list_directory'].includes(t.function.name))
@@ -571,7 +579,6 @@ export async function runAgenticExploration(
 
     for (let step = 0; step < 2; step++) {
         try {
-            // 🚀 FIX: Removed the 15-second AbortController. Replaced with the user's AbortSignal!
             const response = await resilientFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
@@ -589,47 +596,83 @@ export async function runAgenticExploration(
                     const funcArgs = JSON.parse(toolCall.function.arguments);
                     let toolResult = "";
 
-                    //  Execute Native VS Code Grep
                     if (funcName === 'grep_search') {
                         statusCallback('search', 'Grep Search', `Pattern: ${funcArgs.pattern}`);
                         try {
-                            // Search code files, explicitly ignoring heavy build directories
-                            const files = await vscode.workspace.findFiles(
-                                '**/*.{ts,tsx,js,jsx,json,html,css,py,java,cpp,c,go,rs,rb}',
-                                '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/out/**}',
-                                300 // Max files to scan for performance
-                            );
+                            if (funcArgs.pattern.length < 3) {
+                                toolResult = "Pattern too short. Please use a more specific search term.";
+                            } else {
+                                // 🚀 CROSS-PLATFORM BATCH GREP: 
+                                // Fetch targets, then read them concurrently while bypassing the slow fs.stat()
+                                const files = await vscode.workspace.findFiles(
+                                    '**/*.{ts,tsx,js,jsx,json,html,css,py,java,cpp,c,go,rs,rb,md,txt}',
+                                    '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/out/**,**/.next/**}',
+                                    150 // Strict limit to prevent memory hangs
+                                );
 
-                            // Safely parse the regex to avoid crash loops on bad AI payloads
-                            const regex = new RegExp(funcArgs.pattern, 'i');
-                            let matchCount = 0;
+                                const regex = new RegExp(funcArgs.pattern, 'i');
+                                let matchCount = 0;
+                                
+                                await Promise.all(files.map(async (file) => {
+                                    if (matchCount >= 30) return;
+                                    try {
+                                        const fileData = await vscode.workspace.fs.readFile(file);
+                                        
+                                        // 🚀 INSTANT SKIP: Ignore empty files or files > 500KB without needing fs.stat
+                                        if (fileData.byteLength === 0 || fileData.byteLength > 512000) return;
 
-                            for (const file of files) {
-                                if (matchCount >= 30) break; // Strict token safety limit!
-                                try {
-                                    const fileData = await vscode.workspace.fs.readFile(file);
-                                    const content = Buffer.from(fileData).toString('utf8');
-                                    const lines = content.split('\n');
+                                        const content = new TextDecoder('utf8').decode(fileData);
+                                        const lines = content.split('\n');
 
-                                    for (let i = 0; i < lines.length; i++) {
-                                        if (regex.test(lines[i])) {
-                                            const relativePath = vscode.workspace.asRelativePath(file);
-                                            // Format: path/to/file.ts:42: const x = ...
-                                            toolResult += `${relativePath}:${i + 1}: ${lines[i].trim().substring(0, 100)}\n`;
-                                            matchCount++;
-                                            if (matchCount >= 30) break;
+                                        for (let i = 0; i < lines.length; i++) {
+                                            if (regex.test(lines[i])) {
+                                                const relativePath = vscode.workspace.asRelativePath(file);
+                                                toolResult += `${relativePath}:${i + 1}: ${lines[i].trim().substring(0, 100)}\n`;
+                                                matchCount++;
+                                                if (matchCount >= 30) return;
+                                            }
                                         }
+                                    } catch (err) {
+                                        // Silently skip unreadable files
                                     }
-                                } catch (err) {
-                                    // Silently skip unreadable or binary files
-                                }
+                                }));
+                                
+                                toolResult = toolResult ? toolResult : "No matches found.";
                             }
-                            toolResult = toolResult ? toolResult : "No matches found.";
                         } catch (e) {
-                            toolResult = "Grep failed due to invalid regex or file permissions.";
+                            toolResult = "Grep failed due to invalid regex.";
+                        }
+                    } else if (funcName === 'find_file') {
+                        statusCallback('search', 'Finding File', funcArgs.filename);
+                        try {
+                            const files = await vscode.workspace.findFiles(`**/*${funcArgs.filename}*`, '{**/node_modules/**,**/.git/**,**/dist/**}', 10);
+                            toolResult = files.length > 0 
+                                ? files.map(f => vscode.workspace.asRelativePath(f)).join('\n')
+                                : "File not found. Do not guess the path.";
+                        } catch (e) {
+                            toolResult = "File search failed.";
+                        }
+                    } else if (funcName === 'read_file') {
+                        // 🚀 HALLUCINATION GUARD: Fast fail if the file doesn't exist
+                        try {
+                            const uri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), funcArgs.filepath);
+                            await vscode.workspace.fs.stat(uri);
+                            statusCallback('read', 'Read file(s)', funcArgs.filepath);
+                            toolResult = await executeAgentTool(toolCall, workspaceRoot);
+                        } catch (e) {
+                            toolResult = `ERROR: File '${funcArgs.filepath}' does not exist. STOP guessing paths. Use 'find_file' to locate it.`;
+                        }
+                    } else if (funcName === 'list_directory') {
+                        // 🚀 HALLUCINATION GUARD: Fast fail if the folder doesn't exist
+                        try {
+                            const uri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), funcArgs.path || "");
+                            await vscode.workspace.fs.stat(uri);
+                            statusCallback('search', 'List Directory', funcArgs.path);
+                            toolResult = await executeAgentTool(toolCall, workspaceRoot);
+                        } catch (e) {
+                            toolResult = `ERROR: Directory '${funcArgs.path}' does not exist. Look at the DIRECTORY TREE.`;
                         }
                     } else {
-                        if (funcName === 'read_file') statusCallback('read', 'Read file(s)', funcArgs.filepath);
                         toolResult = await executeAgentTool(toolCall, workspaceRoot);
                     }
 

@@ -9,6 +9,7 @@ import { SwarmCoordinator } from './agents/Coordinator';
 import { parseRequirementGraph, buildCombinedGraph } from './context/traceabilityGraph';
 import { VSCodeEnvironment } from './adapters/VSCodeEnvironment';
 import { runProjectTestAgent } from './agents/testAgent';
+import { AuthManager, AccessControl, AuditLogger } from './infrastructure/EnterpriseServices';
 
 // AI Services & Tools
 import {
@@ -220,14 +221,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
 
-                //  THE FIX: The Webview Handshake. Loads chat history, PRDs, AND .nexusrules
+                // 🚀 Handle Login & Logout from the React UI
+                case "login": {
+                    await AuthManager.login(data.token);
+                    this._view?.webview.postMessage({ type: 'authStateChanged', isAuthenticated: true });
+                    vscode.window.showInformationMessage("✅ Successfully logged into Nexus Swarm.");
+                    break;
+                }
+                case "logout": {
+                    await AuthManager.logout();
+                    this._view?.webview.postMessage({ type: 'authStateChanged', isAuthenticated: false });
+                    vscode.window.showInformationMessage("Logged out of Nexus Swarm.");
+                    break;
+                }
+
+                // THE WEBVIEW HANDSHAKE
                 case "webviewReady": {
-                    // 🚀 FIX: Migrate from globalState to workspaceState so task statuses are permanently bound to the specific project!
                     const chatHistory = globalContext.workspaceState.get<any[]>('nexus_chat_history') || [];
                     const taskStatuses = globalContext.workspaceState.get<any>('nexus_task_statuses') || {};
                     const taskSummaries = globalContext.workspaceState.get<any>('nexus_task_summaries') || {};
                     const taskFiles = globalContext.workspaceState.get<any>('nexus_task_files') || {};
                     const hasApiKey = !!(await globalContext.secrets.get('nexuscode_apikey'));
+
+                    // 🚀 SECURE BOOT: Check OS Keyring for Auth Token
+                    const isAuthenticated = await AuthManager.isAuthenticated();
 
                     let savedReqs = "";
                     let savedDesign = "";
@@ -262,7 +279,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         design: savedDesign,
                         tasks: savedTasks,
                         nexusRules: savedRules,
-                        hasKey: hasApiKey
+                        hasKey: hasApiKey,
+                        isAuthenticated: isAuthenticated // 🚀 Pass auth state cleanly to React
                     });
                     break;
                 }
@@ -832,7 +850,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: exploreTaskId, status: 'reviewing', summary: 'Gathering forensic evidence...' });
 
                             const workspacePath = await this.getTargetContext();
-                            
+
                             // 🚀 FAST-TRACK: Pre-fetch the AST so the AI doesn't have to guess!
                             const projectContext = await getProjectContext(workspacePath);
 
@@ -1102,11 +1120,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     const nexusDir = vscode.Uri.joinPath(rootUri, 'nexuscode');
                                     const tasksMdUri = vscode.Uri.joinPath(nexusDir, 'tasks.md');
                                     let mdContent = new TextDecoder().decode(await vscode.workspace.fs.readFile(tasksMdUri));
-                                    
+
                                     // Handle both bolded and unbolded variants just in case
                                     mdContent = mdContent.replace(`[ ] **${data.task}**`, `[x] **${data.task}**`);
                                     mdContent = mdContent.replace(`[ ] ${data.task}`, `[x] ${data.task}`);
-                                    
+
                                     await vscode.workspace.fs.writeFile(tasksMdUri, Buffer.from(mdContent, 'utf8'));
                                 } catch (e) {
                                     console.warn("Could not auto-update tasks.md", e);
@@ -1202,7 +1220,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         else buildCommand = "echo 'No standard build file found (e.g., tsconfig.json, pom.xml). Skipping build.'";
                     } catch (e) {
                         // 🚀 FIX: Do not assume TypeScript if the environment is completely unknown!
-                        buildCommand = "echo 'No standard build system detected (e.g., tsconfig.json, pom.xml). Skipping global compilation.'"; 
+                        buildCommand = "echo 'No standard build system detected (e.g., tsconfig.json, pom.xml). Skipping global compilation.'";
                     }
 
                     const result = await this._terminalManager?.runCommandWithCapture(buildCommand, workspacePath);
