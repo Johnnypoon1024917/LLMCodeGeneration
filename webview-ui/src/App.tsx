@@ -1043,8 +1043,27 @@ export default function App() {
                                                 const isObj = typeof rawTask !== 'string';
                                                 const taskObj = isObj ? (rawTask as ProjectTask) : null;
 
-                                                const taskKey = taskObj ? taskObj.step : (rawTask as string);
+                                                // Hotfix (post-2B): the previous derivation `taskObj?.step ?? rawTask`
+                                                // produced a taskKey that COLLIDED across tasks when:
+                                                //   (a) the model returned multiple tasks with empty `step` (e.g.,
+                                                //       17 tasks all keyed by ""), or
+                                                //   (b) two tasks happened to share the same step text.
+                                                // Symptom: clicking Execute on one task showed all tasks as
+                                                // "running" because they all read the same dictionary entry.
+                                                //
+                                                // Fix: derive taskKey from the task's POSITION in the plan
+                                                // (always unique). The original step text is preserved as
+                                                // taskTitle (used for display) and taskTitleForBackend (sent
+                                                // alongside `task: taskKey` so SpecManager.markTaskCompleted
+                                                // can still sync the .nexus/specs/<feature>/tasks.md checkbox
+                                                // by matching on the human-readable title).
+                                                //
+                                                // Plain-string tasks (legacy format) keep using the string
+                                                // itself as the key — they're rare, usually unique, and
+                                                // changing their behavior risks breaking older flows.
+                                                const taskKey = taskObj ? `task-${tIdx}` : (rawTask as string);
                                                 const taskTitle = taskObj ? taskObj.step : (rawTask as string);
+                                                const taskTitleForBackend = taskTitle; // sent as `taskTitle` field
                                                 const taskFile = taskObj ? taskObj.file : "";
                                                 const taskReq = taskObj ? taskObj.relatedRequirement : "";
 
@@ -1189,7 +1208,7 @@ export default function App() {
 
                                                                     {/* 2. Rejected State: Allow Manual Feedback */}
                                                                     {status === 'rejected' && (
-                                                                        <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, codingStyle: codingStyleRef.current })}>💬 Provide Feedback</button>
+                                                                        <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'requestRevision', task: taskKey, taskTitle: taskTitleForBackend, codingStyle: codingStyleRef.current })}>💬 Provide Feedback</button>
                                                                     )}
 
                                                                     {/* 3. Executable States: Empty, Rejected, or Error */}
@@ -1197,11 +1216,11 @@ export default function App() {
                                                                         <>
                                                                             {/* Only show Verify if it has never been run */}
                                                                             {!status && (
-                                                                                <button className="micro-btn" onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt }); }} title={t("buttons.verify_manual")}>👁️ Verify</button>
+                                                                                <button className="micro-btn" onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'verifyTask', task: taskKey, taskTitle: taskTitleForBackend, prompt: taskPrompt }); }} title={t("buttons.verify_manual")}>👁️ Verify</button>
                                                                             )}
 
                                                                             {/* Main Execution / Retry Button */}
-                                                                            <button className="micro-btn btn-primary" style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }} title={t("buttons.auto_execute")}>
+                                                                            <button className="micro-btn btn-primary" style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'executeTask', task: taskKey, taskTitle: taskTitleForBackend, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }} title={t("buttons.auto_execute")}>
                                                                                 {status === 'rejected' || status === 'error' ? '▶ Retry Execution' : '▶ Execute'}
                                                                             </button>
                                                                         </>

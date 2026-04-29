@@ -503,6 +503,73 @@ export interface AIPlan {
 export interface TestSetupPlan { installCommand: string; testCommand: string; filepath: string; code: string; }
 export interface AtomicEdit { filepath: string; code: string; action: 'replace' | 'append'; }
 
+/**
+ * Hotfix (post-2B): the customer's vLLM endpoint advertises json_schema
+ * support but xgrammar (vLLM's default constrained-decode backend) does
+ * NOT enforce string-level constraints like `minLength`. The model can
+ * therefore return tasks where `step`, `file`, and `detailedInstructions`
+ * are valid strings ("") that pass schema validation but produce empty
+ * cards in the UI. Observed in the wild: 17 tasks rendered with no
+ * title, no file, no instructions — UI shows just "1." "2." "3."
+ *
+ * Schema-level fix isn't reliable (xgrammar limitation, see vLLM docs).
+ * The honest fix is post-validation: after parsing the plan, reject
+ * any task with empty required fields. The caller can choose to retry
+ * with a corrective system message (we do this in `generateTasks`) or
+ * surface the failure to the user.
+ *
+ * Returns null when the plan is valid; otherwise returns a human-
+ * readable description of what's wrong (used in the corrective retry
+ * prompt and in error messages surfaced to the user).
+ *
+ * Tasks may legitimately come back as plain strings (older flows did
+ * this) — those are tolerated. Empty-string tasks are also rejected
+ * because they produce the same UX bug.
+ */
+export function validateTasksPlan(plan: AIPlan): string | null {
+    if (!plan || !Array.isArray(plan.implementationTasks)) {
+        return 'plan has no implementationTasks array';
+    }
+    if (plan.implementationTasks.length === 0) {
+        return 'plan has zero tasks';
+    }
+
+    const issues: string[] = [];
+    plan.implementationTasks.forEach((task, idx) => {
+        // Plain-string tasks: must be non-empty.
+        if (typeof task === 'string') {
+            if (!task.trim()) {
+                issues.push(`task[${idx}] is an empty string`);
+            }
+            return;
+        }
+
+        // Object tasks: required fields must be non-empty after trim.
+        // We check `step`, `file`, `detailedInstructions` because these
+        // are the three the UI renders. Optional fields like
+        // `relatedRequirement` may be empty without breaking anything.
+        const t = task as Partial<ProjectTask>;
+        const missing: string[] = [];
+        if (!t.step || !String(t.step).trim()) missing.push('step');
+        if (!t.file || !String(t.file).trim()) missing.push('file');
+        if (!t.detailedInstructions || !String(t.detailedInstructions).trim()) {
+            missing.push('detailedInstructions');
+        }
+        if (missing.length > 0) {
+            issues.push(`task[${idx}] is missing or empty: ${missing.join(', ')}`);
+        }
+    });
+
+    if (issues.length === 0) return null;
+    // Cap the issue list at 5 entries so error messages stay readable
+    // when the model returns 17 empty tasks. The first few are enough
+    // to communicate the failure mode; the user doesn't need to scroll.
+    const head = issues.slice(0, 5);
+    const remaining = issues.length - head.length;
+    if (remaining > 0) head.push(`(+${remaining} more)`);
+    return head.join('; ');
+}
+
 export async function generatePlan(prompt: string, projectContext: string): Promise<{ explanation: string, plan: AIPlan }> {
     const systemPrompt = `You are the Coordinator Agent (Lead Architect).
     Your job is to analyze the user's request and the EXISTING DIRECTORY STRUCTURE, then break it down into atomic tasks.
@@ -954,19 +1021,66 @@ export async function generateTasks(requirements: string, design: string, existi
     // at decode time. Same with the special-case handling for tasks that
     // came back as plain strings (the schema rules that out — items must
     // be objects with `step`, `file`, `detailedInstructions`).
+    //
+    // POST-2B HOTFIX: schema-level constraint enforcement is unreliable on
+    // the customer's vLLM endpoint (xgrammar backend doesn't honor
+    // minLength/string-non-empty constraints — see vLLM structured-output
+    // docs). The model can therefore return tasks with `step: ""`,
+    // `file: ""`, `detailedInstructions: ""` that pass schema validation
+    // but produce empty cards in the UI. We post-validate and, on
+    // failure, retry once with a corrective system message that points
+    // out the specific failure mode. If the retry also fails, we throw
+    // a clear error so the user knows to retry/fix their inputs.
     const provider = await getProvider();
     const completionOptions: import('./llm').CompletionOptions = {
         temperature: 0.1
     };
     if (abortSignal) completionOptions.signal = abortSignal;
-    const parsedPlan = await provider.jsonCompletion<AIPlan>(
-        [
-            { role: 'system', content: systemPrompt },
-            { role: 'user',   content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
-        ],
+
+    const baseMessages = [
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const,   content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
+    ];
+
+    let parsedPlan = await provider.jsonCompletion<AIPlan>(
+        baseMessages,
         tasksPlanSchema,
         completionOptions
     );
+
+    let issues = validateTasksPlan(parsedPlan);
+    if (issues) {
+        // First attempt failed validation. Retry ONCE with a corrective
+        // system message that surfaces the exact failure. We don't retry
+        // indefinitely — the customer endpoint's pricing isn't free and
+        // a deterministic-temperature model that fails twice is very
+        // unlikely to succeed on attempt 3. One retry catches the
+        // "model got confused once" case; persistent failure surfaces
+        // to the user.
+        const correctiveMessages: typeof baseMessages = [
+            ...baseMessages,
+            {
+                role: 'system' as const,
+                content: `Your previous response had a structural problem: ${issues}.\n\n` +
+                    `Every task MUST have non-empty values for "step", "file", and "detailedInstructions". ` +
+                    `Do not return placeholder strings, single spaces, or empty strings for these fields. ` +
+                    `Each task should describe a concrete file-creation or code-editing action with a real target path.`
+            }
+        ];
+        parsedPlan = await provider.jsonCompletion<AIPlan>(
+            correctiveMessages,
+            tasksPlanSchema,
+            completionOptions
+        );
+        issues = validateTasksPlan(parsedPlan);
+        if (issues) {
+            throw new Error(
+                `Implementation plan generation failed validation after retry: ${issues}. ` +
+                `This usually means the model endpoint is having trouble with the structured-output ` +
+                `format. Try regenerating the plan, or check the model/endpoint configuration.`
+            );
+        }
+    }
 
     return parsedPlan;
 }

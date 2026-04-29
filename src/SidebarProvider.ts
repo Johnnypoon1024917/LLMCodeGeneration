@@ -492,7 +492,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         if (verification.verified) {
                             const specs = new SpecManager(rootUri);
-                            await specs.markTaskCompleted(data.task);
+                            // Hotfix (post-2B): the webview now sends `task` as a UI-uniqueness
+                            // key (e.g., "task-3") instead of the human-readable title.
+                            // markTaskCompleted matches against the title in tasks.md, so we
+                            // accept `data.taskTitle` if provided, falling back to `data.task`
+                            // for back-compat with any caller that hasn't been updated yet.
+                            await specs.markTaskCompleted(data.taskTitle ?? data.task);
 
                             try {
                                 if (this._activeRequirements) {
@@ -754,8 +759,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
 
                 case "requestRevision": {
+                    // Hotfix (post-2B): the webview's `data.task` is now a UI-uniqueness
+                    // key (e.g., "task-3"); use `data.taskTitle` for the human-readable
+                    // prompt so the user sees the actual task description, not the
+                    // internal key.
+                    const taskLabel = data.taskTitle ?? data.task;
                     const feedback = await vscode.window.showInputBox({
-                        prompt: `Why was the code for "${data.task}" rejected?`,
+                        prompt: `Why was the code for "${taskLabel}" rejected?`,
                         placeHolder: "e.g., 'Use axios instead of fetch', or 'Fix the null pointer error'"
                     });
 
@@ -1218,7 +1228,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                                 // 🚀 FIX: Explicitly check off the task in tasks.md on the hard drive
                                 try {
-                                    await new SpecManager(rootUri).markTaskCompleted(data.task);
+                                    // Hotfix (post-2B): see verifyTask for rationale. data.task is now
+                                    // a UI-uniqueness key (e.g., "task-3"); the title for tasks.md
+                                    // sync comes from data.taskTitle when available.
+                                    await new SpecManager(rootUri).markTaskCompleted(data.taskTitle ?? data.task);
                                 } catch (e) {
                                     log.warn("Could not auto-update tasks.md", e);
                                 }
