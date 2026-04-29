@@ -202,6 +202,89 @@ describe('search_codebase tool', () => {
         expect(matches).toEqual([]);
         expect(result.llmContent).toContain('No results');
     });
+
+    // ─── Hotfix (post-2B): low-value keyword rejection ──────────────
+
+    test('rejects keyword shorter than 3 characters with corrective message', async () => {
+        const result = await dispatchTool(
+            { id: 'c1', type: 'function', function: { name: 'search_codebase', arguments: '{"keyword":"if"}' } },
+            ctx
+        );
+
+        expect(result.uiPayload.kind).toBe('error');
+        expect(result.llmContent).toContain('too short');
+        expect(result.llmContent).toContain('distinctive');
+        // Must NOT have called findFiles — the rejection happens before
+        // any expensive workspace operation.
+        expect(mockedFindFiles).not.toHaveBeenCalled();
+    });
+
+    test('rejects single-character keyword', async () => {
+        const result = await dispatchTool(
+            { id: 'c1', type: 'function', function: { name: 'search_codebase', arguments: '{"keyword":"a"}' } },
+            ctx
+        );
+        expect(result.uiPayload.kind).toBe('error');
+        expect(result.llmContent).toContain('too short');
+    });
+
+    test('rejects common JS/TS keyword "function"', async () => {
+        const result = await dispatchTool(
+            { id: 'c1', type: 'function', function: { name: 'search_codebase', arguments: '{"keyword":"function"}' } },
+            ctx
+        );
+        expect(result.uiPayload.kind).toBe('error');
+        expect(result.llmContent).toContain('generic language token');
+        expect(result.llmContent).toContain('NavigationBar');
+        expect(mockedFindFiles).not.toHaveBeenCalled();
+    });
+
+    test('rejects common JS/TS keyword "import"', async () => {
+        const result = await dispatchTool(
+            { id: 'c1', type: 'function', function: { name: 'search_codebase', arguments: '{"keyword":"import"}' } },
+            ctx
+        );
+        expect(result.uiPayload.kind).toBe('error');
+        expect(result.llmContent).toContain('generic language token');
+    });
+
+    test('rejection is case-insensitive (e.g., "IMPORT" still rejected)', async () => {
+        const result = await dispatchTool(
+            { id: 'c1', type: 'function', function: { name: 'search_codebase', arguments: '{"keyword":"IMPORT"}' } },
+            ctx
+        );
+        expect(result.uiPayload.kind).toBe('error');
+        expect(result.llmContent).toContain('generic language token');
+    });
+
+    test('accepts non-keyword identifiers like "calculateTax"', async () => {
+        // Should pass the deny-list check and proceed to findFiles.
+        mockedFindFiles.mockResolvedValueOnce([]);
+
+        const result = await dispatchTool(
+            { id: 'c1', type: 'function', function: { name: 'search_codebase', arguments: '{"keyword":"calculateTax"}' } },
+            ctx
+        );
+
+        // Not blocked — proceeds to the search, returns empty matches.
+        expect(result.uiPayload.kind).toBe('search_matches');
+        expect(mockedFindFiles).toHaveBeenCalled();
+    });
+
+    test('accepts multi-word phrases that contain keywords', async () => {
+        // "if (user" contains "if" but as part of a larger phrase that's
+        // a legitimate productive search. Whole-string match against the
+        // deny-list shouldn't reject this.
+        mockedFindFiles.mockResolvedValueOnce([]);
+
+        const result = await dispatchTool(
+            { id: 'c1', type: 'function', function: { name: 'search_codebase', arguments: '{"keyword":"if (user"}' } },
+            ctx
+        );
+
+        expect(result.uiPayload.kind).toBe('search_matches');
+        expect(mockedFindFiles).toHaveBeenCalled();
+    });
 });
 
 describe('write_file tool', () => {

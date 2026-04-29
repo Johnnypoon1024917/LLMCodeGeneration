@@ -14,7 +14,6 @@ import { getProvider } from './llm';
 import {
     intentSchema,
     requirementPlanSchema,
-    planEnvelopeSchema,
     tasksPlanSchema,
     targetFileSchema,
     testSetupSchema,
@@ -571,40 +570,119 @@ export function validateTasksPlan(plan: AIPlan): string | null {
 }
 
 export async function generatePlan(prompt: string, projectContext: string): Promise<{ explanation: string, plan: AIPlan }> {
+    // Hotfix (post-2B audit): generatePlan was using `aiPlanSchema` /
+    // `implementationTaskSchema` which has fields `{id, description,
+    // targetFile, instructions}`. The webview (App.tsx) reads
+    // `taskObj.step`, `taskObj.file`, `taskObj.detailedInstructions` —
+    // i.e., the ProjectTask shape used by `generateTasks`. The two
+    // didn't match, so EVERY plan produced via Vibe-mode chat (this
+    // function) rendered with blank task titles in the UI.
+    //
+    // The right fix is to align the schemas: this function and
+    // `generateTasks` should both produce the same shape because the
+    // webview is the same. We unify on the ProjectTask shape (the
+    // richer one — `generateTasks` already uses it for the Master
+    // Implementation Plan flow). The legacy field names are gone;
+    // there's no consumer for them anymore.
+    //
+    // We also reuse the same `validateTasksPlan` post-validation +
+    // one-shot retry pattern as `generateTasks` so empty fields can't
+    // slip through here either.
     const systemPrompt = `You are the Coordinator Agent (Lead Architect).
-    Your job is to analyze the user's request and the EXISTING DIRECTORY STRUCTURE, then break it down into atomic tasks.
-    YOU DO NOT WRITE THE FINAL CODE. You only generate the blueprint for the Coder Agent.
+Your job is to analyze the user's request and the EXISTING DIRECTORY STRUCTURE, then break it down into atomic tasks.
+YOU DO NOT WRITE THE FINAL CODE. You only generate the blueprint for the Coder Agent.
 
-    Return JSON with two fields:
-      "explanation": a 1-2 sentence summary of the architectural approach
-      "plan": { "implementationTasks": [...] }
-
-    CRITICAL RULES:
-    - ADAPT to the existing folder structure. Do not invent new paradigms.
-    - ATOMIC TASKS: Break down "implementationTasks" so EACH task targets ONE file.
-
-    Example Output:
-    {
-      "explanation": "We need to add a new Booking tab to the navigation menu.",
-      "plan": {
-        "implementationTasks": [
-          { "id": "TASK-001", "description": "Add booking tab to navigation in public/index.html", "targetFile": "public/index.html" }
-        ]
+Return JSON matching this exact shape:
+{
+  "explanation": "1-2 sentence summary of the architectural approach",
+  "plan": {
+    "folderStructure": ["src/index.ts", "src/components/Header.tsx"],
+    "implementationTasks": [
+      {
+        "step": "Add booking tab to navigation",
+        "file": "src/components/Navigation.tsx",
+        "detailedInstructions": "Insert a new <Tab> component after the existing tabs, route it to /booking, and use the existing styling tokens.",
+        "relatedRequirement": "Booking flow",
+        "dependencies": [],
+        "verificationRules": ["Tab renders without error", "Click navigates to /booking"],
+        "testStrategy": "Render the navigation, click the new tab, assert URL changes."
       }
-    }`;
+    ]
+  }
+}
 
-    const result = await jsonRequestData<{ explanation?: string, plan?: AIPlan }>({
-        messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: `EXISTING DIRECTORY STRUCTURE:\n${projectContext}\n\nUSER REQUEST: ${prompt}` }
-        ],
-        schema: planEnvelopeSchema,
+CRITICAL RULES:
+- ADAPT to the existing folder structure. Do not invent new paradigms.
+- ATOMIC TASKS: Break down "implementationTasks" so EACH task targets ONE file.
+- Every task MUST have non-empty values for "step", "file", and "detailedInstructions".`;
+
+    const baseMessages = [
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const,   content: `EXISTING DIRECTORY STRUCTURE:\n${projectContext}\n\nUSER REQUEST: ${prompt}` }
+    ];
+
+    // We build a fresh JSON-schema envelope here that wraps
+    // `tasksPlanSchema`'s shape (the ProjectTask shape). Inline rather
+    // than adding a new exported schema because this is the only call
+    // site for it and pulling it into jsonSchemas.ts would require
+    // touching that file too. The legacy `planEnvelopeSchema` (which
+    // wrapped the OLD task shape) is no longer referenced anywhere.
+    const planEnvelopeWithTasksShape: import('./llm/jsonSchemas').JsonSchema = {
+        name: 'plan_envelope_v2',
+        strict: false,
+        schema: {
+            type: 'object',
+            properties: {
+                explanation: { type: 'string' },
+                plan: tasksPlanSchema.schema
+            },
+            required: ['explanation', 'plan']
+        }
+    };
+
+    let result = await jsonRequestData<{ explanation?: string, plan?: AIPlan }>({
+        messages: baseMessages,
+        schema: planEnvelopeWithTasksShape,
         temperature: 0.1
     });
 
+    let plan: AIPlan = result.plan || ({ folderStructure: [], implementationTasks: [] } as AIPlan);
+    let issues = validateTasksPlan(plan);
+
+    if (issues) {
+        // Same retry pattern as generateTasks — append a corrective
+        // system message that names the failure and try once more.
+        // No infinite retries; the user gets a clear error if both
+        // attempts fail.
+        const correctiveMessages: typeof baseMessages = [
+            ...baseMessages,
+            {
+                role: 'system' as const,
+                content: `Your previous response had a structural problem: ${issues}.\n\n` +
+                    `Every task MUST have non-empty values for "step", "file", and "detailedInstructions". ` +
+                    `Do not return placeholder strings, single spaces, or empty strings for these fields. ` +
+                    `Each task should describe a concrete file-creation or code-editing action with a real target path.`
+            }
+        ];
+        result = await jsonRequestData<{ explanation?: string, plan?: AIPlan }>({
+            messages: correctiveMessages,
+            schema: planEnvelopeWithTasksShape,
+            temperature: 0.1
+        });
+        plan = result.plan || ({ folderStructure: [], implementationTasks: [] } as AIPlan);
+        issues = validateTasksPlan(plan);
+        if (issues) {
+            throw new Error(
+                `Implementation plan generation failed validation after retry: ${issues}. ` +
+                `This usually means the model endpoint is having trouble with the structured-output ` +
+                `format. Try regenerating the plan, or check the model/endpoint configuration.`
+            );
+        }
+    }
+
     return {
         explanation: result.explanation || "Here is the implementation plan:",
-        plan: result.plan || ({ implementationTasks: [] } as unknown as AIPlan)
+        plan
     };
 }
 

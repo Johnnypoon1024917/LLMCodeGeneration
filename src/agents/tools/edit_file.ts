@@ -14,6 +14,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { registerTool, type ToolExecutor } from '../toolRegistry';
 import { applyBlock } from '../../utilities/searchReplace';
+import { validateWorkspacePath } from './_pathGuard';
 
 const definition = {
     type: 'function' as const,
@@ -47,6 +48,15 @@ const executor: ToolExecutor = async (args, ctx) => {
         return {
             llmContent: "Error: 'old_text' must be non-empty. To create a new file, use 'write_file' instead.",
             uiPayload: { kind: 'error', message: "'old_text' must be non-empty." }
+        };
+    }
+
+    // Hotfix (post-2B): reject absolute paths. See _pathGuard rationale.
+    const pathError = validateWorkspacePath(filepath, 'filepath');
+    if (pathError) {
+        return {
+            llmContent: `Error: ${pathError}`,
+            uiPayload: { kind: 'error', message: pathError }
         };
     }
 

@@ -78,6 +78,40 @@ OUTPUT FORMAT (strict XML — every tag is required):
 
     const MAX_STEPS = 8; // ReAct loop ceiling — prevents runaway tool-call cycles
 
+    // Hotfix (post-2B): MAX_STEPS bounds round-trips, but the model
+    // emits PARALLEL tool calls per round-trip — sometimes 10-30 of
+    // them. With 8 steps × 20 parallel calls, the planner can dispatch
+    // 160+ tool calls in a single planning session before MAX_STEPS
+    // even fires. Most of them are useless (degenerate keyword
+    // searches: 'if', 'for', 'function', 'import' etc.).
+    //
+    // MAX_TOTAL_TOOL_CALLS bounds the cumulative dispatch count. When
+    // exceeded we throw with a clear diagnostic rather than burning
+    // the rest of the budget on a model that's clearly degenerated.
+    //
+    // 30 is the budget. Calibration: a healthy planning session for a
+    // medium-sized task uses 6-15 tool calls (1-2 list_directory + a
+    // few read_files + 1-2 search_codebase). 30 leaves 2x headroom
+    // for legitimate complex tasks; degenerate sessions (the failure
+    // mode this guard targets) blow past 30 inside step 2-3.
+    const MAX_TOTAL_TOOL_CALLS = 30;
+    let totalToolCalls = 0;
+
+    // Hotfix (post-2B): track tool-call signatures across turns to
+    // detect a stuck-loop pattern. Models — especially aggressively
+    // quantized ones (W4A8 etc.) — can land in a state where they
+    // emit the SAME set of tool calls every turn, getting the same
+    // errors back, never learning. Without a loop detector the planner
+    // burns the full MAX_STEPS budget on identical no-progress turns
+    // before failing.
+    //
+    // Detection: hash each turn's tool calls (sorted by name+args).
+    // If two consecutive turns produce the same signature, the model
+    // is stuck — break out of the loop early so the user sees a
+    // clear failure instead of waiting 5+ extra rounds for the same
+    // outcome.
+    let lastTurnSignature = "";
+
     for (let step = 0; step < MAX_STEPS; step++) {
         const aiMessage = await provider.chatCompletion(messages, {
             tools: plannerTools,
@@ -93,6 +127,50 @@ OUTPUT FORMAT (strict XML — every tag is required):
 
         // ReAct: did the model invoke any tools?
         if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) {
+            // Hotfix (post-2B): compute this turn's signature BEFORE
+            // dispatching. Sorted so reordering doesn't fool the
+            // detector. Identical-arg/identical-name = same signature.
+            const turnSignature = aiMessage.tool_calls
+                .map(tc => `${tc.function.name}::${tc.function.arguments}`)
+                .sort()
+                .join('||');
+
+            if (turnSignature === lastTurnSignature) {
+                log(
+                    "Planner Agent: detected repeated tool-call set across turns. " +
+                    "Model is stuck in a loop (likely a token-corruption or path-confusion issue). " +
+                    "Aborting exploration early.",
+                    "error",
+                    `Repeated signature: ${turnSignature.substring(0, 200)}${turnSignature.length > 200 ? '…' : ''}`
+                );
+                throw new Error(
+                    "Planner Agent stuck in a loop — same tool calls dispatched twice in a row. " +
+                    "This usually means the model is producing corrupted tool arguments (e.g., bad paths) " +
+                    "and not recovering from the resulting errors. Try regenerating, or check the model/endpoint."
+                );
+            }
+            lastTurnSignature = turnSignature;
+
+            // Hotfix (post-2B): cumulative tool-call budget. If THIS
+            // turn would push us over, abort BEFORE dispatching — the
+            // model has already shown it's not converging on a plan.
+            if (totalToolCalls + aiMessage.tool_calls.length > MAX_TOTAL_TOOL_CALLS) {
+                log(
+                    `Planner Agent: tool-call budget exhausted (${totalToolCalls} dispatched, ` +
+                    `+${aiMessage.tool_calls.length} requested, budget ${MAX_TOTAL_TOOL_CALLS}). ` +
+                    `Model is exploring without converging on a plan.`,
+                    "error",
+                    `Most recent tool calls: ${aiMessage.tool_calls.slice(0, 5).map(tc => `${tc.function.name}(${tc.function.arguments.substring(0, 40)})`).join(', ')}`
+                );
+                throw new Error(
+                    `Planner Agent exceeded tool-call budget (${MAX_TOTAL_TOOL_CALLS}) without producing a plan. ` +
+                    `The model is exploring without converging — typically caused by degenerate keyword searches ` +
+                    `('if', 'for', 'function', etc.) that return too much noise. ` +
+                    `Try rephrasing the task with more specific identifiers, or check the model/endpoint.`
+                );
+            }
+            totalToolCalls += aiMessage.tool_calls.length;
+
             for (const toolCall of aiMessage.tool_calls) {
                 logToolCall(toolCall, log);
 
@@ -118,6 +196,10 @@ OUTPUT FORMAT (strict XML — every tag is required):
             }
             continue; // Loop back so the LLM can react to the tool results
         }
+
+        // Non-tool turn — clear the signature so a single chatty
+        // intermission doesn't break the next-turn comparison.
+        lastTurnSignature = "";
 
         // No tools called — did it produce the structured plan?
         const content = (aiMessage.content ?? '').trim();

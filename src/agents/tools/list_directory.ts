@@ -9,6 +9,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { registerTool, type ToolExecutor } from '../toolRegistry';
+import { validateWorkspacePath } from './_pathGuard';
 
 const definition = {
     type: 'function' as const,
@@ -42,6 +43,15 @@ const executor: ToolExecutor = async (args, ctx) => {
         return {
             llmContent: "Error: 'dirpath' argument is required.",
             uiPayload: { kind: 'error', message: "'dirpath' argument is required." }
+        };
+    }
+
+    // Hotfix (post-2B): reject absolute paths. See _pathGuard rationale.
+    const pathError = validateWorkspacePath(dirpath, 'dirpath');
+    if (pathError) {
+        return {
+            llmContent: `Error: ${pathError}`,
+            uiPayload: { kind: 'error', message: pathError }
         };
     }
 

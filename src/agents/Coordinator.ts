@@ -38,6 +38,20 @@ export interface CodeDiff {
      * caller to understand the new mechanism.
      */
     finalContent?: string;
+    /**
+     * Component 2B-3c (post-2B audit): set to true when swarmDraftCode's
+     * ReAct loop completed but the model never dispatched a successful
+     * write_file or edit_file call. Common cause: endpoint's tool-call
+     * parser doesn't recognize the model's emission format, so what
+     * looked like a tool call to the model was treated as plain text
+     * by the adapter and never reached our dispatcher.
+     *
+     * The Coordinator's retry loop checks this flag before the verifier
+     * runs — there's no point compiling a file the model never modified.
+     * Setting this flag short-circuits to a corrective retry message
+     * rather than a false-pass via the compiler.
+     */
+    noModifyingToolCalls?: boolean;
 }
 
 /**
@@ -147,6 +161,19 @@ CRITICAL RULES:
     const MAX_STEPS = 6; // ReAct ceiling — prevents runaway tool cycles
 
     let outputBuffer = '';
+    // Component 2B-3c (post-2B audit): track whether the model ever
+    // dispatched a modifying tool call (write_file or edit_file).
+    // If the model emits chat narrative without a single write/edit
+    // tool call, the file on disk is left as pre-mod — for a new file
+    // that means an empty file gets silently written. We need to
+    // detect that and fail loudly so the Coordinator can re-prompt
+    // (or surface the failure to the user). Common causes:
+    //   - Endpoint's tool-call-parser doesn't match the model's
+    //     emission format (e.g., vLLM --tool-call-parser qwen25_coder
+    //     against a Qwen3-Coder model that uses a different tag scheme)
+    //   - Model genuinely refused to emit a tool call and just chatted
+    //   - Token limit hit before the tool-call structure completed
+    let didModifyingToolCall = false;
 
     for (let step = 0; step < MAX_STEPS; step++) {
         // Build per-call options. tools/toolChoice on every iteration —
@@ -204,6 +231,18 @@ CRITICAL RULES:
 
                 const dispatchResult = await dispatchWithEvents(toolCall, ctx, dispatchOpts);
 
+                // Track whether this dispatch actually modified the file.
+                // We only flag write_file / edit_file calls that succeeded
+                // (status='success'); read-only tools and failed writes
+                // don't count toward "the model did real work."
+                if (
+                    (toolCall.function.name === 'write_file' ||
+                     toolCall.function.name === 'edit_file') &&
+                    dispatchResult.uiPayload.kind !== 'error'
+                ) {
+                    didModifyingToolCall = true;
+                }
+
                 messages.push({
                     role: 'tool',
                     tool_call_id: toolCall.id,
@@ -247,13 +286,22 @@ CRITICAL RULES:
     // STEP 4: Synthesize CodeDiff. searchBlock = pre-mod, replaceBlock
     // = post-mod, finalContent = post-mod. The verifier sees a usable
     // diff; the SidebarProvider apply path uses finalContent directly.
-    return {
+    //
+    // If the ReAct loop completed without ever dispatching a successful
+    // write_file/edit_file, flag the diff so the Coordinator can fail
+    // the attempt with a corrective message rather than feeding empty
+    // output to the verifier.
+    const result: CodeDiff = {
         filepath,
         searchBlock: fileContent,        // pre-modification
         replaceBlock: postModContent,    // post-modification
         fullOutputBuffer: outputBuffer,  // model's narrative for logs/debugging
         finalContent: postModContent     // signal to apply path: use this directly
     };
+    if (!didModifyingToolCall) {
+        result.noModifyingToolCalls = true;
+    }
+    return result;
 }
 
 /**
@@ -406,6 +454,51 @@ export class SwarmCoordinator {
                         toolEventEmitter
                     );
 
+                    // Component 2B-3c (post-2B audit): short-circuit if
+                    // the model never dispatched a write_file/edit_file
+                    // tool call. Running the verifier in this case is
+                    // wasteful (compiling unchanged code) AND can mask
+                    // the failure (an empty new file compiles "fine"
+                    // for some tsc configs, leading the user to think
+                    // their request succeeded when nothing was written).
+                    //
+                    // Symptoms diagnosed in the wild:
+                    //   - Model emitted `<tool_call>` XML inside content
+                    //     instead of OpenAI tool_calls (parser config
+                    //     mismatch on vLLM)
+                    //   - Model truncated mid-tool-call due to token
+                    //     limit
+                    //   - Model genuinely refused to use tools
+                    //
+                    // We treat this as a verification failure with a
+                    // corrective message to the next attempt's history.
+                    if (draftDiff.noModifyingToolCalls) {
+                        const critique =
+                            `Model did not invoke write_file or edit_file. The file on disk was not modified.\n\n` +
+                            `Common causes:\n` +
+                            `  - Tool-call format not recognized by the endpoint (check vLLM --tool-call-parser config)\n` +
+                            `  - Model emitted a malformed tool-call wrapper instead of the expected JSON\n` +
+                            `  - Model wrote code in chat narrative instead of using the tool\n\n` +
+                            `You MUST use the write_file or edit_file tool to modify the file. Do not output code in chat.`;
+
+                        logCallback(
+                            `Coder [${filepath}]: No modifying tool calls in attempt ${attempts}.`,
+                            "error",
+                            critique
+                        );
+
+                        if (streamCallback) {
+                            streamCallback(
+                                `\n\n> ❌ **Attempt ${attempts} produced no file modifications.** Re-prompting model.\n`
+                            );
+                        }
+
+                        chatHistory.push({ role: "assistant", content: draftDiff.fullOutputBuffer });
+                        chatHistory.push({ role: "user", content: critique });
+                        // Skip verifier; go to next attempt.
+                        continue;
+                    }
+
                     const verification = await runVerificationAgent(
                         env,
                         techSpec,
@@ -457,6 +550,46 @@ export class SwarmCoordinator {
                 if (finalDiff) {
                     allDiffs.push(finalDiff);
                 } else {
+                    // Component 2B-3c (post-2B audit): max retries exhausted.
+                    // Under Option C the file on disk is whatever the last
+                    // attempt left there (post-mod for whatever the model
+                    // produced, which the verifier rejected). Restore the
+                    // file to its pre-mod content before throwing — without
+                    // this, an existing file gets clobbered with the failed
+                    // model output and the user loses their original code.
+                    //
+                    // For new-file case (filepath was 'unknown' or the file
+                    // didn't exist when swarmDraftCode started), pre-mod
+                    // content was empty, so we delete the file rather than
+                    // leave a zero-byte stub on disk.
+                    if (filepath !== 'unknown') {
+                        const targetUri = vscode.Uri.file(path.join(workspaceRoot, filepath));
+                        try {
+                            if (fileContentStr !== "") {
+                                // File pre-existed — restore the original content.
+                                await vscode.workspace.fs.writeFile(
+                                    targetUri,
+                                    new TextEncoder().encode(fileContentStr)
+                                );
+                            } else {
+                                // Pre-mod was empty (new file). Delete the
+                                // partial result rather than leave it.
+                                try {
+                                    await vscode.workspace.fs.delete(targetUri);
+                                } catch {
+                                    // Ignore if already gone or never created.
+                                }
+                            }
+                        } catch (restoreErr: unknown) {
+                            // Restoration is best-effort. Log but don't
+                            // mask the original failure with a restore error.
+                            logCallback(
+                                `Coordinator: Could not restore ${filepath} after retry exhaustion: ${errorMessage(restoreErr)}`,
+                                "error"
+                            );
+                        }
+                    }
+
                     throw new Error(
                         `Swarm failed to generate verified code for ${filepath} after ${MAX_RETRIES} attempts.`
                     );

@@ -30,7 +30,7 @@
 // ============================================================
 
 import { Command } from 'commander';
-import * as readline from 'readline';
+import * as readline from 'readline';98
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { errorMessage } from './utilities/errors';

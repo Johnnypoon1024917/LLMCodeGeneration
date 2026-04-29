@@ -10,6 +10,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { registerTool, type ToolExecutor } from '../toolRegistry';
+import { validateWorkspacePath } from './_pathGuard';
 
 const definition = {
     type: 'function' as const,
@@ -32,6 +33,19 @@ const executor: ToolExecutor = async (args, ctx) => {
         return {
             llmContent: "Error: 'filepath' argument is required.",
             uiPayload: { kind: 'error', message: "'filepath' argument is required." }
+        };
+    }
+
+    // Hotfix (post-2B): reject absolute paths up front. See _pathGuard
+    // for the rationale — without this, model-emitted absolute paths
+    // silently work on Windows then drift into corruption that breaks
+    // every subsequent call. Failing fast on the first absolute path
+    // gives the model a clean corrective signal it can self-correct on.
+    const pathError = validateWorkspacePath(filepath, 'filepath');
+    if (pathError) {
+        return {
+            llmContent: `Error: ${pathError}`,
+            uiPayload: { kind: 'error', message: pathError }
         };
     }
 

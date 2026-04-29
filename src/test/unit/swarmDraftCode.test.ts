@@ -47,6 +47,7 @@ jest.mock('../../agents/securityHook', () => ({
 }));
 
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { swarmDraftCode } from '../../agents/Coordinator';
 import { ToolEventEmitter } from '../../agents/toolEventEmitter';
 import type { ToolLifecycleEvent } from '../../agents/toolProtocol';
@@ -112,7 +113,11 @@ describe('swarmDraftCode — stepping-stone Option C', () => {
         // Pre-mod write happened
         expect(mockedFs.writeFile).toHaveBeenCalled();
         const writeCall = mockedFs.writeFile.mock.calls[0]!;
-        expect(writeCall[0].fsPath).toBe('/repo/src/x.ts');
+        // Use path.join to compute the expected fsPath the same way
+        // production code does. This makes the assertion portable across
+        // platforms — Linux returns '/repo/src/x.ts' while Windows returns
+        // '\\repo\\src\\x.ts'. Both are correct for their respective OS.
+        expect(writeCall[0].fsPath).toBe(path.join('/repo', 'src/x.ts'));
         expect(new TextDecoder().decode(writeCall[1])).toBe('original content');
 
         // CodeDiff has the expected shape
@@ -295,5 +300,101 @@ describe('swarmDraftCode — stepping-stone Option C', () => {
 
         // streamChatCompletion called 6 times (MAX_STEPS) — not 10
         expect(mockProvider.streamChatCompletion).toHaveBeenCalledTimes(6);
+    });
+
+    // ─── Component 2B-3c (post-2B audit): noModifyingToolCalls flag ─────
+
+    test('sets noModifyingToolCalls=true when model emits no write_file/edit_file', async () => {
+        // Model says "done" without any tool calls
+        mockProvider.streamChatCompletion.mockResolvedValueOnce(scriptedStream([
+            { kind: 'text', content: 'Lots of narrative but no tool calls.' },
+            { kind: 'finish', reason: 'stop' }
+        ]));
+        mockedFs.readFile.mockResolvedValueOnce(new TextEncoder().encode('original'));
+
+        const result = await swarmDraftCode(
+            'spec',
+            'src/x.ts',
+            'original',
+            [],
+            '',
+            '/repo',
+            'task-1'
+        );
+
+        expect(result.noModifyingToolCalls).toBe(true);
+    });
+
+    test('sets noModifyingToolCalls=true when model only does read_file', async () => {
+        // Read-only tool calls don't count — only write/edit count
+        mockProvider.streamChatCompletion
+            .mockResolvedValueOnce(scriptedStream([
+                {
+                    kind: 'tool_call',
+                    toolCall: {
+                        id: 'call_1',
+                        type: 'function',
+                        function: { name: 'read_file', arguments: JSON.stringify({ filepath: 'src/y.ts' }) }
+                    }
+                },
+                { kind: 'finish', reason: 'tool_calls' }
+            ]))
+            .mockResolvedValueOnce(scriptedStream([
+                { kind: 'text', content: 'Read but did not write.' },
+                { kind: 'finish', reason: 'stop' }
+            ]));
+
+        mockedFs.stat.mockResolvedValue({ type: vscode.FileType.File });
+        mockedFs.readFile
+            .mockResolvedValueOnce(new TextEncoder().encode('y file content'))   // read_file dispatch
+            .mockResolvedValueOnce(new TextEncoder().encode('original'));        // post-loop readback
+
+        const result = await swarmDraftCode(
+            'spec',
+            'src/x.ts',
+            'original',
+            [],
+            '',
+            '/repo',
+            'task-1'
+        );
+
+        expect(result.noModifyingToolCalls).toBe(true);
+    });
+
+    test('does NOT set noModifyingToolCalls when write_file dispatched successfully', async () => {
+        mockProvider.streamChatCompletion
+            .mockResolvedValueOnce(scriptedStream([
+                {
+                    kind: 'tool_call',
+                    toolCall: {
+                        id: 'call_1',
+                        type: 'function',
+                        function: { name: 'write_file', arguments: JSON.stringify({ filepath: 'src/x.ts', content: 'new content' }) }
+                    }
+                },
+                { kind: 'finish', reason: 'tool_calls' }
+            ]))
+            .mockResolvedValueOnce(scriptedStream([
+                { kind: 'text', content: 'Done.' },
+                { kind: 'finish', reason: 'stop' }
+            ]));
+
+        mockedFs.readFile
+            .mockResolvedValueOnce(new TextEncoder().encode('old content'))   // before-capture
+            .mockResolvedValueOnce(new TextEncoder().encode('new content'));  // post-loop readback
+        mockedFs.stat.mockResolvedValue({ type: vscode.FileType.File });
+
+        const result = await swarmDraftCode(
+            'spec',
+            'src/x.ts',
+            'old content',
+            [],
+            '',
+            '/repo',
+            'task-1'
+        );
+
+        expect(result.noModifyingToolCalls).toBeUndefined();
     });
 });

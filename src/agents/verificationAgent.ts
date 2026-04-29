@@ -16,9 +16,42 @@ function getLanguageCommands(filepath: string): {
     const ext = path.extname(filepath).toLowerCase();
     switch (ext) {
         case '.ts':
-        case '.tsx':
             return {
                 compileCmd: `npx -p typescript tsc --noEmit --esModuleInterop --skipLibCheck "${filepath}"`,
+                installCmd: (pkgs) => {
+                    const pkgList = pkgs.join(' ');
+                    const typesList = pkgs.map(p => `@types/${p}`).join(' ');
+                    return `npm install ${pkgList} --no-audit --no-fund && npm install -D ${typesList} --no-audit --no-fund`;
+                },
+                missingPkgRegex: /Cannot find module '([^']+)'/
+            };
+        case '.tsx':
+            // Hotfix (post-2B): .tsx files need --jsx react-jsx so tsc
+            // recognizes JSX syntax. Without this flag tsc emits
+            // TS17004 "Cannot use JSX unless the '--jsx' flag is
+            // provided" for every JSX element, even when the file is
+            // otherwise valid.
+            //
+            // Why react-jsx (the modern automatic runtime) over the
+            // classic 'react' value:
+            //   - react-jsx works with React 17+ (the standard since
+            //     late 2020); doesn't require an `import React from
+            //     'react'` to be in scope for JSX
+            //   - react-jsx is what create-react-app, Next.js, Vite,
+            //     and modern tsconfig templates default to
+            //   - Falling back to 'react' classic would require every
+            //     file to have the React import, breaking valid modern
+            //     code
+            //
+            // Trade-off: projects on React 16 (or projects using the
+            // classic runtime explicitly) might want --jsx react. The
+            // verifier compiles single files in isolation without
+            // reading the user's tsconfig.json, so we can't pick the
+            // user's setting. react-jsx is the better default; if a
+            // user project needs the classic runtime we can revisit
+            // by either reading tsconfig or adding a config override.
+            return {
+                compileCmd: `npx -p typescript tsc --noEmit --esModuleInterop --skipLibCheck --jsx react-jsx "${filepath}"`,
                 installCmd: (pkgs) => {
                     const pkgList = pkgs.join(' ');
                     const typesList = pkgs.map(p => `@types/${p}`).join(' ');
@@ -71,59 +104,95 @@ export async function runVerificationAgent(
     let originalContent = "";
     let fileExisted = true;
 
-    try { originalContent = await env.readFile(absolutePath); } 
+    try { originalContent = await env.readFile(absolutePath); }
     catch (e) { fileExisted = false; }
 
     try {
         let newContent = originalContent;
-        const fullOutput = (draftDiff.fullOutputBuffer || "").replace(/\r\n/g, '\n');
+        // Component 2B-3c (post-2B audit): when draftDiff carries
+        // `finalContent`, the file on disk is ALREADY in its target
+        // state (swarmDraftCode's tool calls wrote it directly). The
+        // verifier must NOT re-apply or re-derive a patch — doing so
+        // would either (a) overwrite correct code with a junk
+        // reconstruction parsed from chat narrative, or (b) re-write
+        // the same content uselessly.
+        //
+        // Under Option C the verifier acts as a pure verifier:
+        //   - newContent = draftDiff.finalContent (used for the LLM
+        //     PRD review at the end; no disk write needed because the
+        //     file already matches)
+        //   - Compile/test the file as it sits on disk
+        //   - On compile/test FAILURE: restore originalContent (which,
+        //     because swarmDraftCode wrote post-mod before returning,
+        //     IS the post-mod content the model produced — restoring
+        //     to that is a no-op but also doesn't make things worse;
+        //     the next swarmDraftCode attempt will pre-mod-restore)
+        //   - On final success: skip the restore-to-original step.
+        //     The file IS the desired final state. SidebarProvider's
+        //     apply path will write the same content again, which is
+        //     redundant but harmless.
+        //
+        // Legacy callers (planner narrative output, anything that
+        // produces a CodeDiff without finalContent) fall through to
+        // the SEARCH/REPLACE / markdown-extraction reconstruction
+        // path below, exactly as before.
+        const isOptionC = draftDiff.finalContent !== undefined;
 
-        // Parse with the hardened module — handles marker fuzzing and rejects
-        // empty blocks. We keep "last block wins" semantics for compatibility
-        // with the Coordinator stream protocol (model may emit multiple drafts).
-        let parsedBlocks: ReturnType<typeof parseBlocks>['blocks'] = [];
-        try {
-            parsedBlocks = parseBlocks(fullOutput).blocks;
-        } catch (e: unknown) {
-            return { passed: false, critique: `Patch parser failed: ${errorMessage(e)}. Re-emit the SEARCH/REPLACE block.` };
-        }
-
-        if (parsedBlocks.length > 0) {
-            const lastBlock = parsedBlocks[parsedBlocks.length - 1]!;
-            // Strip stray markdown fences from the parsed block contents
-            // (model sometimes wraps the SEARCH body in ```ts ... ```).
-            const cleanBlock = {
-                search: lastBlock.search.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim(),
-                replace: lastBlock.replace.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim(),
-                blockOffset: lastBlock.blockOffset
-            };
-
-            try {
-                newContent = applyBlock(originalContent, cleanBlock);
-            } catch (e: unknown) {
-                // The hardened applyBlock provides much better diagnostics —
-                // surface them to the model so its retry has actionable info.
-                const apply = e as { searchPreview?: string; candidates?: string[] };
-                const candidates = apply.candidates && apply.candidates.length > 0
-                    ? `\n\nClosest matches in the file:\n${apply.candidates.join('\n')}`
-                    : '';
-                return {
-                    passed: false,
-                    critique:
-                        `SEARCH block did not match the file. ${errorMessage(e)}${candidates}\n\n` +
-                        `Your Search Block:\n${cleanBlock.search}`
-                };
-            }
+        if (isOptionC) {
+            newContent = draftDiff.finalContent ?? "";
+            // No env.writeFile — file is already correct on disk.
+            // Skip the parseBlocks / applyBlock / markdown extraction
+            // path entirely.
         } else {
-            const markdownMatch = fullOutput.match(/```[a-z]*\n([\s\S]*?)```/i);
-            if (markdownMatch && markdownMatch[1] !== undefined) {
-                newContent = markdownMatch[1].trim();
-            } else {
-                newContent = fullOutput.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
-            }
-        }
+            const fullOutput = (draftDiff.fullOutputBuffer || "").replace(/\r\n/g, '\n');
 
-        await env.writeFile(absolutePath, newContent);
+            // Parse with the hardened module — handles marker fuzzing and rejects
+            // empty blocks. We keep "last block wins" semantics for compatibility
+            // with the Coordinator stream protocol (model may emit multiple drafts).
+            let parsedBlocks: ReturnType<typeof parseBlocks>['blocks'] = [];
+            try {
+                parsedBlocks = parseBlocks(fullOutput).blocks;
+            } catch (e: unknown) {
+                return { passed: false, critique: `Patch parser failed: ${errorMessage(e)}. Re-emit the SEARCH/REPLACE block.` };
+            }
+
+            if (parsedBlocks.length > 0) {
+                const lastBlock = parsedBlocks[parsedBlocks.length - 1]!;
+                // Strip stray markdown fences from the parsed block contents
+                // (model sometimes wraps the SEARCH body in ```ts ... ```).
+                const cleanBlock = {
+                    search: lastBlock.search.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim(),
+                    replace: lastBlock.replace.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim(),
+                    blockOffset: lastBlock.blockOffset
+                };
+
+                try {
+                    newContent = applyBlock(originalContent, cleanBlock);
+                } catch (e: unknown) {
+                    // The hardened applyBlock provides much better diagnostics —
+                    // surface them to the model so its retry has actionable info.
+                    const apply = e as { searchPreview?: string; candidates?: string[] };
+                    const candidates = apply.candidates && apply.candidates.length > 0
+                        ? `\n\nClosest matches in the file:\n${apply.candidates.join('\n')}`
+                        : '';
+                    return {
+                        passed: false,
+                        critique:
+                            `SEARCH block did not match the file. ${errorMessage(e)}${candidates}\n\n` +
+                            `Your Search Block:\n${cleanBlock.search}`
+                    };
+                }
+            } else {
+                const markdownMatch = fullOutput.match(/```[a-z]*\n([\s\S]*?)```/i);
+                if (markdownMatch && markdownMatch[1] !== undefined) {
+                    newContent = markdownMatch[1].trim();
+                } else {
+                    newContent = fullOutput.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
+                }
+            }
+
+            await env.writeFile(absolutePath, newContent);
+        }
 
         // Emit audit record for the write. Fire-and-forget so we don't
         // delay verification. SHA-256 of new content lets compliance
@@ -217,8 +286,16 @@ export async function runVerificationAgent(
             }
 
             if (!compiled) {
-                if (fileExisted) await env.writeFile(absolutePath, originalContent);
-                else await env.deleteFile(absolutePath);
+                // Component 2B-3c: under Option C, the file on disk is
+                // already what swarmDraftCode produced. swarmDraftCode
+                // will pre-mod-restore at the start of the NEXT attempt.
+                // Coordinator handles restoration on max-retry-failure.
+                // Skipping here avoids a redundant no-op write
+                // (originalContent IS post-mod when finalContent is set).
+                if (!isOptionC) {
+                    if (fileExisted) await env.writeFile(absolutePath, originalContent);
+                    else await env.deleteFile(absolutePath);
+                }
                 return { passed: false, critique: `🚨 COMPILER ERROR DETECTED 🚨\n\n${compilerOutput}\n\nYou MUST fix these exact errors in your next attempt.` };
             }
         }
@@ -230,8 +307,11 @@ export async function runVerificationAgent(
                 logCallback(`Verifier: 🧪 All TDD tests passed!`, "success");
             } catch (testErr: unknown) {
                 const failureLog = execErrorOutput(testErr);
-                if (fileExisted) await env.writeFile(absolutePath, originalContent);
-                else await env.deleteFile(absolutePath);
+                // Component 2B-3c: see compile-failure branch for rationale.
+                if (!isOptionC) {
+                    if (fileExisted) await env.writeFile(absolutePath, originalContent);
+                    else await env.deleteFile(absolutePath);
+                }
                 return { passed: false, critique: `🚨 TDD TEST FAILURE 🚨\n\nYour code compiled, but it FAILED the PRD Business Rules.\n\nTest Output:\n${failureLog}\n\nYou MUST rewrite the logic to make the tests pass.` };
             }
         }
@@ -239,14 +319,30 @@ export async function runVerificationAgent(
         logCallback(`Verifier: Running logical PRD review...`, "analyze", "Checking against business rules.");
         const llmVerification = await verifyAgainstSpec(techSpec, "Review the technical spec.", newContent);
 
-        if (fileExisted) await env.writeFile(absolutePath, originalContent);
-        else await env.deleteFile(absolutePath);
+        // Component 2B-3c: under Option C the file IS the desired final
+        // state — no sandbox to clean up. SidebarProvider's apply path
+        // writes the same content again (harmless redundancy). Under
+        // legacy flow the verifier always works in a sandbox, so it
+        // restores here so SidebarProvider can do the real apply.
+        if (!isOptionC) {
+            if (fileExisted) await env.writeFile(absolutePath, originalContent);
+            else await env.deleteFile(absolutePath);
+        }
 
         return { passed: llmVerification.verified, critique: llmVerification.reasoning, usage: llmVerification.usage };
 
     } catch (err: unknown) {
-        if (fileExisted) await env.writeFile(absolutePath, originalContent);
-        else await env.deleteFile(absolutePath);
+        // Component 2B-3c: catastrophic-error path. Under Option C the
+        // file is whatever swarmDraftCode left on disk. We don't try
+        // to restore here — Coordinator handles cleanup on max-retry
+        // failure. Under legacy flow we still restore.
+        // We can't reliably know `isOptionC` from inside the catch block
+        // because the flag is scoped above; but draftDiff.finalContent
+        // is the source of truth, check that instead.
+        if (draftDiff.finalContent === undefined) {
+            if (fileExisted) await env.writeFile(absolutePath, originalContent);
+            else await env.deleteFile(absolutePath);
+        }
         return { passed: false, critique: `Catastrophic Patch Error: ${errorMessage(err)}` };
     }
 }

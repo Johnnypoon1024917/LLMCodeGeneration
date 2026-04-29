@@ -361,4 +361,172 @@ describe('planAgent — ReAct loop (Component 2A)', () => {
         // parse happens, and it has its own error handling.
         expect(mockDispatchWithEvents).toHaveBeenCalledTimes(1);
     });
+
+    // ─── Hotfix (post-2B): stuck-loop detection ─────────────────────────
+
+    test('throws stuck-loop error when two consecutive turns have identical tool-call set', async () => {
+        // Same tool calls in turn 1 and turn 2 — model is stuck.
+        const sameToolCalls = [
+            {
+                id: 'a',
+                type: 'function' as const,
+                function: { name: 'read_file', arguments: JSON.stringify({ filepath: 'src/x.ts' }) }
+            },
+            {
+                id: 'b',
+                type: 'function' as const,
+                function: { name: 'list_directory', arguments: JSON.stringify({ dirpath: 'src' }) }
+            }
+        ];
+
+        scriptResponses([
+            { role: 'assistant', content: null, tool_calls: sameToolCalls },
+            // Note: ids can differ but name+args matter for the signature
+            { role: 'assistant', content: null, tool_calls: [
+                {
+                    id: 'c',
+                    type: 'function' as const,
+                    function: { name: 'read_file', arguments: JSON.stringify({ filepath: 'src/x.ts' }) }
+                },
+                {
+                    id: 'd',
+                    type: 'function' as const,
+                    function: { name: 'list_directory', arguments: JSON.stringify({ dirpath: 'src' }) }
+                }
+            ] }
+        ]);
+        mockDispatchWithEvents.mockResolvedValue({
+            llmContent: 'tool result',
+            uiPayload: { kind: 'file_contents', filepath: 'x', contents: '' }
+        });
+
+        await expect(
+            runPlannerAgent('x', '/repo', '', '', '', '', '', log)
+        ).rejects.toThrow(/stuck in a loop/);
+
+        // The first turn's tools dispatched (2 calls). Then the second
+        // turn arrived, signature matched, and we threw BEFORE dispatching
+        // them. So 2 dispatches total, not 4.
+        expect(mockDispatchWithEvents).toHaveBeenCalledTimes(2);
+    });
+
+    test('does NOT throw when consecutive turns have different tool-call args', async () => {
+        // Same tool names but different args = not a loop, model is
+        // making progress through the codebase.
+        scriptResponses([
+            { role: 'assistant', content: null, tool_calls: [{
+                id: 'a', type: 'function' as const,
+                function: { name: 'read_file', arguments: JSON.stringify({ filepath: 'src/a.ts' }) }
+            }] },
+            { role: 'assistant', content: null, tool_calls: [{
+                id: 'b', type: 'function' as const,
+                function: { name: 'read_file', arguments: JSON.stringify({ filepath: 'src/b.ts' }) }
+            }] },
+            { role: 'assistant', content: '<execution_plan>done</execution_plan>' }
+        ]);
+        mockDispatchWithEvents.mockResolvedValue({
+            llmContent: 'tool result',
+            uiPayload: { kind: 'file_contents', filepath: 'x', contents: '' }
+        });
+
+        const result = await runPlannerAgent('x', '/repo', '', '', '', '', '', log);
+        expect(result).toContain('<execution_plan>');
+    });
+
+    test('non-tool intermission resets the signature so it does not falsely flag', async () => {
+        // Turn 1: tools. Turn 2: chat (no tools, gets re-prompted).
+        // Turn 3: same tools as Turn 1. Should NOT trigger the loop
+        // detector because the chat-only turn 2 cleared the signature.
+        scriptResponses([
+            { role: 'assistant', content: null, tool_calls: [{
+                id: 'a', type: 'function' as const,
+                function: { name: 'read_file', arguments: JSON.stringify({ filepath: 'src/a.ts' }) }
+            }] },
+            // Turn 2 — no tools, no plan. Triggers re-prompt.
+            { role: 'assistant', content: 'thinking...' },
+            { role: 'assistant', content: null, tool_calls: [{
+                id: 'c', type: 'function' as const,
+                function: { name: 'read_file', arguments: JSON.stringify({ filepath: 'src/a.ts' }) }
+            }] },
+            { role: 'assistant', content: '<execution_plan>done</execution_plan>' }
+        ]);
+        mockDispatchWithEvents.mockResolvedValue({
+            llmContent: 'tool result',
+            uiPayload: { kind: 'file_contents', filepath: 'x', contents: '' }
+        });
+
+        const result = await runPlannerAgent('x', '/repo', '', '', '', '', '', log);
+        expect(result).toContain('<execution_plan>');
+    });
+
+    // ─── Hotfix (post-2B): cumulative tool-call budget ──────────────────
+
+    test('throws when cumulative tool calls exceed MAX_TOTAL_TOOL_CALLS', async () => {
+        // Each turn emits 20 unique tool calls. After turn 2 we've
+        // dispatched 20 + 20 = 40, blowing past the budget of 30.
+        // The cap should fire AT THE START of turn 2, BEFORE dispatching
+        // turn 2's calls, because turn 1's 20 + turn 2's pending 20 = 40
+        // exceeds 30.
+        function makeBatch(prefix: string, count: number) {
+            const out = [];
+            for (let i = 0; i < count; i++) {
+                out.push({
+                    id: `${prefix}_${i}`,
+                    type: 'function' as const,
+                    // Distinct args so loop-detector doesn't fire first
+                    function: { name: 'read_file', arguments: JSON.stringify({ filepath: `src/${prefix}_${i}.ts` }) }
+                });
+            }
+            return out;
+        }
+
+        scriptResponses([
+            { role: 'assistant', content: null, tool_calls: makeBatch('first', 20) },
+            { role: 'assistant', content: null, tool_calls: makeBatch('second', 20) }
+        ]);
+        mockDispatchWithEvents.mockResolvedValue({
+            llmContent: 'result',
+            uiPayload: { kind: 'file_contents', filepath: 'x', contents: '' }
+        });
+
+        await expect(
+            runPlannerAgent('x', '/repo', '', '', '', '', '', log)
+        ).rejects.toThrow(/tool-call budget/);
+
+        // 20 from the first turn dispatched. The second turn's 20 were
+        // BLOCKED at the budget check before dispatching. So total
+        // dispatch count = 20.
+        expect(mockDispatchWithEvents).toHaveBeenCalledTimes(20);
+    });
+
+    test('does NOT throw when cumulative calls stay under budget', async () => {
+        // 5 calls per turn × 4 turns = 20. Stays under 30.
+        function makeBatch(prefix: string, count: number) {
+            const out = [];
+            for (let i = 0; i < count; i++) {
+                out.push({
+                    id: `${prefix}_${i}`,
+                    type: 'function' as const,
+                    function: { name: 'read_file', arguments: JSON.stringify({ filepath: `src/${prefix}_${i}.ts` }) }
+                });
+            }
+            return out;
+        }
+
+        scriptResponses([
+            { role: 'assistant', content: null, tool_calls: makeBatch('a', 5) },
+            { role: 'assistant', content: null, tool_calls: makeBatch('b', 5) },
+            { role: 'assistant', content: null, tool_calls: makeBatch('c', 5) },
+            { role: 'assistant', content: null, tool_calls: makeBatch('d', 5) },
+            { role: 'assistant', content: '<execution_plan>done</execution_plan>' }
+        ]);
+        mockDispatchWithEvents.mockResolvedValue({
+            llmContent: 'result',
+            uiPayload: { kind: 'file_contents', filepath: 'x', contents: '' }
+        });
+
+        const result = await runPlannerAgent('x', '/repo', '', '', '', '', '', log);
+        expect(result).toContain('<execution_plan>');
+        expect(mockDispatchWithEvents).toHaveBeenCalledTimes(20);
+    });
 });
