@@ -1,5 +1,6 @@
 // src/context/lspContext.ts
 import * as vscode from 'vscode';
+import { log } from '../logger';
 
 export async function getLspContext(taskDescription: string): Promise<string> {
     // 1. Extract potential symbol names (CamelCase, PascalCase, snake_case)
@@ -19,7 +20,7 @@ export async function getLspContext(taskDescription: string): Promise<string> {
 
         if (symbols && symbols.length > 0) {
             // Take the best match (usually the first one)
-            const bestMatch = symbols[0];
+            const bestMatch = symbols[0]!; // length > 0 guarded above
             
             // 3. Read the file content at the definition location
             try {
@@ -34,7 +35,7 @@ export async function getLspContext(taskDescription: string): Promise<string> {
                 const codeSnippet = doc.getText(expandedRange);
                 contextParts.push(`Symbol '${symbol}' defined in ${vscode.workspace.asRelativePath(bestMatch.location.uri)}:\n\`\`\`typescript\n${codeSnippet}\n...\n\`\`\``);
             } catch (e) {
-                console.warn(`Failed to read symbol ${symbol}`, e);
+                log.warn(`Failed to read symbol ${symbol}`, e);
             }
         }
     }

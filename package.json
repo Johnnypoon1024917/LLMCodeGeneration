@@ -2,7 +2,7 @@
   "name": "nexuscode",
   "displayName": "NexusCode",
   "publisher": "your-publisher-id",
-  "description": "Spec-driven AI coding assistant — requirements, design, tasks, and implementation in one IDE workflow.",
+  "description": "%extension.description%",
   "version": "0.1.0",
   "engines": {
     "vscode": "^1.85.0"
@@ -13,6 +13,9 @@
     "Other"
   ],
   "main": "./out/extension.js",
+  "bin": {
+    "nexuscode": "./out/cli.js"
+  },
   "contributes": {
     "configuration": {
       "title": "NexusCode",
@@ -20,29 +23,24 @@
         "nexuscode.apiEndpoint": {
           "type": "string",
           "default": "http://192.168.192.125:8001/v1/chat/completions",
-          "description": "OpenAI-compatible /v1/chat/completions endpoint (LM Studio, Ollama, vLLM, OpenAI, etc.)."
+          "description": "%configuration.nexuscode.apiEndpoint.description%"
         },
         "nexuscode.model": {
           "type": "string",
           "default": "qwen2.5-coder",
-          "description": "The name or path of the model to use."
+          "description": "%configuration.nexuscode.model.description%"
         },
         "nexuscode.apiKey": {
           "type": "string",
           "default": "",
-          "description": "API key (leave empty for local servers). Prefer the 'NexusCode: Set API Key' command — keys are stored in VS Code SecretStorage, not settings.json."
-        },
-        "nexuscode.enableTools": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable function-calling tools for the planner and explorer agents. Disable only if your local server (older vLLM) does not parse tool_calls."
+          "description": "%configuration.nexuscode.apiKey.description%"
         },
         "nexuscode.maxVerificationRetries": {
           "type": "number",
           "default": 2,
           "minimum": 1,
           "maximum": 5,
-          "description": "Maximum times the Verifier may reject and re-prompt the Coder per file."
+          "description": "%configuration.nexuscode.maxVerificationRetries.description%"
         }
       }
     },
@@ -50,7 +48,7 @@
       "activitybar": [
         {
           "id": "nexuscode-activitybar",
-          "title": "NexusCode",
+          "title": "%viewContainer.nexuscode-activitybar.title%",
           "icon": "media/icon.svg"
         }
       ]
@@ -95,59 +93,59 @@
     "commands": [
       {
         "command": "nexuscode.inlineEdit",
-        "title": "NexusCode: Inline Edit (Cmd/Ctrl + Shift + K)"
+        "title": "%command.nexuscode_inlineEdit.title%"
       },
       {
         "command": "nexuscode.optimizeSelection",
-        "title": "NexusCode: Optimize Selection"
+        "title": "%command.nexuscode_optimizeSelection.title%"
       },
       {
         "command": "nexuscode.addSelection",
-        "title": "NexusCode: Add Selection to Chat"
+        "title": "%command.nexuscode_addSelection.title%"
       },
       {
         "command": "nexuscode.explainSelection",
-        "title": "NexusCode: Explain Selected Code"
+        "title": "%command.nexuscode_explainSelection.title%"
       },
       {
         "command": "nexuscode.modifySelection",
-        "title": "NexusCode: Modify Selected Code"
+        "title": "%command.nexuscode_modifySelection.title%"
       },
       {
         "command": "nexuscode.setApiKey",
-        "title": "NexusCode: Set API Key"
+        "title": "%command.nexuscode_setApiKey.title%"
       },
       {
         "command": "nexuscode.runHook",
-        "title": "NexusCode: Run Hook"
+        "title": "%command.nexuscode_runHook.title%"
       },
       {
         "command": "nexuscode.acceptEdit",
-        "title": "NexusCode: Accept AI Edit",
+        "title": "%command.nexuscode_acceptEdit.title%",
         "category": "NexusCode",
         "enablement": "false"
       },
       {
         "command": "nexuscode.rejectEdit",
-        "title": "NexusCode: Reject AI Edit",
+        "title": "%command.nexuscode_rejectEdit.title%",
         "category": "NexusCode",
         "enablement": "false"
       },
       {
         "command": "nexuscode.refreshLens",
-        "title": "NexusCode: Refresh CodeLens",
+        "title": "%command.nexuscode_refreshLens.title%",
         "category": "NexusCode",
         "enablement": "false"
       },
       {
         "command": "nexuscode.viewDiff",
-        "title": "NexusCode: View AI Diff",
+        "title": "%command.nexuscode_viewDiff.title%",
         "category": "NexusCode",
         "enablement": "false"
       },
       {
         "command": "nexuscode.reviewCode",
-        "title": "NexusCode: Review Generated Code",
+        "title": "%command.nexuscode_reviewCode.title%",
         "category": "NexusCode",
         "enablement": "false"
       }
@@ -174,9 +172,13 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "test:unit": "jest --config jest.config.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "commander": "^12.1.0",
+    "i18next": "^26.0.8"
+  },
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/mocha": "^10.0.10",
@@ -185,6 +187,8 @@
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.54.0"
   }

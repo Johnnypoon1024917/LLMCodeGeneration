@@ -37,6 +37,7 @@ exports.resolveMissingImports = resolveMissingImports;
 // src/utilities/importResolver.ts
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
+const logger_1 = require("../logger");
 /**
  * Scans the active document for relative imports and automatically fixes:
  * 1. Missing file extensions (e.g., './App' -> './App.tsx')
@@ -55,6 +56,8 @@ async function resolveMissingImports(editor) {
     let hasFixes = false;
     while ((match = importRegex.exec(text)) !== null) {
         const importPath = match[1];
+        if (importPath === undefined || match[0] === undefined)
+            continue;
         // Skip third-party node_modules (like 'react' or 'lodash')
         if (!importPath.startsWith('.'))
             continue;
@@ -99,7 +102,7 @@ async function resolveMissingImports(editor) {
                         const newPath = importPath + ext;
                         workspaceEdit.replace(document.uri, pathRange, newPath);
                         hasFixes = true;
-                        console.log(`[Import Resolver] Auto-fixed: ${importPath} -> ${newPath}`);
+                        logger_1.log.info(`[Import Resolver] Auto-fixed: ${importPath} -> ${newPath}`);
                         break;
                     }
                 }

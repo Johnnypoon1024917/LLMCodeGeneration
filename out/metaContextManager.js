@@ -36,7 +36,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MetaContextManager = void 0;
 // src/metaContextManager.ts
 const vscode = __importStar(require("vscode"));
+const i18n_1 = require("./i18n");
 const path = __importStar(require("path"));
+const logger_1 = require("./logger");
+const errors_1 = require("./utilities/errors");
 class MetaContextManager {
     extensionUri;
     backupUri;
@@ -54,12 +57,12 @@ class MetaContextManager {
             this.backupUri = vscode.Uri.joinPath(this.extensionUri, `src_backup_${timestamp}`);
             // Copy src -> src_backup_...
             await vscode.workspace.fs.copy(srcUri, this.backupUri, { overwrite: true });
-            console.log(`[MetaManager] Backup created at: ${this.backupUri.fsPath}`);
+            logger_1.log.info(`[MetaManager] Backup created at: ${this.backupUri.fsPath}`);
             return true;
         }
         catch (error) {
             vscode.window.showErrorMessage(`CRITICAL: Failed to create backup. Self-evolution aborted.`);
-            console.error(error);
+            logger_1.log.error((0, errors_1.errorMessage)(error), error);
             return false;
         }
     }
@@ -69,7 +72,7 @@ class MetaContextManager {
      */
     async restoreBackup() {
         if (!this.backupUri) {
-            vscode.window.showErrorMessage("No backup found to restore!");
+            vscode.window.showErrorMessage((0, i18n_1.t)("meta_context.no_backup"));
             return;
         }
         try {
@@ -78,11 +81,11 @@ class MetaContextManager {
             await vscode.workspace.fs.delete(srcUri, { recursive: true, useTrash: false });
             // 2. Copy backup -> src
             await vscode.workspace.fs.copy(this.backupUri, srcUri, { overwrite: true });
-            vscode.window.showInformationMessage("Safety Guardrail: Source code restored from backup.");
+            vscode.window.showInformationMessage((0, i18n_1.t)("meta_context.restored_from_backup"));
         }
         catch (error) {
-            vscode.window.showErrorMessage("CRITICAL: Restore failed. You may need to manually fix the source.");
-            console.error(error);
+            vscode.window.showErrorMessage((0, i18n_1.t)("meta_context.restore_failed"));
+            logger_1.log.error((0, errors_1.errorMessage)(error), error);
         }
     }
     /**

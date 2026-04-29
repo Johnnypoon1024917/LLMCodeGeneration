@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { IEnvironment } from '../interfaces/IEnvironment';
+import { log } from '../logger';
 
 const execAsync = promisify(exec);
 
@@ -24,8 +25,8 @@ export class VSCodeEnvironment implements IEnvironment {
         return await execAsync(cmd, { cwd });
     }
 
-    log(message: string, type?: string, details?: string): void {
-        console.log(`[VSCode] ${message}`);
+    log(message: string, _type?: string, _details?: string): void {
+        log.info(`[VSCode] ${message}`);
         // We will still pass the logCallback separately for the UI streaming, 
         // but this gives the environment a base logger.
     }

@@ -1,5 +1,8 @@
 // src/context/traceabilityGraph.ts
-import { getLLMConfig, safeParseJSON,authHeaders } from '../llmService';
+import { getProvider } from '../llm';
+import { safeParseJSON } from '../llmService';
+import { errorMessage } from '../utilities/errors';
+import { log } from '../logger';
 
 export interface GraphNode { id: string; label: string; group: string; val?: number; }
 export interface GraphEdge { source: string; target: string; color?: string; isSemantic?: boolean; weight?: number; }
@@ -86,39 +89,22 @@ export async function parseRequirementGraph(prdContent: string): Promise<GraphDa
     Return ONLY valid JSON matching this schema:
     { "nodes": [ { "id": "PRD", "label": "Product Requirements", "group": "root" }, { "id": "Epic: Auth", "label": "Authentication", "group": "epic" } ], "edges": [ { "source": "PRD", "target": "Epic: Auth" } ] }`;
 
-    const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prdContent }], temperature: 0.1, stream: true })
-        });
-        
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        if (!response.body) throw new Error("No readable stream.");
+        // Migrated to Provider abstraction (Component 1, Session 2).
+        // The hand-rolled SSE accumulator + safeParseJSON shape is
+        // preserved — this function depends on legacy JSON healing for
+        // tolerance to malformed model output. A future cleanup will
+        // route this through `provider.jsonCompletion(messages, schema)`
+        // once the graph schema is added to jsonSchemas.ts.
+        const provider = await getProvider();
+        const fullText = await provider.completion(
+            [
+                { role: 'system', content: systemPrompt },
+                { role: 'user',   content: prdContent }
+            ],
+            { temperature: 0.1 }
+        );
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        let fullText = "";
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
-            for (const line of lines) {
-                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-                    try {
-                        const dataStr = line.substring(6).trim();
-                        if (dataStr) {
-                            const data = JSON.parse(dataStr);
-                            if (data.choices[0]?.delta?.content) fullText += data.choices[0].delta.content;
-                        }
-                    } catch(e) {}
-                }
-            }
-        }
-        
         const jsonStr = fullText.replace(/```json\n?/g, '').replace(/```/g, '').trim();
         const graphData = safeParseJSON<GraphData>(jsonStr);
 
@@ -128,8 +114,8 @@ export async function parseRequirementGraph(prdContent: string): Promise<GraphDa
         cachedPrdHash = currentHash;
         cachedReqGraph = graphData;
         return graphData;
-    } catch (e: any) {
-        console.error(`[DEBUG-MAP] 🔴 PRD Graph Error:`, e instanceof Error ? e.message : String(e));
+    } catch (e: unknown) {
+        log.error(`[DEBUG-MAP] 🔴 PRD Graph Error:`, errorMessage(e));
         return { nodes: [], edges: [] };
     }
 }
@@ -147,39 +133,18 @@ export async function parseDesignGraph(designContent: string): Promise<GraphData
     Return ONLY valid JSON matching this schema:
     { "nodes": [ { "id": "Model: User", "label": "User Model", "group": "model" } ], "edges": [] }`;
 
-    const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: designContent }], temperature: 0.1, stream: true })
-        });
-        
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        if (!response.body) throw new Error("No readable stream.");
+        // Migrated to Provider abstraction (Component 1, Session 2).
+        // Same shape as parseRequirementsGraph above.
+        const provider = await getProvider();
+        const fullText = await provider.completion(
+            [
+                { role: 'system', content: systemPrompt },
+                { role: 'user',   content: designContent }
+            ],
+            { temperature: 0.1 }
+        );
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        let fullText = "";
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
-            for (const line of lines) {
-                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-                    try {
-                        const dataStr = line.substring(6).trim();
-                        if (dataStr) {
-                            const data = JSON.parse(dataStr);
-                            if (data.choices[0]?.delta?.content) fullText += data.choices[0].delta.content;
-                        }
-                    } catch(e) {}
-                }
-            }
-        }
-        
         const jsonStr = fullText.replace(/```json\n?/g, '').replace(/```/g, '').trim();
         const graphData = safeParseJSON<GraphData>(jsonStr);
 
@@ -189,7 +154,7 @@ export async function parseDesignGraph(designContent: string): Promise<GraphData
         cachedDesignHash = currentHash;
         cachedDesignGraph = graphData;
         return graphData;
-    } catch (e: any) {
+    } catch (e: unknown) {
         return { nodes: [], edges: [] };
     }
 }

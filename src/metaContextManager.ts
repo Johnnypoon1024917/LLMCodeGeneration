@@ -1,6 +1,9 @@
 // src/metaContextManager.ts
 import * as vscode from 'vscode';
+import { t } from './i18n';
 import * as path from 'path';
+import { log } from './logger';
+import { errorMessage } from './utilities/errors';
 
 export class MetaContextManager {
     private extensionUri: vscode.Uri;
@@ -23,11 +26,11 @@ export class MetaContextManager {
             // Copy src -> src_backup_...
             await vscode.workspace.fs.copy(srcUri, this.backupUri, { overwrite: true });
             
-            console.log(`[MetaManager] Backup created at: ${this.backupUri.fsPath}`);
+            log.info(`[MetaManager] Backup created at: ${this.backupUri.fsPath}`);
             return true;
         } catch (error) {
             vscode.window.showErrorMessage(`CRITICAL: Failed to create backup. Self-evolution aborted.`);
-            console.error(error);
+            log.error(errorMessage(error), error);
             return false;
         }
     }
@@ -38,7 +41,7 @@ export class MetaContextManager {
      */
     public async restoreBackup(): Promise<void> {
         if (!this.backupUri) {
-            vscode.window.showErrorMessage("No backup found to restore!");
+            vscode.window.showErrorMessage(t("meta_context.no_backup"));
             return;
         }
 
@@ -51,10 +54,10 @@ export class MetaContextManager {
             // 2. Copy backup -> src
             await vscode.workspace.fs.copy(this.backupUri, srcUri, { overwrite: true });
 
-            vscode.window.showInformationMessage("Safety Guardrail: Source code restored from backup.");
+            vscode.window.showInformationMessage(t("meta_context.restored_from_backup"));
         } catch (error) {
-            vscode.window.showErrorMessage("CRITICAL: Restore failed. You may need to manually fix the source.");
-            console.error(error);
+            vscode.window.showErrorMessage(t("meta_context.restore_failed"));
+            log.error(errorMessage(error), error);
         }
     }
 

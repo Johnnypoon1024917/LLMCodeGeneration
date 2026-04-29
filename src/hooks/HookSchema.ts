@@ -99,18 +99,21 @@ export function parseHookFile(content: string, sourceUri: string, fallbackId: st
     const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
     if (!match) return null;
 
-    const [, frontmatterRaw, body] = match;
+    const frontmatterRaw = match[1];
+    const body = match[2];
+    if (frontmatterRaw === undefined || body === undefined) return null;
     const fm = parseSimpleYaml(frontmatterRaw);
     if (!fm) return null;
 
-    const trigger = parseTrigger(fm.trigger);
+    const trigger = parseTrigger(fm['trigger']);
     if (!trigger) return null;
 
+    const description = typeof fm['description'] === 'string' ? fm['description'] : undefined;
     return {
-        id:              typeof fm.name === 'string' && fm.name ? slugify(fm.name) : fallbackId,
-        name:            typeof fm.name === 'string' ? fm.name : fallbackId,
-        description:     typeof fm.description === 'string' ? fm.description : undefined,
-        enabled:         fm.enabled !== false, // default true
+        id:              typeof fm['name'] === 'string' && fm['name'] ? slugify(fm['name']) : fallbackId,
+        name:            typeof fm['name'] === 'string' ? fm['name'] : fallbackId,
+        ...(description !== undefined ? { description } : {}),
+        enabled:         fm['enabled'] !== false, // default true
         trigger,
         promptTemplate:  body.trim(),
         sourceUri
@@ -134,6 +137,7 @@ function parseSimpleYaml(text: string): Record<string, any> | null {
 
     while (i < lines.length) {
         const line = lines[i];
+        if (line === undefined) { i++; continue; } // bounded by length; defensive
         if (!line.trim() || line.trim().startsWith('#')) { i++; continue; }
 
         const indent = line.length - line.trimStart().length;
@@ -151,6 +155,7 @@ function parseSimpleYaml(text: string): Record<string, any> | null {
             i++;
             while (i < lines.length) {
                 const childLine = lines[i];
+                if (childLine === undefined) { i++; continue; } // bounded by length; defensive
                 if (!childLine.trim()) { i++; continue; }
                 const childIndent = childLine.length - childLine.trimStart().length;
                 if (childIndent === 0) break;

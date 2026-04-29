@@ -1,8 +1,12 @@
 // src/agents/verificationAgent.ts
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { CodeDiff } from './Coordinator';
 import { verifyAgainstSpec } from '../llmService';
 import { IEnvironment } from '../interfaces/IEnvironment';
+import { errorMessage, execErrorOutput } from '../utilities/errors';
+import { parseBlocks, applyBlock } from '../utilities/searchReplace';
+import { getDeps } from '../container';
 
 function getLanguageCommands(filepath: string): { 
     compileCmd: string | null; 
@@ -73,28 +77,46 @@ export async function runVerificationAgent(
     try {
         let newContent = originalContent;
         const fullOutput = (draftDiff.fullOutputBuffer || "").replace(/\r\n/g, '\n');
-        
-        const blockRegex = /<<<<SEARCH\s*?\n([\s\S]*?)\n\s*?====\s*?\n([\s\S]*?)\n\s*?>>>>REPLACE/g;
-        const matches = [...fullOutput.matchAll(blockRegex)];
 
-        if (matches.length > 0) {
-            const lastMatch = matches[matches.length - 1];
-            const searchBlock = lastMatch[1].replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
-            const replaceBlock = lastMatch[2].replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
+        // Parse with the hardened module — handles marker fuzzing and rejects
+        // empty blocks. We keep "last block wins" semantics for compatibility
+        // with the Coordinator stream protocol (model may emit multiple drafts).
+        let parsedBlocks: ReturnType<typeof parseBlocks>['blocks'] = [];
+        try {
+            parsedBlocks = parseBlocks(fullOutput).blocks;
+        } catch (e: unknown) {
+            return { passed: false, critique: `Patch parser failed: ${errorMessage(e)}. Re-emit the SEARCH/REPLACE block.` };
+        }
 
-            const normalizeNL = (str: string) => str.replace(/\r\n/g, '\n');
-            const normOriginal = normalizeNL(originalContent);
-            const normSearch = normalizeNL(searchBlock);
-            const normReplace = normalizeNL(replaceBlock);
+        if (parsedBlocks.length > 0) {
+            const lastBlock = parsedBlocks[parsedBlocks.length - 1]!;
+            // Strip stray markdown fences from the parsed block contents
+            // (model sometimes wraps the SEARCH body in ```ts ... ```).
+            const cleanBlock = {
+                search: lastBlock.search.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim(),
+                replace: lastBlock.replace.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim(),
+                blockOffset: lastBlock.blockOffset
+            };
 
-            if (normOriginal.includes(normSearch)) {
-                newContent = normOriginal.replace(normSearch, () => normReplace);
-            } else {
-                return { passed: false, critique: `SEARCH block did not match the file. You hallucinated the code or messed up the indentation. Look at the original file and try again.\n\nYour Search Block:\n${searchBlock}` };
+            try {
+                newContent = applyBlock(originalContent, cleanBlock);
+            } catch (e: unknown) {
+                // The hardened applyBlock provides much better diagnostics —
+                // surface them to the model so its retry has actionable info.
+                const apply = e as { searchPreview?: string; candidates?: string[] };
+                const candidates = apply.candidates && apply.candidates.length > 0
+                    ? `\n\nClosest matches in the file:\n${apply.candidates.join('\n')}`
+                    : '';
+                return {
+                    passed: false,
+                    critique:
+                        `SEARCH block did not match the file. ${errorMessage(e)}${candidates}\n\n` +
+                        `Your Search Block:\n${cleanBlock.search}`
+                };
             }
         } else {
             const markdownMatch = fullOutput.match(/```[a-z]*\n([\s\S]*?)```/i);
-            if (markdownMatch) {
+            if (markdownMatch && markdownMatch[1] !== undefined) {
                 newContent = markdownMatch[1].trim();
             } else {
                 newContent = fullOutput.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim();
@@ -102,6 +124,18 @@ export async function runVerificationAgent(
         }
 
         await env.writeFile(absolutePath, newContent);
+
+        // Emit audit record for the write. Fire-and-forget so we don't
+        // delay verification. SHA-256 of new content lets compliance
+        // verify what was actually written.
+        const fileBytes = Buffer.byteLength(newContent, 'utf-8');
+        const fileHash = crypto.createHash('sha256').update(newContent).digest('hex');
+        void getDeps().audit.logFileWrite({
+            filepath: draftDiff.filepath,
+            fileHash,
+            bytes: fileBytes,
+            operation: fileExisted ? 'modify' : 'create'
+        });
 
         const { compileCmd, installCmd, missingPkgRegex } = getLanguageCommands(absolutePath);
         
@@ -116,8 +150,8 @@ export async function runVerificationAgent(
                 try {
                     await env.runCommand(compileCmd, workspaceRoot);
                     compiled = true; 
-                } catch (error: any) {
-                    compilerOutput = error.stdout || error.stderr || error.message;
+                } catch (error: unknown) {
+                    compilerOutput = execErrorOutput(error);
 
                     if (compilerOutput.includes("COMMON COMMANDS") || compilerOutput.includes("Version ")) {
                         throw new Error(`Compiler failed to target the file. Output: ${compilerOutput}`);
@@ -151,6 +185,7 @@ export async function runVerificationAgent(
                         const missingPackages = new Set<string>(); 
                         
                         for (const match of matches) {
+                            if (match[1] === undefined) continue;
                             const moduleName = match[1].trim();
                             if (!moduleName.startsWith('.') && !moduleName.startsWith('/')) {
                                 missingPackages.add(moduleName);
@@ -166,8 +201,8 @@ export async function runVerificationAgent(
                                 await env.runCommand(installStr, workspaceRoot);
                                 installedSomething = true;
                                 retryCount++;
-                            } catch (installErr: any) {
-                                compilerOutput = `Failed to batch install [${packageArray.join(', ')}]: ${installErr.message}\n\nCompiler Error:\n${filteredOutput}`;
+                            } catch (installErr: unknown) {
+                                compilerOutput = `Failed to batch install [${packageArray.join(', ')}]: ${errorMessage(installErr)}\n\nCompiler Error:\n${filteredOutput}`;
                             }
                         }
                     }
@@ -193,8 +228,8 @@ export async function runVerificationAgent(
             try {
                 await env.runCommand(testCommand, workspaceRoot);
                 logCallback(`Verifier: 🧪 All TDD tests passed!`, "success");
-            } catch (testErr: any) {
-                const failureLog = testErr.stdout || testErr.stderr || testErr.message;
+            } catch (testErr: unknown) {
+                const failureLog = execErrorOutput(testErr);
                 if (fileExisted) await env.writeFile(absolutePath, originalContent);
                 else await env.deleteFile(absolutePath);
                 return { passed: false, critique: `🚨 TDD TEST FAILURE 🚨\n\nYour code compiled, but it FAILED the PRD Business Rules.\n\nTest Output:\n${failureLog}\n\nYou MUST rewrite the logic to make the tests pass.` };
@@ -209,9 +244,9 @@ export async function runVerificationAgent(
 
         return { passed: llmVerification.verified, critique: llmVerification.reasoning, usage: llmVerification.usage };
 
-    } catch (err: any) {
+    } catch (err: unknown) {
         if (fileExisted) await env.writeFile(absolutePath, originalContent);
         else await env.deleteFile(absolutePath);
-        return { passed: false, critique: `Catastrophic Patch Error: ${err.message}` };
+        return { passed: false, critique: `Catastrophic Patch Error: ${errorMessage(err)}` };
     }
 }

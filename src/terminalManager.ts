@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
+import { t } from './i18n';
 import * as cp from 'child_process';
-import * as path from 'path';
 
 export class TerminalManager {
     private outputChannel: vscode.OutputChannel;
@@ -81,13 +81,13 @@ export class TerminalManager {
         const compileResult = await this.runCommandWithCapture("npm run compile", extensionRoot);
 
         if (!compileResult.success) {
-            vscode.window.showErrorMessage("Self-Evolution Failed: Compilation Error. Check Output for details.");
+            vscode.window.showErrorMessage(t("terminal.self_evolution_failed"));
             this.outputChannel.appendLine(`[NexusCode] ❌ CRITICAL: Compilation failed. Aborting reload.`);
             return;
         }
 
         this.outputChannel.appendLine(`[NexusCode] Step 2: Reloading Window...`);
-        vscode.window.showInformationMessage("Extension updated successfully. Reloading...");
+        vscode.window.showInformationMessage(t("terminal.extension_updated"));
         
         setTimeout(() => {
             vscode.commands.executeCommand("workbench.action.reloadWindow");

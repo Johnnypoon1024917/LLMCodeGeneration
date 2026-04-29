@@ -64,7 +64,7 @@ async function findFileInWorkspace(targetPath: string): Promise<string | null> {
 
     // Sort by path length (shortest is usually the source file)
     foundUris.sort((a, b) => a.fsPath.length - b.fsPath.length);
-    return vscode.workspace.asRelativePath(foundUris[0]);
+    return vscode.workspace.asRelativePath(foundUris[0]!); // length > 0 guarded
 }
 
 // --- META MODE: NODE.JS RECURSIVE SEARCH ---
@@ -80,7 +80,7 @@ async function findFileOnDisk(targetPath: string, rootDir: string): Promise<stri
     matches.sort((a, b) => a.length - b.length);
 
     // Return path relative to the root (so the AI understands it)
-    return path.relative(rootDir, matches[0]);
+    return path.relative(rootDir, matches[0]!); // length > 0 guarded above
 }
 
 function crawlDirectory(dir: string, targetFilename: string, depth = 0): string[] {

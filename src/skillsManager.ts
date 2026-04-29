@@ -12,10 +12,10 @@ export class SkillsManager {
         query: string
     ): Promise<{ isSkill: boolean; skillPrompt: string; originalQuery: string }> {
         const match = query.trim().match(/^(\/[a-zA-Z0-9_-]+)(?:\s+(.*))?$/s);
-        if (!match) return { isSkill: false, skillPrompt: "", originalQuery: query };
+        if (!match || match[1] === undefined) return { isSkill: false, skillPrompt: "", originalQuery: query };
 
         const skillName = match[1].substring(1); // remove the leading slash
-        const restOfQuery = match[2] || "";
+        const restOfQuery = match[2] ?? "";
 
         const skillUri = vscode.Uri.joinPath(
             vscode.Uri.file(workspaceRoot),

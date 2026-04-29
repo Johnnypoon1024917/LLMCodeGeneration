@@ -68,7 +68,7 @@ class AILensProvider {
         this.pendingEdits = this.pendingEdits.filter(e => e.taskId !== taskId);
         this.refresh();
     }
-    provideCodeLenses(document, token) {
+    provideCodeLenses(document, _token) {
         const lenses = [];
         const docEdits = this.pendingEdits.filter(e => e.uri.toString() === document.uri.toString());
         for (const edit of docEdits) {

@@ -1,7 +1,8 @@
 // src/agents/testAgent.ts
 import * as path from 'path';
-import { getLLMConfig, resilientFetch,authHeaders} from '../llmService';
+import { getProvider } from '../llm';
 import { IEnvironment } from '../interfaces/IEnvironment';
+import { errorMessage } from '../utilities/errors';
 
 export interface TestSetup {
     filepath: string;
@@ -18,8 +19,10 @@ async function draftProjectTestPlan(
     activeRequirements: string,
     projectContext: string
 ): Promise<string> {
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    
+    // Migrated to Provider abstraction (Component 1, Session 2). Same
+    // request shape as before — non-streaming completion at temperature 0.2.
+    const provider = await getProvider();
+
     const systemPrompt = `You are a Lead QA Engineer. Your job is to read the ENTIRE PRD and the COMPLETE Codebase Context, and write a comprehensive Master Test Plan.
 
 🔥 TRACEABILITY RULES 🔥
@@ -32,18 +35,14 @@ Write the Test Plan in Markdown format using BDD (Behavior-Driven Development) s
 
     const userPrompt = `PRD (Business Rules):\n${activeRequirements}\n\nEntire Codebase Context:\n${projectContext}\n\nGenerate the Master Markdown Test Plan.`;
 
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-            temperature: 0.2
-        })
-    });
-
-    const data = await response.json() as any;
-    return data.choices[0].message.content.trim();
+    const result = await provider.completion(
+        [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: userPrompt }
+        ],
+        { temperature: 0.2 }
+    );
+    return result.trim();
 }
 
 /**
@@ -54,8 +53,13 @@ async function draftProjectTestCode(
     testPlanMarkdown: string,
     projectContext: string
 ): Promise<{ filepath: string; code: string; testCommand: string }> {
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    
+    // Migrated to Provider abstraction (Component 1, Session 2). The
+    // hand-rolled JSON extraction (strip markdown fences, slice between
+    // first { and last }) is preserved verbatim — moving this to
+    // jsonCompletion would require defining a JsonSchema, which is
+    // worthwhile but out of scope for the migration grind.
+    const provider = await getProvider();
+
     const systemPrompt = `You are an elite SDET (Software Development Engineer in Test).
 Your job is to read the Master Test Plan and the Codebase Context, and translate it EXACTLY into a comprehensive Integration/E2E Unit Test file.
 
@@ -71,19 +75,15 @@ EXECUTION & SYNTAX RULES:
 
     const userPrompt = `Codebase Context:\n${projectContext}\n\nMaster Test Plan to Implement:\n${testPlanMarkdown}`;
 
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-            temperature: 0.1
-        })
-    });
+    const raw = await provider.completion(
+        [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: userPrompt }
+        ],
+        { temperature: 0.1 }
+    );
+    const content = raw.replace(/```json\n?/g, '').replace(/```/g, '').trim();
 
-    const data = await response.json() as any;
-    const content = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```/g, '').trim();
-    
     const jsonStart = content.indexOf('{');
     const jsonEnd = content.lastIndexOf('}');
     return JSON.parse(content.substring(jsonStart, jsonEnd + 1));
@@ -126,8 +126,9 @@ export async function runProjectTestAgent(
             testPlanFilepath: planFilepath
         };
 
-    } catch (e: any) {
-        logCallback(`TestAgent: Failed to generate global TDD suite.`, "error", e.message);
+    } catch (e: unknown) {
+        const msg = errorMessage(e);
+        logCallback(`TestAgent: Failed to generate global TDD suite.`, "error", msg);
         return null;
     }
 }

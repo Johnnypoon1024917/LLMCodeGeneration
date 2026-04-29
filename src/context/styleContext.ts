@@ -36,9 +36,9 @@ ${safe}
 
 export async function getProjectStyleGuides(): Promise<UntrustedRulesMessage[]> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders) return [];
+    if (!workspaceFolders || workspaceFolders.length === 0) return [];
 
-    const rootUri = workspaceFolders[0].uri;
+    const rootUri = workspaceFolders[0]!.uri; // length > 0 just checked
     const specs = new SpecManager(rootUri);
 
     // Primary: combined steering from .nexus/steering/

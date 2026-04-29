@@ -22,6 +22,7 @@
 //       hooks/                   # Reserved for future: event-driven agents
 
 import * as vscode from 'vscode';
+import { getDeps } from '../container';
 
 /** The default feature slug used when the UI doesn't yet support multi-feature specs. */
 export const DEFAULT_FEATURE = 'main';
@@ -191,6 +192,11 @@ export class SpecManager {
         // A fresh draft always invalidates downstream approvals
         await this.resetFromPhase('requirements', featureSlug);
         await this.setPhaseStatus('requirements', 'draft', featureSlug);
+        void getDeps().audit.logSpecEdit({
+            spec: featureSlug,
+            phase: 'requirements',
+            description: `Requirements draft updated (${Buffer.byteLength(content, 'utf8')} bytes)`
+        });
     }
 
     async writeDesign(content: string, featureSlug: string = DEFAULT_FEATURE): Promise<void> {
@@ -198,11 +204,21 @@ export class SpecManager {
         await vscode.workspace.fs.writeFile(this.designUri(featureSlug), Buffer.from(content, 'utf8'));
         await this.resetFromPhase('design', featureSlug);
         await this.setPhaseStatus('design', 'draft', featureSlug);
+        void getDeps().audit.logSpecEdit({
+            spec: featureSlug,
+            phase: 'design',
+            description: `Design draft updated (${Buffer.byteLength(content, 'utf8')} bytes)`
+        });
     }
 
     async writeTasksMd(content: string, featureSlug: string = DEFAULT_FEATURE): Promise<void> {
         await this.featureDir(featureSlug);
         await vscode.workspace.fs.writeFile(this.tasksMdUri(featureSlug), Buffer.from(content, 'utf8'));
+        void getDeps().audit.logSpecEdit({
+            spec: featureSlug,
+            phase: 'tasks',
+            description: `Tasks markdown updated (${Buffer.byteLength(content, 'utf8')} bytes)`
+        });
     }
 
     async writeTasksJson(plan: any, featureSlug: string = DEFAULT_FEATURE): Promise<void> {
@@ -294,6 +310,7 @@ export class SpecManager {
         const state = await this.readPhaseState(featureSlug);
         for (let i = 0; i < idx; i++) {
             const upstream = PHASE_ORDER[i];
+            if (upstream === undefined) continue; // bounded by idx; defensive
             if (state[upstream] !== 'approved') {
                 throw new Error(
                     `Phase '${phase}' is locked: upstream phase '${upstream}' is '${state[upstream]}', must be 'approved'.`
@@ -312,7 +329,9 @@ export class SpecManager {
         const idx = PHASE_ORDER.indexOf(phase);
         const next: PhaseState = { ...current };
         for (let i = idx; i < PHASE_ORDER.length; i++) {
-            next[PHASE_ORDER[i]] = 'not_started';
+            const phaseName = PHASE_ORDER[i];
+            if (phaseName === undefined) continue; // bounded by length; defensive
+            next[phaseName] = 'not_started';
         }
         next.updatedAt = new Date().toISOString();
         await this.featureDir(featureSlug);

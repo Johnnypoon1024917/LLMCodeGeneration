@@ -1,7 +1,7 @@
 // src/agents/exploreAgent.ts
-import * as vscode from 'vscode';
 import { runAgenticExploration } from '../llmService';
 import { getSmartASTContext } from '../context/codeGraph';
+import { log } from '../logger';
 
 export async function runExplorerAgent(
     task: string,
@@ -15,7 +15,7 @@ export async function runExplorerAgent(
         // 🚀 FAST-TRACK: Pre-fetch the AST so the AI doesn't have to guess file paths!
         projectContext = await getSmartASTContext(workspaceRoot);
     } catch (e) {
-        console.warn("Failed to fetch AST Context, falling back to empty context.");
+        log.warn("Failed to fetch AST Context, falling back to empty context.");
     }
 
     const explorationContext = await runAgenticExploration(

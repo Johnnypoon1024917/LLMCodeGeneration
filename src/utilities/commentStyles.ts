@@ -29,12 +29,12 @@ export function getAIHeader(filepath: string, taskName: string, existingContent:
             }
         } else if (isXmlLang) {
             const match = existingContent.match(xmlRegex);
-            if (match) {
+            if (match && match[0] !== undefined) {
                 return match[0].replace("-->", `\n    ${taskLine}\n-->`);
             }
         } else {
             const match = existingContent.match(blockRegex);
-            if (match) {
+            if (match && match[0] !== undefined && match[1] !== undefined) {
                 const closingBrace = match[1];
                 // Inject the new task line before the closing characters
                 return match[0].replace(closingBrace, `\n * ${taskLine}${closingBrace}`);

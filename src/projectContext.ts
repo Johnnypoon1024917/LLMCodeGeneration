@@ -1,12 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { log } from './logger';
 
 const contextCache = new Map<string, string>();
 
 export function invalidateProjectContext() {
     contextCache.clear();
-    console.log("[DEBUG] 🗑️ Project context cache cleared.");
+    log.debug("[DEBUG] 🗑️ Project context cache cleared.");
 }
 
 /**
@@ -23,7 +24,7 @@ function normalizePath(p: string): string {
  */
 export async function getProjectContext(rootPath?: string): Promise<string> {
     // Determine the root directory: Use the argument if provided (Meta-Mode), otherwise use workspace (User-Mode)
-    const rawRootDir = rootPath || (vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : "");
+    const rawRootDir = rootPath || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 ? vscode.workspace.workspaceFolders[0]!.uri.fsPath : "");
     if (!rawRootDir) return "No workspace open.";
 
     const rootDir = normalizePath(rawRootDir);
@@ -66,7 +67,7 @@ export async function getRepoContent(tokenBudgetChars: number = 200000, rootPath
     let fullContent = "REPOSITORY CODEBASE CONTEXT:\n\n";
     let currentChars = 0;
     
-    const rawRootDir = rootPath || (vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : "");
+    const rawRootDir = rootPath || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 ? vscode.workspace.workspaceFolders[0]!.uri.fsPath : "");
     if (!rawRootDir) return "";
 
     const rootDir = normalizePath(rawRootDir);
@@ -172,7 +173,7 @@ function generateAsciiTree(paths: string[]): string {
         });
     });
 
-    function drawTree(node: Record<string, any>, prefix: string = '', isLast: boolean = true): string {
+    function drawTree(node: Record<string, any>, prefix: string = '', _isLast: boolean = true): string {
         const keys = Object.keys(node);
         let result = '';
         keys.forEach((key, index) => {

@@ -3,3 +3,7 @@ dist
 node_modules
 .vscode-test/
 *.vsix
+
+# Audit logs contain potentially sensitive data (prompts, file contents,
+# user identities). Never commit. The audit module writes here.
+.nexus/audit/

@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
+import { log } from '../logger';
 
 export class ASTParser {
-    public static async init(context: vscode.ExtensionContext) {
+    public static async init(_context: vscode.ExtensionContext) {
         //  We have stripped out the fragile WebAssembly Tree-Sitter dependency.
         // The AST Engine is now powered by a bulletproof, zero-dependency RegExp engine.
-        console.log("AST Regex Engine initialized successfully.");
+        log.info("AST Regex Engine initialized successfully.");
     }
 
     public static extractSymbols(content: string) {
@@ -21,31 +22,31 @@ export class ASTParser {
             const importRegex = /import\s+(?:\{[^}]+\}|\S+)\s+from\s+['"]([^'"]+)['"]/g;
             let match;
             while ((match = importRegex.exec(cleanContent)) !== null) {
-                result.imports.push(match[1]);
+                if (match[1]) result.imports.push(match[1]);
             }
 
             // 2. Extract Classes
             const classRegex = /class\s+([a-zA-Z0-9_]+)/g;
             while ((match = classRegex.exec(cleanContent)) !== null) {
-                result.classes.push(match[1]);
+                if (match[1]) result.classes.push(match[1]);
             }
 
             // 3. Extract Standard Functions
             const funcRegex = /function\s+([a-zA-Z0-9_]+)\s*\(/g;
             while ((match = funcRegex.exec(cleanContent)) !== null) {
-                result.functions.push(match[1]);
+                if (match[1]) result.functions.push(match[1]);
             }
 
             // 4. Extract Arrow Functions
             const arrowRegex = /(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>/g;
             while ((match = arrowRegex.exec(cleanContent)) !== null) {
-                result.functions.push(match[1]);
+                if (match[1]) result.functions.push(match[1]);
             }
 
             // 5. Extract Interfaces
             const intRegex = /interface\s+([a-zA-Z0-9_]+)/g;
             while ((match = intRegex.exec(cleanContent)) !== null) {
-                result.interfaces.push(match[1]);
+                if (match[1]) result.interfaces.push(match[1]);
             }
 
             // 6. Extract Exports
@@ -54,7 +55,7 @@ export class ASTParser {
                 if (match[1]) result.exports.push(match[1]);
             }
         } catch (e) {
-            console.error("[AST Parser] Regex parsing failed", e);
+            log.error("[AST Parser] Regex parsing failed", e);
         }
 
         return {

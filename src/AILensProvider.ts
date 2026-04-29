@@ -44,7 +44,7 @@ export class AILensProvider implements vscode.CodeLensProvider {
         this.refresh();
     }
 
-    public provideCodeLenses(document: vscode.TextDocument, token: vscode.CancellationToken): vscode.CodeLens[] {
+    public provideCodeLenses(document: vscode.TextDocument, _token: vscode.CancellationToken): vscode.CodeLens[] {
         const lenses: vscode.CodeLens[] = [];
         const docEdits = this.pendingEdits.filter(e => e.uri.toString() === document.uri.toString());
 

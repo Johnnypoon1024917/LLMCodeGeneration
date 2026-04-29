@@ -1,25 +1,26 @@
 // src/SidebarProvider.ts
 import * as vscode from "vscode";
 import * as path from 'path';
-import { globalContext } from './extension';
+import { getDeps } from './container';
 import { originalContentProvider } from './diffProvider';
 import { getSmartASTContext, getGraphJSON, buildWorkspaceGraph } from './context/codeGraph';
-import { SkillsManager } from './skillsManager';
 import { SwarmCoordinator } from './agents/Coordinator';
+import { ToolEventEmitter } from './agents/toolEventEmitter';
 import { SpecManager, type Phase } from './specs/SpecManager';
-import { parseRequirementGraph, buildCombinedGraph } from './context/traceabilityGraph';
 import { VSCodeEnvironment } from './adapters/VSCodeEnvironment';
 import { runProjectTestAgent } from './agents/testAgent';
+import { errorMessage, isAbortError } from './utilities/errors';
+import { applyBlock } from './utilities/searchReplace';
+import { t } from './i18n';
+import { log } from './logger';
 
 // AI Services & Tools
 import {
     generatePlan,
     healError,
     generateTests,
-    inferTargetFile,
     generateAtomicEdits,
     AtomicEdit,
-    streamCoder,
     runAgenticExploration,
     getAvailableModels,
     determineIntent,
@@ -29,10 +30,8 @@ import {
     generateTasks,
     verifyAgainstSpec,
     updateLivingPRD,
-    reviewCodeCompleteness,
     healGlobalBuild,
     askSecurityMonitor,
-    generateAdversarialTest,
     compactConversationHistory,
     generateMCTSApproaches
 } from "./llmService";
@@ -41,76 +40,115 @@ import {
 import { getProjectContext } from "./projectContext";
 import { getLspContext } from './context/lspContext';
 import { getProjectStyleGuides, wrapUntrusted } from './context/styleContext';
-import { indexWorkspace, retrieveContext } from './context/ragIndexer';
+import { indexWorkspace } from './context/ragIndexer';
 import { retrieveHybridContext } from './context/hybridSearch';
 
 // Utilities
-import { resolveMissingImports } from './utilities/importResolver';
 import { getAIHeader } from './utilities/commentStyles';
 import { resolveCanonicalPaths } from './utilities/pathUtils';
-import { getInjectionPosition } from './utilities/symbolManager';
 
 // Core Managers
 import { ProvenanceTracker } from "./provenanceTracker";
 import { createWorkspaceStructure } from "./workspaceManager";
 import { TerminalManager } from './terminalManager';
-import { MetaContextManager } from "./metaContextManager";
 
+/**
+ * Apply a SEARCH/REPLACE pair to a file's content.
+ *
+ * Delegates to the hardened `applyBlock` helper from `utilities/searchReplace`,
+ * which provides Tier A (exact) / Tier B (trailing whitespace) / Tier C
+ * (leading whitespace tolerance) matching. Falls back to "replace whole file
+ * with extracted markdown" when the model emitted no SEARCH/REPLACE block at all.
+ */
 function applySearchReplace(originalContent: string, searchBlock: string, replaceBlock: string, fullBuffer: string): string {
     const normalizeNL = (str: string) => str.replace(/\r\n/g, '\n');
-    const normOriginal = normalizeNL(originalContent);
 
-    // 1. If no search block was found by the parser, fallback to full file rewrite
+    // Fallback: no parsed block → take whatever's inside the first ``` fence
+    // as a full-file replacement. This handles the case where the model
+    // skipped the SEARCH/REPLACE protocol entirely (rare, but observed).
     if (!searchBlock || !replaceBlock) {
         const markdownMatch = fullBuffer.match(/```[a-z]*\n([\s\S]*?)```/i);
-        if (markdownMatch) {
+        if (markdownMatch && markdownMatch[1] !== undefined) {
             return normalizeNL(markdownMatch[1].trim());
         }
         return normalizeNL(fullBuffer.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim());
     }
 
-    // 2. Clean the blocks of any accidental markdown formatting
+    // Strip stray markdown fences from the block contents (model sometimes
+    // wraps SEARCH bodies in ```ts ... ```).
     const cleanSearch = normalizeNL(searchBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim());
     const cleanReplace = normalizeNL(replaceBlock.replace(/```[a-z]*\n?/gi, '').replace(/```/g, '').trim());
 
-    // 3. Strict substring replacement with $ protection
-    if (normOriginal.includes(cleanSearch)) {
-        // 🚀 FIX: Use () => cleanReplace to prevent JavaScript from interpreting '$' as regex tokens
-        return normOriginal.replace(cleanSearch, () => cleanReplace);
-    } else {
-        // 🔥 THE POISON PILL
-        throw new Error("Target SEARCH block not found in file. The AI hallucinated the existing code. Aborting to prevent corruption.");
-    }
+    // Delegate to the hardened applier — its multi-tier matching tolerates
+    // model whitespace fuzzing, and its diagnostics on failure are richer
+    // than the legacy "AI hallucinated" error.
+    return applyBlock(originalContent, {
+        search: cleanSearch,
+        replace: cleanReplace,
+        blockOffset: 0
+    });
 }
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
     public _view?: vscode.WebviewView;
     private _tracker?: ProvenanceTracker;
     private _terminalManager?: TerminalManager;
-    private _metaManager?: MetaContextManager;
-    private _activeTaskController?: AbortController;
+    private _activeTaskController: AbortController | undefined;
     private _activeRequirements: string = "";
     private _activeDesign: string = "";
-    private _lastActiveFile?: string;
     private _isMetaMode: boolean = false;
-    private _skillsManager: SkillsManager;
 
     private _undoStack = new Map<string, { filepath: string, originalContent: string }>();
-    private _pendingCommandResolver?: (approved: boolean) => void;
+    private _pendingCommandResolver: ((approved: boolean) => void) | undefined;
+
+    /**
+     * Component 2B-3b: per-session tool event emitter. Used by the
+     * Coordinator to surface lifecycle events for tool calls (started
+     * / output / completed) to the webview as `toolCallEvent` messages.
+     *
+     * Lazily constructed on first request — most sessions never trigger
+     * a flow that uses tool calls (chat-only mode), so allocating a
+     * Map upfront would be waste. Constructed once per SidebarProvider
+     * instance, which matches a single VS Code window's lifetime.
+     *
+     * The sink callback is bound to `this._view?.webview.postMessage`,
+     * so events are silently dropped if the webview hasn't been resolved
+     * yet (e.g. extension activation before sidebar opens). This is the
+     * correct behavior — there's no UI to render events to.
+     */
+    private _toolEventEmitter?: ToolEventEmitter;
+
+    /**
+     * Get (or lazily construct) the per-session tool event emitter.
+     * Public so tests and future callers (Coordinator wire-up in 2B-3c)
+     * can attach as event producers. See _toolEventEmitter docstring
+     * for behavior on the no-view case.
+     */
+    public getToolEventEmitter(): ToolEventEmitter {
+        if (!this._toolEventEmitter) {
+            this._toolEventEmitter = new ToolEventEmitter((event) => {
+                // Drop events when no view is attached. Webview is the
+                // sole consumer; nothing else listens to these today.
+                this._view?.webview.postMessage({
+                    type: 'toolCallEvent',
+                    event
+                });
+            });
+        }
+        return this._toolEventEmitter;
+    }
 
     constructor(private readonly _extensionUri: vscode.Uri) {
-        this._skillsManager = new SkillsManager();
     }
 
     public setTerminalManager(manager: TerminalManager) { this._terminalManager = manager; }
     public setProvenanceTracker(tracker: ProvenanceTracker) { this._tracker = tracker; }
-    public setMetaManager(manager: MetaContextManager) { this._metaManager = manager; }
 
     public sendMessageToWebview(message: any) {
         if (this._view) {
             this._view.webview.postMessage(message);
         } else {
-            vscode.window.showInformationMessage("Please open the NexusCode sidebar first.");
+            vscode.window.showInformationMessage(t("commands.open_sidebar_first"));
         }
     }
 
@@ -123,13 +161,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     public toggleMetaMode() {
         this._isMetaMode = !this._isMetaMode;
         const mode = this._isMetaMode ? "⚠️ SELF-EVOLUTION MODE" : "User Project Mode";
-        vscode.window.showWarningMessage(`Switched to: ${mode}`);
+        vscode.window.showWarningMessage(t("commands.switched_mode", { mode }));
         this._view?.webview.postMessage({ type: 'metaModeChanged', value: this._isMetaMode });
     }
 
     private async getTargetContext(): Promise<string> {
         if (this._isMetaMode) { return this._extensionUri.fsPath; }
-        return vscode.workspace.workspaceFolders?.[0].uri.fsPath || "";
+        return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
     }
 
     /**
@@ -140,7 +178,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const folders = vscode.workspace.workspaceFolders;
         if (this._isMetaMode) return new SpecManager(this._extensionUri);
         if (!folders || folders.length === 0) return null;
-        return new SpecManager(folders[0].uri);
+        return new SpecManager(folders[0]!.uri); // length > 0 guarded
     }
 
     private isValidPhase(p: any): p is Phase {
@@ -159,7 +197,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const isMalicious = await askSecurityMonitor(command);
 
         if (isMalicious) {
-            vscode.window.showErrorMessage(`🚨 Nexus Security Firewall BLOCKED a malicious command: ${command}`);
+            vscode.window.showErrorMessage(t("security.firewall_blocked", { command }));
             this._view?.webview.postMessage({ type: 'statusUpdate', message: `🚨 Command Blocked by Security Monitor.` });
             return { success: false, output: "SECURITY_BLOCK" };
         }
@@ -185,7 +223,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this._view?.webview.postMessage({ type: 'statusUpdate', message: progressMessage });
             return await this._terminalManager?.runCommandWithCapture(command, workspacePath, onStream);
         } else {
-            vscode.window.showInformationMessage("Command execution blocked by user.");
+            vscode.window.showInformationMessage(t("commands.command_blocked_by_user"));
             return { success: false, output: "USER_BLOCKED" };
         }
     }
@@ -204,19 +242,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const buildResult = await this._terminalManager?.runCommandWithCapture("npm run build", webviewPath);
 
             if (buildResult?.success) {
-                vscode.window.showInformationMessage("🎨 UI Rebuilt! Refreshing Webview...");
+                vscode.window.showInformationMessage(t("ui_evolution.ui_rebuilt"));
                 vscode.commands.executeCommand('workbench.action.webview.reloadWebviewAction');
             } else {
-                vscode.window.showErrorMessage("💥 UI Build Failed! Check Output.");
+                vscode.window.showErrorMessage(t("ui_evolution.ui_build_failed"));
             }
         } else {
             this._view?.webview.postMessage({ type: 'statusUpdate', message: "🧬 Self-Evolution: Recompiling..." });
             const compileResult = await this._terminalManager?.runCommandWithCapture("npm run compile", this._extensionUri.fsPath);
 
             if (compileResult?.success) {
-                vscode.window.showInformationMessage("🧬 Evolution Applied. Reload window to see changes.");
+                vscode.window.showInformationMessage(t("ui_evolution.evolution_applied"));
             } else {
-                vscode.window.showErrorMessage("💥 Build Failed! Check Output.");
+                vscode.window.showErrorMessage(t("ui_evolution.build_failed"));
             }
         }
         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
@@ -224,7 +262,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
-        context: vscode.WebviewViewResolveContext,
+        _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ) {
         this._view = webviewView;
@@ -243,11 +281,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 //  THE FIX: The Webview Handshake. Loads chat history, PRD, design, tasks, steering rules.
                 case "webviewReady": {
-                    const chatHistory = globalContext.workspaceState.get<any[]>('nexus_chat_history') || [];
-                    const taskStatuses = globalContext.workspaceState.get<any>('nexus_task_statuses') || {};
-                    const taskSummaries = globalContext.workspaceState.get<any>('nexus_task_summaries') || {};
-                    const taskFiles = globalContext.workspaceState.get<any>('nexus_task_files') || {};
-                    const hasApiKey = !!(await globalContext.secrets.get('nexuscode_apikey'));
+                    const chatHistory = getDeps().state.get<any[]>('nexus_chat_history') || [];
+                    const taskStatuses = getDeps().state.get<any>('nexus_task_statuses') || {};
+                    const taskSummaries = getDeps().state.get<any>('nexus_task_summaries') || {};
+                    const taskFiles = getDeps().state.get<any>('nexus_task_files') || {};
+                    const hasApiKey = !!(await getDeps().secrets.get('nexuscode_apikey'));
 
                     let savedReqs = "";
                     let savedDesign = "";
@@ -257,8 +295,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders) {
-                        const rootUri = workspaceFolders[0].uri;
-                        buildWorkspaceGraph(rootUri).catch(e => console.error("CodeGraph init failed:", e));
+                        const rootUri = workspaceFolders[0]!.uri;
+                        buildWorkspaceGraph(rootUri).catch(e => log.error("CodeGraph init failed:", e));
 
                         const specs = this.specs();
                         if (specs) {
@@ -292,20 +330,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
 
                 case "requestWorkspaceGraph": {
-                    console.log("[DEBUG-MAP] 🟢 1. Webview requested workspace graph.");
+                    log.debug("[DEBUG-MAP] 🟢 1. Webview requested workspace graph.");
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) {
-                        console.log("[DEBUG-MAP] 🔴 Workspace folders not found.");
+                        log.debug("[DEBUG-MAP] 🔴 Workspace folders not found.");
                         return;
                     }
 
-                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                     const specs = new SpecManager(rootUri);
 
                     this._view?.webview.postMessage({ type: 'statusUpdate', message: 'Nexus: Indexing AST Code Map...' });
 
                     try {
-                        console.log("[DEBUG-MAP] 🟡 2. Fetching raw CodeGraph...");
+                        log.debug("[DEBUG-MAP] 🟡 2. Fetching raw CodeGraph...");
                         let rawCodeGraph = getGraphJSON();
 
                         // Force build if empty
@@ -317,10 +355,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         let codeGraph: any = {};
                         if (rawCodeGraph) {
                             try { codeGraph = typeof rawCodeGraph === 'string' ? JSON.parse(rawCodeGraph) : rawCodeGraph; }
-                            catch (e) { console.error("[DEBUG-MAP] 🔴 CodeGraph Parse Error:", e instanceof Error ? e.message : String(e)); }
+                            catch (e) { log.error("[DEBUG-MAP] 🔴 CodeGraph Parse Error:", e instanceof Error ? e.message : String(e)); }
                         }
 
-                        console.log("[DEBUG-MAP] 🟡 3. Normalizing AST Dictionary...");
+                        log.debug("[DEBUG-MAP] 🟡 3. Normalizing AST Dictionary...");
                         let normalizedCodeGraph: { nodes: any[], edges: any[] } = { nodes: [], edges: [] };
                         Object.entries(codeGraph).forEach(([filepath, data]: [string, any]) => {
                             if (filepath === 'nodes' || filepath === 'edges') return;
@@ -339,7 +377,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         });
 
                         //  THE PROGRESSIVE LOADING INJECTION: Send CodeMap immediately!
-                        console.log("[DEBUG-MAP] 🟢 4. Sending Initial CodeMap to Webview!");
+                        log.debug("[DEBUG-MAP] 🟢 4. Sending Initial CodeMap to Webview!");
                         this._view?.webview.postMessage({
                             type: 'workspaceGraphData',
                             data: {
@@ -363,7 +401,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 reqGraph = await parseRequirementGraph(reqString);
                             }
                         } catch (e) {
-                            console.log("[DEBUG-MAP] 🟡 No requirements.md found or parsing failed:", e instanceof Error ? e.message : String(e));
+                            log.debug("[DEBUG-MAP] 🟡 No requirements.md found or parsing failed:", e instanceof Error ? e.message : String(e));
                         }
 
                         // Fetch & Parse Architecture (Design)
@@ -375,7 +413,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 designGraph = await parseDesignGraph(designString);
                             }
                         } catch (e) {
-                            console.log("[DEBUG-MAP] 🟡 No design.md found or parsing failed:", e instanceof Error ? e.message : String(e));
+                            log.debug("[DEBUG-MAP] 🟡 No design.md found or parsing failed:", e instanceof Error ? e.message : String(e));
                         }
 
                         let tasksJson = await specs.readTasksJson();
@@ -387,10 +425,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             //  THE FIX: This now executes NO MATTER WHAT, successfully merging Code + PRD!
                             combinedGraph = buildCombinedGraph(normalizedCodeGraph, reqGraph, designGraph, tasksJson);
                         } catch (e) {
-                            console.log("[DEBUG-MAP] 🔴 Graph Combining failed:", e instanceof Error ? e.message : String(e));
+                            log.debug("[DEBUG-MAP] 🔴 Graph Combining failed:", e instanceof Error ? e.message : String(e));
                         }
 
-                        console.log("[DEBUG-MAP] 🟢 5. Sending Final Traceability Payload to Webview!");
+                        log.debug("[DEBUG-MAP] 🟢 5. Sending Final Traceability Payload to Webview!");
                         this._view?.webview.postMessage({
                             type: 'workspaceGraphData',
                             data: {
@@ -404,7 +442,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     } catch (error) {
                         const safeError = error instanceof Error ? error.message : String(error);
-                        console.error("[DEBUG-MAP] 🔴 FATAL GRAPH ERROR:", safeError);
+                        log.error("[DEBUG-MAP] 🔴 FATAL GRAPH ERROR:", safeError);
 
                         // Fail gracefully
                         this._view?.webview.postMessage({
@@ -421,9 +459,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (specs) {
                         try {
                             await specs.writeStructureRules(data.text);
-                            vscode.window.showInformationMessage("✨ NexusCode steering rules saved to .nexus/steering/structure.md");
+                            vscode.window.showInformationMessage(t("steering.rules_saved"));
                         } catch (e) {
-                            vscode.window.showErrorMessage("Failed to save steering rules");
+                            vscode.window.showErrorMessage(t("steering.save_failed"));
                         }
                     }
                     break;
@@ -436,7 +474,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     try {
                         const taskQuery = data.prompt || data.task;
-                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
 
                         const [astContext, hybridContext] = await Promise.all([
                             getSmartASTContext(taskQuery),
@@ -486,7 +524,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     }
                                 }
                             } catch (e) {
-                                console.warn("[DEBUG] Living PRD QA check failed for manual verify", e);
+                                log.warn("[DEBUG] Living PRD QA check failed for manual verify", e);
                             }
 
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'approved', summary: `✅ VERIFIED: ${verification.reasoning}` });
@@ -496,8 +534,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'rejected', summary: `❌ REJECTED: ${verification.reasoning}` });
                         }
 
-                    } catch (error: any) {
-                        this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Verification Error: ${error.message}` });
+                    } catch (error: unknown) {
+                        this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Verification Error: ${errorMessage(error)}` });
                     }
                     break;
                 }
@@ -552,7 +590,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         reqPlan.nonFunctionalRequirements.forEach((nfr: string) => { enrichedPrompt += `- ${nfr}\n`; });
                         enrichedPrompt += `</nfr_list>\n`;
 
-                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                         const specs = new SpecManager(rootUri);
                         await specs.writeRequirements(enrichedPrompt);
                         this._activeRequirements = enrichedPrompt;
@@ -560,11 +598,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this._view?.webview.postMessage({ type: 'reqStep', message: `✅ Saved requirements.md` });
                         this._view?.webview.postMessage({ type: 'requirementsGenerated', text: enrichedPrompt });
                         this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await specs.readPhaseState() });
-                    } catch (error: any) {
-                        if (error.name === 'AbortError') {
+                    } catch (error: unknown) {
+                        if (isAbortError(error)) {
                             this._view?.webview.postMessage({ type: 'reqStep', message: `\n🛑 Cancelled by User.` });
                         } else {
-                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${error.message}` });
+                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${errorMessage(error)}` });
                         }
                         this._view?.webview.postMessage({ type: 'generationFailed' }); // Reset UI
                     } finally {
@@ -578,12 +616,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (!workspaceFolders) { return; }
 
                     // PHASE GATE: requirements must be approved before design can be drafted.
-                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                     const gateSpecs = new SpecManager(rootUri);
                     try {
                         await gateSpecs.requirePhaseApproved('design');
-                    } catch (e: any) {
-                        this._view?.webview.postMessage({ type: 'reqStep', message: `🔒 ${e.message}` });
+                    } catch (e: unknown) {
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `🔒 ${errorMessage(e)}` });
                         this._view?.webview.postMessage({ type: 'generationFailed' });
                         return;
                     }
@@ -602,11 +640,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this._view?.webview.postMessage({ type: 'reqStep', message: `✅ Saved design.md` });
                         this._view?.webview.postMessage({ type: 'designGenerated', text: designDoc });
                         this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await new SpecManager(rootUri).readPhaseState() });
-                    } catch (error: any) {
-                        if (error.name === 'AbortError') {
+                    } catch (error: unknown) {
+                        if (isAbortError(error)) {
                             this._view?.webview.postMessage({ type: 'reqStep', message: `\n🛑 Architecting Cancelled by User.` });
                         } else {
-                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${error.message}` });
+                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${errorMessage(error)}` });
                         }
                         this._view?.webview.postMessage({ type: 'generationFailed' });
                     } finally {
@@ -620,12 +658,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (!workspaceFolders) { return; }
 
                     // PHASE GATE: design must be approved before tasks can be drafted.
-                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                     const gateSpecs = new SpecManager(rootUri);
                     try {
                         await gateSpecs.requirePhaseApproved('tasks');
-                    } catch (e: any) {
-                        this._view?.webview.postMessage({ type: 'reqStep', message: `🔒 ${e.message}` });
+                    } catch (e: unknown) {
+                        this._view?.webview.postMessage({ type: 'reqStep', message: `🔒 ${errorMessage(e)}` });
                         this._view?.webview.postMessage({ type: 'generationFailed' });
                         return;
                     }
@@ -701,11 +739,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this._view?.webview.postMessage({ type: 'tasksGenerated' });
                         this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await specs.readPhaseState() });
 
-                    } catch (error: any) {
-                        if (error.name === 'AbortError') {
+                    } catch (error: unknown) {
+                        if (isAbortError(error)) {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: `🛑 Planning Cancelled by User.` });
                         } else {
-                            vscode.window.showErrorMessage(`Failed to generate tasks: ${error.message}`);
+                            vscode.window.showErrorMessage(`Failed to generate tasks: ${errorMessage(error)}`);
                         }
                         this._view?.webview.postMessage({ type: 'generationFailed' });
                     } finally {
@@ -759,7 +797,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._activeRequirements = data.text;
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders && data.text.trim()) {
-                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                         try { await new SpecManager(rootUri).writeRequirements(data.text); } catch (e) { }
                     } else if (data.text === "") {
                         this._activeRequirements = "";
@@ -772,7 +810,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this._activeDesign = data.text;
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders && data.text.trim()) {
-                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                         try { await new SpecManager(rootUri).writeDesign(data.text); } catch (e) { }
                     }
                     break;
@@ -799,30 +837,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             this._view?.webview.postMessage({ type: 'historyCompacted', messages: historyToSave });
                         } catch (e) {
-                            console.error("Compaction failed", e);
+                            log.error("Compaction failed", e);
                         } finally {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                         }
                     }
 
                     // 🚀 FIX: Use workspaceState to save data safely without overwriting other projects
-                    await globalContext.workspaceState.update('nexus_chat_history', historyToSave);
-                    await globalContext.workspaceState.update('nexus_task_statuses', data.taskStatuses);
-                    await globalContext.workspaceState.update('nexus_task_summaries', data.taskSummaries);
-                    await globalContext.workspaceState.update('nexus_task_files', data.taskFiles);
+                    await getDeps().state.update('nexus_chat_history', historyToSave);
+                    await getDeps().state.update('nexus_task_statuses', data.taskStatuses);
+                    await getDeps().state.update('nexus_task_summaries', data.taskSummaries);
+                    await getDeps().state.update('nexus_task_files', data.taskFiles);
                     break;
                 }
 
                 case "clearHistory":
-                    await globalContext.workspaceState.update('nexus_chat_history', []);
-                    await globalContext.workspaceState.update('nexus_task_statuses', {});
-                    await globalContext.workspaceState.update('nexus_task_summaries', {});
-                    await globalContext.workspaceState.update('nexus_task_files', {});
+                    await getDeps().state.update('nexus_chat_history', []);
+                    await getDeps().state.update('nexus_task_statuses', {});
+                    await getDeps().state.update('nexus_task_summaries', {});
+                    await getDeps().state.update('nexus_task_files', {});
                     break;
 
                 case "saveApiKey":
-                    await globalContext.secrets.store('nexuscode_apikey', data.value);
-                    vscode.window.showInformationMessage("NexusCode: API Key Saved Securely!");
+                    await getDeps().secrets.store('nexuscode_apikey', data.value);
+                    vscode.window.showInformationMessage(t("api_key.saved_securely"));
                     this._view?.webview.postMessage({ type: 'initState', messages: [], hasKey: true });
                     break;
 
@@ -836,11 +874,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         await SkillsManager.initializeSkillsDirectory(workspacePath);
                         const skillResult = await SkillsManager.processSkill(workspacePath, data.text);
 
-                        let actualPromptText = data.text;
-
                         if (skillResult.isSkill) {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: `✨ Executing Custom Skill...` });
-                            actualPromptText = skillResult.skillPrompt; // Override with the Markdown Instructions!
                         } else {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing intent..." });
                         }
@@ -987,12 +1022,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
 
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
-                    } catch (error: any) {
-                        if (error.name === 'AbortError') {
+                    } catch (error: unknown) {
+                        if (isAbortError(error)) {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "⚠️ Generation stopped." });
                             setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 3000);
                         } else {
-                            vscode.window.showErrorMessage(`NexusCode Error: ${error.message}`);
+                            vscode.window.showErrorMessage(`NexusCode Error: ${errorMessage(error)}`);
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                             this._view?.webview.postMessage({ type: 'taskCompleted', status: 'error' });
                         }
@@ -1017,14 +1052,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) return;
 
-                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                     this._activeTaskController = new AbortController();
 
                     vscode.window.withProgress({
                         location: vscode.ProgressLocation.Notification,
                         title: "NexusCode Swarm Execution Engine...",
                         cancellable: true
-                    }, async (progress, token) => {
+                    }, async (_progress, token) => {
                         token.onCancellationRequested(() => this._activeTaskController?.abort());
                         const taskStartTime = Date.now();
 
@@ -1040,7 +1075,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             }
 
                             let success = false;
-                            let winningApproach = 0;
                             let finalMergedFilepath = "";
 
                             for (let i = 0; i < approaches.length; i++) {
@@ -1094,7 +1128,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         this._activeTaskController?.signal,
                                         (usage) => {
                                             this._view?.webview.postMessage({ type: 'tokenUsage', task: data.task, usage });
-                                        }
+                                        },
+                                        // Component 2B-3c: lifecycle event emitter for tool
+                                        // calls. Lazily-constructed; sink is webview postMessage.
+                                        // The 'toolCallEvent' messages will be consumed by 2B-4
+                                        // UI cards.
+                                        this.getToolEventEmitter()
                                     );
 
                                     if (!finalDiffs || finalDiffs.length === 0) throw new Error("Swarm failed to generate verified code.");
@@ -1110,8 +1149,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                             fileContent = new TextDecoder().decode(fileData);
                                         } catch { await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0)); }
 
-                                        // Apply the Phase 1 Search/Replace logic
-                                        const finalPerfectCode = applySearchReplace(fileContent, finalDiff.searchBlock, finalDiff.replaceBlock, finalDiff.fullOutputBuffer);
+                                        // Component 2B-3c: when swarmDraftCode used the
+                                        // tool-call path (Option C stepping-stone), the file
+                                        // is already modified on disk and finalDiff.finalContent
+                                        // holds the verifier-approved post-mod content. Use
+                                        // that directly. Legacy SEARCH/REPLACE callers (planner
+                                        // narrative output, verifier-synthesized diffs) leave
+                                        // finalContent undefined and fall through to the
+                                        // applySearchReplace path.
+                                        const finalPerfectCode = finalDiff.finalContent !== undefined
+                                            ? finalDiff.finalContent
+                                            : applySearchReplace(fileContent, finalDiff.searchBlock, finalDiff.replaceBlock, finalDiff.fullOutputBuffer);
 
                                         const document = await vscode.workspace.openTextDocument(fileUri);
                                         const editor = await vscode.window.showTextDocument(document, { preview: false });
@@ -1149,10 +1197,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     }
 
                                     success = true;
-                                    winningApproach = approachNum;
 
-                                } catch (error: any) {
-                                    if (error.name === 'AbortError') {
+                                } catch (error: unknown) {
+                                    if (isAbortError(error)) {
                                         throw error; // 🚀 FIX: Bubble the abort up immediately!
                                     }
                                     if (isMCTSActive) {
@@ -1160,7 +1207,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         await this._terminalManager?.runCommandWithCapture(`git checkout -`, rootUri.fsPath);
                                         await this._terminalManager?.runCommandWithCapture(`git branch -D ${sandboxBranch}`, rootUri.fsPath);
                                     } else {
-                                        vscode.window.showErrorMessage(`Execution failed: ${error.message}`);
+                                        vscode.window.showErrorMessage(`Execution failed: ${errorMessage(error)}`);
                                     }
                                 }
                             } // End of MCTS approaches loop
@@ -1173,7 +1220,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 try {
                                     await new SpecManager(rootUri).markTaskCompleted(data.task);
                                 } catch (e) {
-                                    console.warn("Could not auto-update tasks.md", e);
+                                    log.warn("Could not auto-update tasks.md", e);
                                 }
 
                                 // Trigger the green checkmark
@@ -1189,14 +1236,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: errorSummary });
                             }
 
-                        } catch (fatalError: any) {
+                        } catch (fatalError: unknown) {
                             // 🚀 FIX: Catch the explicit abort and gracefully update the UI to "error" (which triggers the Retry button)
-                            if (fatalError.name === 'AbortError' || token.isCancellationRequested) {
+                            if (isAbortError(fatalError) || token.isCancellationRequested) {
                                 this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: '🛑 Task Cancelled by User.' });
                                 this._view?.webview.postMessage({ type: 'taskCompleted', task: data.task, status: 'error', summary: '🛑 Task Cancelled by User.' });
                             } else {
                                 // Catch catastrophic Node.js crashes so the UI doesn't hang forever
-                                const safeErrorMessage = fatalError instanceof Error ? fatalError.message : "Unknown Fatal Error";
+                                const safeErrorMessage = errorMessage(fatalError);
                                 vscode.window.showErrorMessage(`Nexus Catastrophic Failure: ${safeErrorMessage}`);
 
                                 this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'error', summary: `Fatal Crash: ${safeErrorMessage}` });
@@ -1221,7 +1268,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
 
                     if (undoData && workspaceFolders) {
-                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                         const fileUri = vscode.Uri.joinPath(rootUri, undoData.filepath);
 
                         try {
@@ -1236,10 +1283,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             vscode.window.showInformationMessage(`⏪ Undid AI edits to ${undoData.filepath}`);
                             this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'undone', summary: `⏪ Reverted to original state.` });
                         } catch (e) {
-                            vscode.window.showErrorMessage("Failed to undo file edit.");
+                            vscode.window.showErrorMessage(t("undo.failed_to_undo"));
                         }
                     } else {
-                        vscode.window.showWarningMessage("No undo history found for this task.");
+                        vscode.window.showWarningMessage(t("undo.no_history"));
                     }
                     break;
                 }
@@ -1248,13 +1295,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) { return; }
 
-                    const workspacePath = workspaceFolders[0].uri.fsPath;
+                    const workspacePath = workspaceFolders[0]!.uri.fsPath;
                     this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Running Global Workspace Compiler..." });
 
                     // 🚀 POLYGLOT GLOBAL COMPILER: Sniff the workspace to find the right command
                     let buildCommand = "";
                     try {
-                        const files = await vscode.workspace.fs.readDirectory(workspaceFolders[0].uri);
+                        const files = await vscode.workspace.fs.readDirectory(workspaceFolders[0]!.uri);
                         const fileNames = files.map(f => f[0]);
 
                         if (fileNames.includes('pom.xml')) buildCommand = "mvn clean compile";
@@ -1272,10 +1319,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const result = await this._terminalManager?.runCommandWithCapture(buildCommand, workspacePath);
 
                     if (result && result.success) {
-                        vscode.window.showInformationMessage("✅ Global Compiler Passed! The app is structurally sound.");
+                        vscode.window.showInformationMessage(t("build_healer.compiler_passed"));
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                     } else if (result && !result.success) {
-                        vscode.window.showErrorMessage("❌ Global Compiler Failed. Initializing Build-Healer...");
+                        vscode.window.showErrorMessage(t("build_healer.compiler_failed"));
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing global build failures..." });
 
                         try {
@@ -1290,7 +1337,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             let brokenFilesContext = "";
                             for (const file of matches) {
                                 try {
-                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, file);
+                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0]!.uri, file);
                                     const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(fileUri));
                                     brokenFilesContext += `\n--- FILE: ${file} ---\n\`\`\`\n${content}\n\`\`\`\n`;
                                 } catch (e) {
@@ -1307,7 +1354,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 const workspaceEdit = new vscode.WorkspaceEdit();
 
                                 for (const edit of fixes) {
-                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, edit.filepath);
+                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0]!.uri, edit.filepath);
 
                                     // Ensure file exists
                                     try { await vscode.workspace.fs.stat(fileUri); }
@@ -1328,13 +1375,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     vscode.window.showInformationMessage(`✅ Build-Healer autonomously patched ${fixes.length} files!`);
                                 }
                             } else {
-                                vscode.window.showWarningMessage("⚠️ Build-Healer could not determine a safe patch. Manual intervention required.");
+                                vscode.window.showWarningMessage(t("build_healer.no_safe_patch"));
                             }
-                        } catch (error: any) {
-                            console.error("[DEBUG-HEALER]", error);
+                        } catch (error: unknown) {
+                            log.error("[DEBUG-HEALER]", error);
 
                             //  THE FIX: Expose the actual error and the raw terminal output so the developer can see why it failed!
-                            const safeError = error instanceof Error ? error.message : String(error);
+                            const safeError = errorMessage(error);
                             vscode.window.showErrorMessage(`Build-Healer Aborted: ${safeError}`);
 
                             this._view?.webview.postMessage({
@@ -1369,7 +1416,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "showDiff": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) { return; }
-                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
 
                     const fileUri = vscode.Uri.joinPath(rootUri, data.filepath);
                     const originalUri = vscode.Uri.parse(`nexus-original:${fileUri.path}`);
@@ -1381,7 +1428,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "openFile": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) return;
-                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
 
                     //  THE FIX: Safely handle Windows absolute paths vs relative paths!
                     const fullPath = path.isAbsolute(data.filepath)
@@ -1427,7 +1474,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         else { endLine = startLine + 100; }
                     }
 
-                    const fileUri = vscode.Uri.joinPath(this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri, targetFile);
+                    const fileUri = vscode.Uri.joinPath(this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri, targetFile);
                     try {
                         const content = await vscode.workspace.fs.readFile(fileUri);
                         let code = new TextDecoder().decode(content);
@@ -1448,7 +1495,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             language: ext || 'text'
                         });
                     } catch (e) {
-                        console.error("Failed to read file for context:", e);
+                        log.error("Failed to read file for context:", e);
                     }
                     break;
                 }
@@ -1508,7 +1555,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         cancellable: false
                     }, async () => {
                         const workspaceEdit = new vscode.WorkspaceEdit();
-                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0].uri;
+                        const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
 
                         for (const edit of data.edits) {
                             const fileUri = vscode.Uri.joinPath(rootUri, edit.filepath);
@@ -1527,7 +1574,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             for (const doc of dirtyDocs) await doc.save();
 
                             this._view?.webview.postMessage({ type: 'allTasksCompleted', status: 'approved' });
-                            vscode.window.showInformationMessage("Atomic Transaction Committed with AI Metadata.");
+                            vscode.window.showInformationMessage(t("transactions.atomic_committed"));
                         }
                     });
                     break;
@@ -1539,7 +1586,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     if (!workspaceFolders || !activeEditor) { return; }
 
-                    const workspacePath = workspaceFolders[0].uri.fsPath;
+                    const workspacePath = workspaceFolders[0]!.uri.fsPath;
 
                     vscode.window.withProgress({
                         location: vscode.ProgressLocation.Notification,
@@ -1550,7 +1597,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             this._view?.webview.postMessage({ type: 'clearTerminalStream', task: "Auto-Test Setup" });
                             this._view?.webview.postMessage({ type: 'clearTerminalStream', task: "Auto-Test Execution" });
                             const relativeFileName = vscode.workspace.asRelativePath(activeEditor.document.uri);
-                            const customRules = (await new SpecManager(workspaceFolders[0].uri).readSteering()).combined;
+                            const customRules = (await new SpecManager(workspaceFolders[0]!.uri).readSteering()).combined;
                             const testPlan = await generateTests(relativeFileName, activeEditor.document.getText(), customRules);
                             if (activeEditor.document.isDirty) { await activeEditor.document.save(); }
 
@@ -1567,7 +1614,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 );
 
                                 if (!installResult || !installResult.success) {
-                                    vscode.window.showErrorMessage("Dependency installation failed. Aborting tests.");
+                                    vscode.window.showErrorMessage(t("tests.dependency_install_failed"));
                                     this._view?.webview.postMessage({ type: 'statusUpdate', message: '⚠️ Tests aborted due to install failure.' });
                                     return;
                                 }
@@ -1591,7 +1638,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             // Hardcode the route to the root 'tests/' directory
                             const deterministicPath = path.join('tests', cleanDir, testFileName);
-                            const testFileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, deterministicPath);
+                            const testFileUri = vscode.Uri.joinPath(workspaceFolders[0]!.uri, deterministicPath);
 
                             const createEdit = new vscode.WorkspaceEdit();
                             createEdit.createFile(testFileUri, { ignoreIfExists: true });
@@ -1634,7 +1681,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         testPlan.code
                                     );
 
-                                    const fileToFixUri = vscode.Uri.joinPath(workspaceFolders[0].uri, fixResult.filepath);
+                                    const fileToFixUri = vscode.Uri.joinPath(workspaceFolders[0]!.uri, fixResult.filepath);
                                     const fixEdit = new vscode.WorkspaceEdit();
                                     const docToFix = await vscode.workspace.openTextDocument(fileToFixUri);
                                     fixEdit.replace(fileToFixUri, new vscode.Range(0, 0, docToFix.lineCount, 0), fixResult.code);
@@ -1646,18 +1693,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     const retryResult = await this._terminalManager?.runCommandWithCapture(testPlan.testCommand, workspacePath);
 
                                     if (retryResult?.success) { vscode.window.showInformationMessage(`Auto-Heal successful! Fixed ${fixResult.filepath}`); }
-                                    else { vscode.window.showErrorMessage("Auto-Heal attempted, but tests still failing."); }
+                                    else { vscode.window.showErrorMessage(t("tests.auto_heal_still_failing")); }
 
                                 } catch (e) {
-                                    vscode.window.showErrorMessage("Auto-heal failed to parse LLM output.");
+                                    vscode.window.showErrorMessage(t("tests.auto_heal_parse_failed"));
                                 }
                             } else {
-                                vscode.window.showInformationMessage("All tests passed on the first try!");
+                                vscode.window.showInformationMessage(t("tests.all_passed"));
                             }
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: '' });
 
                         } catch (error) {
-                            vscode.window.showErrorMessage("Failed to generate or run tests.");
+                            vscode.window.showErrorMessage(t("tests.generation_failed"));
                         }
                     });
                     break;
@@ -1666,7 +1713,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "executeCommand": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) return;
-                    const workspacePath = workspaceFolders[0].uri.fsPath;
+                    const workspacePath = workspaceFolders[0]!.uri.fsPath;
 
                     const maxRetries = 3;
                     let currentAttempt = 1;
@@ -1714,7 +1761,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             if (fixes && fixes.length > 0) {
                                 const workspaceEdit = new vscode.WorkspaceEdit();
                                 for (const edit of fixes) {
-                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0].uri, edit.filepath);
+                                    const fileUri = vscode.Uri.joinPath(workspaceFolders[0]!.uri, edit.filepath);
                                     const document = await vscode.workspace.openTextDocument(fileUri);
                                     workspaceEdit.replace(fileUri, new vscode.Range(0, 0, document.lineCount, 0), edit.code);
                                 }
@@ -1771,7 +1818,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "generateProjectTests": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (!workspaceFolders) return;
-                    const rootUri = workspaceFolders[0].uri;
+                    const rootUri = workspaceFolders[0]!.uri;
 
                     vscode.window.withProgress({
                         location: vscode.ProgressLocation.Notification,
@@ -1808,8 +1855,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             } else {
                                 vscode.window.showErrorMessage(`Failed to generate master TDD suite.`);
                             }
-                        } catch (error: any) {
-                            vscode.window.showErrorMessage(`TDD Generation Error: ${error.message}`);
+                        } catch (error: unknown) {
+                            vscode.window.showErrorMessage(`TDD Generation Error: ${errorMessage(error)}`);
                         }
                     });
                     break;
@@ -1823,7 +1870,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         vscode.Uri.joinPath(this._extensionUri, "webview-ui", "build", "static", "js", "main.js")
     );
     const styleUri = webview.asWebviewUri(
-        vscode.Uri.joinPath(this._extensionUri, "webview-ui", "build", "static", "css", "index.css")
+        vscode.Uri.joinPath(this._extensionUri, "webview-ui", "build", "static", "css", "style.css")
     );
     const nonce = getNonce();
 

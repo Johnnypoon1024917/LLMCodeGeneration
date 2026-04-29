@@ -1,6 +1,6 @@
 // src/context/vectorDB.ts
-import * as vscode from 'vscode';
 import { getLLMConfig, authHeaders} from '../llmService';
+import { log } from '../logger';
 
 export interface DocumentChunk {
     filepath: string;
@@ -40,7 +40,7 @@ export class VectorDatabase {
             const data = await response.json() as any;
             return data.data[0].embedding;
         } catch (e) {
-            console.warn("⚠️ Vector DB Failed to fetch embedding. Ensure your LLM provider supports the /v1/embeddings endpoint.", e);
+            log.warn("⚠️ Vector DB Failed to fetch embedding. Ensure your LLM provider supports the /v1/embeddings endpoint.", e);
             return [];
         }
     }
@@ -53,13 +53,16 @@ export class VectorDatabase {
         let dotProduct = 0;
         let normA = 0;
         let normB = 0;
-        
-        for (let i = 0; i < vecA.length; i++) {
-            dotProduct += vecA[i] * vecB[i];
-            normA += vecA[i] * vecA[i];
-            normB += vecB[i] * vecB[i];
+
+        const len = Math.min(vecA.length, vecB.length);
+        for (let i = 0; i < len; i++) {
+            const a = vecA[i]!;
+            const b = vecB[i]!;
+            dotProduct += a * b;
+            normA += a * a;
+            normB += b * b;
         }
-        
+
         if (normA === 0 || normB === 0) return 0;
         return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
     }

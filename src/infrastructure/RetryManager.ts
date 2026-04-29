@@ -1,4 +1,5 @@
 // src/infrastructure/RetryManager.ts
+import { errorMessage } from '../utilities/errors';
 
 export class RetryManager {
     /**
@@ -9,29 +10,33 @@ export class RetryManager {
         operation: () => Promise<T>,
         maxRetries: number = 3,
         baseDelayMs: number = 1000,
-        onRetry?: (attempt: number, delay: number, error: any) => void
+        onRetry?: (attempt: number, delay: number, error: unknown) => void
     ): Promise<T> {
         let attempt = 0;
 
         while (attempt <= maxRetries) {
             try {
                 return await operation();
-            } catch (error: any) {
+            } catch (error: unknown) {
                 attempt++;
-                
+
                 // If we've exhausted all retries, fail upward
                 if (attempt > maxRetries) {
-                    throw new Error(`Operation failed after ${maxRetries} retries. Final Error: ${error.message}`);
+                    throw new Error(`Operation failed after ${maxRetries} retries. Final Error: ${errorMessage(error)}`);
                 }
 
                 // 🚨 Fast-Fail: Do not retry 400 (Bad Request) or 401/403 (Auth) errors
-                if (error.status && error.status >= 400 && error.status < 500 && error.status !== 429) {
+                // Errors thrown by fetch wrappers may carry a numeric `.status` field.
+                const status = (error && typeof error === 'object' && 'status' in error && typeof (error as { status: unknown }).status === 'number')
+                    ? (error as { status: number }).status
+                    : undefined;
+                if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
                     throw error;
                 }
 
                 // Calculate exponential backoff (1000ms, 2000ms, 4000ms)
                 const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
-                
+
                 if (onRetry) {
                     onRetry(attempt, delayMs, error);
                 }
@@ -39,7 +44,7 @@ export class RetryManager {
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             }
         }
-        
+
         throw new Error("Unreachable code in RetryManager");
     }
 }

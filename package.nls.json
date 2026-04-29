@@ -1,0 +1,20 @@
+{
+  "extension.description": "Spec-driven AI coding assistant — requirements, design, tasks, and implementation in one IDE workflow.",
+  "command.nexuscode_inlineEdit.title": "NexusCode: Inline Edit (Cmd/Ctrl + Shift + K)",
+  "command.nexuscode_optimizeSelection.title": "NexusCode: Optimize Selection",
+  "command.nexuscode_addSelection.title": "NexusCode: Add Selection to Chat",
+  "command.nexuscode_explainSelection.title": "NexusCode: Explain Selected Code",
+  "command.nexuscode_modifySelection.title": "NexusCode: Modify Selected Code",
+  "command.nexuscode_setApiKey.title": "NexusCode: Set API Key",
+  "command.nexuscode_runHook.title": "NexusCode: Run Hook",
+  "command.nexuscode_acceptEdit.title": "NexusCode: Accept AI Edit",
+  "command.nexuscode_rejectEdit.title": "NexusCode: Reject AI Edit",
+  "command.nexuscode_refreshLens.title": "NexusCode: Refresh CodeLens",
+  "command.nexuscode_viewDiff.title": "NexusCode: View AI Diff",
+  "command.nexuscode_reviewCode.title": "NexusCode: Review Generated Code",
+  "viewContainer.nexuscode-activitybar.title": "NexusCode",
+  "configuration.nexuscode.apiEndpoint.description": "OpenAI-compatible /v1/chat/completions endpoint (LM Studio, Ollama, vLLM, OpenAI, etc.).",
+  "configuration.nexuscode.model.description": "The name or path of the model to use.",
+  "configuration.nexuscode.apiKey.description": "API key (leave empty for local servers). Prefer the 'NexusCode: Set API Key' command — keys are stored in VS Code SecretStorage, not settings.json.",
+  "configuration.nexuscode.maxVerificationRetries.description": "Maximum times the Verifier may reject and re-prompt the Coder per file."
+}

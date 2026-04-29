@@ -1,5 +1,6 @@
 // src/agents/generalPurposeAgent.ts
 import { getLLMConfig, authHeaders } from '../llmService';
+import { errorMessage } from '../utilities/errors';
 
 export interface CodeDiff {
     filepath: string;
@@ -11,8 +12,8 @@ export interface CodeDiff {
 export async function runCoderAgent(
     spec: string,
     fileContext: string,
-    lspBlastRadius: string,
-    codingStyle: string,
+    _lspBlastRadius: string,
+    _codingStyle: string,
     log: (msg: string) => void
 ): Promise<CodeDiff> {
     log("👨‍💻 Coder Agent: Translating spec into syntax...");
@@ -72,8 +73,8 @@ You must output your modification strictly using the following XML format:
             targetLine: targetMatch ? targetMatch[1].trim() : undefined,
             code: codeMatch[1].trim()
         };
-    } catch (e: any) {
-        log(`👨‍💻 Coder Agent Failed: ${e.message}`);
+    } catch (e: unknown) {
+        log(`👨‍💻 Coder Agent Failed: ${errorMessage(e)}`);
         throw new Error("Failed to write code.");
     }
 }

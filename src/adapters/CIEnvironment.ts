@@ -22,7 +22,7 @@ export class CIEnvironment implements IEnvironment {
         return await execAsync(cmd, { cwd });
     }
 
-    log(message: string, type?: string, details?: string): void {
+    log(message: string, _type?: string, _details?: string): void {
         process.stdout.write(`[NEXUS-CI] ${message}\n`);
     }
 }

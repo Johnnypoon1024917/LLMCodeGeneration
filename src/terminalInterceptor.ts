@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import { SidebarProvider } from './SidebarProvider';
+import { log } from './logger';
 
 export function activateTerminalInterceptor(sidebarProvider: SidebarProvider, context: vscode.ExtensionContext) {
-    console.log("[DEBUG-TERM] 🛡️ Terminal Interceptor Online.");
+    log.debug("[DEBUG-TERM] 🛡️ Terminal Interceptor Online.");
 
     //  A memory buffer to hold the output of commands while they are running
     const executionOutputs = new Map<vscode.TerminalShellExecution, string>();

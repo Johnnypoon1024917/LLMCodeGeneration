@@ -2,6 +2,7 @@
 import * as vscode from 'vscode';
 import { globalVectorDB } from './vectorDB'; // 🔥 Bypass the markdown formatter and hit the DB directly
 import { getSmartASTContext } from './codeGraph';
+import { log } from '../logger';
 
 export interface SearchResult {
     filepath: string;
@@ -18,8 +19,8 @@ async function performLexicalSearch(query: string, maxResults: number = 10): Pro
     
     const keywords = query.split(' ').filter(w => w.length > 4);
     if (keywords.length === 0) return [];
-    
-    const primaryKeyword = keywords[0].toLowerCase();
+
+    const primaryKeyword = keywords[0]!.toLowerCase(); // length > 0 just checked above
     
     const excludePattern = '{**/node_modules/**,**/dist/**,**/build/**,**/out/**,**/.git/**,**/.vscode/**}';
     const files = await vscode.workspace.findFiles('**/*', excludePattern, 1000); 
@@ -75,7 +76,7 @@ async function performVectorSearch(query: string, maxResults: number = 10): Prom
             });
         });
     } catch (e) {
-        console.error("[DEBUG-RAG] Dense Vector search failed:", e);
+        log.error("[DEBUG-RAG] Dense Vector search failed:", e);
     }
     return results;
 }
@@ -85,11 +86,11 @@ async function performVectorSearch(query: string, maxResults: number = 10): Prom
  * Combines Lexical RRF, Semantic Vectors, and AST Logic.
  */
 export async function retrieveHybridContext(query: string, topK: number = 5): Promise<string> {
-    console.log("[DEBUG-RAG] 🔍 Starting Tri-Factor Hybrid Search...");
+    log.debug("[DEBUG-RAG] 🔍 Starting Tri-Factor Hybrid Search...");
 
     try {
         const astPromise = Promise.resolve(getSmartASTContext(query)).catch((e: any) => {
-            console.warn("[DEBUG-RAG] AST CodeGraph search failed silently:", e);
+            log.warn("[DEBUG-RAG] AST CodeGraph search failed silently:", e);
             return "";
         });
 
@@ -135,14 +136,14 @@ export async function retrieveHybridContext(query: string, topK: number = 5): Pr
         let contextPayload = "=== HYBRID SEARCH RESULTS (Lexical + Vector) ===\n";
         
         if (fusedResults.length === 0) {
-            console.log("[DEBUG-RAG] ⚠️ Hybrid Search found no chunks. Relying purely on AST.");
+            log.debug("[DEBUG-RAG] ⚠️ Hybrid Search found no chunks. Relying purely on AST.");
             contextPayload += "No direct file chunks found.\n";
         } else {
             fusedResults.forEach(([filepath, data]) => {
                 const combinedChunks = Array.from(data.chunks).join('\n...\n');
                 contextPayload += `\n📍 File: ${filepath} (RRF Score: ${data.score.toFixed(4)})\n\`\`\`\n${combinedChunks}\n\`\`\`\n`;
             });
-            console.log(`[DEBUG-RAG] ✅ Fused ${fusedResults.length} highly relevant documents.`);
+            log.info(`[DEBUG-RAG] ✅ Fused ${fusedResults.length} highly relevant documents.`);
         }
 
         if (astContext) {
@@ -151,8 +152,8 @@ export async function retrieveHybridContext(query: string, topK: number = 5): Pr
 
         return contextPayload;
 
-    } catch (criticalError: any) {
-        console.error("[DEBUG-RAG] 💥 CRITICAL HYBRID SEARCH FAILURE:", criticalError);
+    } catch (criticalError: unknown) {
+        log.error("[DEBUG-RAG] 💥 CRITICAL HYBRID SEARCH FAILURE:", criticalError);
         return "";
     }
 }

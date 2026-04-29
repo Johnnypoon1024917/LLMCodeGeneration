@@ -27,8 +27,23 @@ export class RateLimitManager {
         }
 
         if (!response.ok) {
-            const error = new Error(`HTTP Error ${response.status}: ${response.statusText}`);
-            (error as any).status = response.status;
+            // Read the body once so error inspectors (notably the
+            // tool-capability detector in OpenAICompatibleProvider) can
+            // distinguish "tool not supported" 400s from generic 400s.
+            // The body read consumes the stream, but since we're throwing
+            // the response object can't be reused anyway.
+            let body = '';
+            try {
+                body = await response.text();
+            } catch {
+                // Body read may fail for streamed responses; don't let
+                // that mask the original HTTP error.
+            }
+            const error: Error & { status?: number; body?: string } = new Error(
+                `HTTP Error ${response.status}: ${response.statusText}${body ? ` — ${body.substring(0, 500)}` : ''}`
+            );
+            error.status = response.status;
+            if (body) error.body = body;
             throw error;
         }
 

@@ -1,19 +1,54 @@
-(function() {
-       const stamp = 'BUNDLE EXECUTING ' + new Date().toISOString();
-       console.log(stamp);
-       document.title = stamp;
-       window.addEventListener('DOMContentLoaded', () => {
-           const div = document.createElement('div');
-           div.style.cssText = 'position:fixed;top:0;left:0;background:red;color:white;padding:20px;z-index:99999;font-size:18px';
-           div.textContent = stamp;
-           document.body.appendChild(div);
-       });
-   })();
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import './App.css';
 import ReactMarkdown from 'react-markdown';
 import ForceGraph3D from 'react-force-graph-3d';
+import { FileChip } from './components/FileChip';
+import { ErrorBanner } from './components/ErrorBanner';
+import { CommandCard } from './components/CommandCard';
+import { WorkingBar } from './components/WorkingBar';
+// Component 2B-4: tool-call card rendering and state management.
+import { ToolCallCard } from './components/ToolCallCard';
+import { applyToolEvent, type ToolCallState, type ToolLifecycleEvent } from './toolEvents';
+import {
+    // Existing icons (replaces the hand-rolled SVGs below)
+    User as IconUser,
+    Bot as IconNexus,
+    Play as IconPlay,
+    Check as IconCheck,
+    ArrowUp as IconUpArrow,
+    Brain as IconBrain,
+    Loader2 as IconLoader,
+    Eye as IconEye,
+    Plus as IconPlus,
+    Trash2 as IconTrash,
+    Search as IconSearch,
+    BookOpen as IconRead,
+    Code as IconCode,
+    AlertTriangle as IconAlert,
+    Wrench as IconWrench,
+    CheckCircle as IconCheckCircle,
+    Box as IconBuild,
+    RotateCw as IconRefresh,
+    // New icons for the emoji replacement work (T2)
+    FileText as IconFile,
+    ClipboardList as IconClipboard,
+    Link as IconLink,
+    AlertCircle as IconWarning,
+    Wand2 as IconWand,
+    Square as IconStop,
+    RotateCcw as IconRestart,
+    Sparkles as IconSparkles,
+    Zap as IconZap,
+    Save as IconSave,
+    FlaskConical as IconFlask,
+    Archive as IconArchive,
+    Edit3 as IconEdit,
+    ExternalLink as IconExternalLink,
+    XCircle as IconXCircle,
+    Undo2 as IconUndo,
+    FilePen as IconFilePen
+} from 'lucide-react';
 
 const vscode = (window as any).acquireVsCodeApi();
 let chatTokenBuffer = "";
@@ -97,28 +132,62 @@ interface AttachedContext { file: string; code: string; language: string; }
 interface AtomicEdit { filepath: string; code: string; action: 'replace' | 'append' | 'inject'; target?: string; }
 interface AgentStep { type: string; description: string; details?: string; }
 
+/**
+ * Icon registry. Wraps Lucide icons in <span> nodes so consumers can drop them
+ * into JSX as plain values (matching the original ad-hoc-SVG API).
+ *
+ * Sizing rule: 14px is the body-text icon size. The Loader uses 12 to feel
+ * lighter mid-sentence; Play uses 12 because it appears alongside small
+ * button labels.
+ *
+ * Migration note (UI Tier 1, T2): this used to be 18 hand-rolled inline
+ * SVGs. We swapped to Lucide because they're maintained, accessibility-
+ * aware, and tree-shaken at build (only icons we import end up in the
+ * bundle).
+ */
+const ICON_BASE = { size: 14, strokeWidth: 2 } as const;
 const Icons = {
-    User: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>,
-    Nexus: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"></rect><circle cx="12" cy="5" r="2"></circle><path d="M12 7v4"></path><line x1="8" y1="16" x2="8" y2="16"></line><line x1="16" y1="16" x2="16" y2="16"></line></svg>,
-    Play: <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>,
-    Check: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>,
-    UpArrow: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>,
-    Brain: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"></path><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"></path><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"></path><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"></path><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"></path><path d="M3.477 10.896a4 4 0 0 1 .585-.396"></path><path d="M19.938 10.5a4 4 0 0 1 .585.396"></path><path d="M6 18a4 4 0 0 1-1.967-.516"></path><path d="M19.967 17.484A4 4 0 0 1 18 18"></path></svg>,
-    Loader: <svg className="spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="4.93" x2="19.07" y2="7.76"></line></svg>,
-    Eye: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>,
-    Plus: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>,
-    Trash: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>,
-    Search: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>,
-    Read: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>,
-    Code: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>,
-    Alert: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>,
-    Wrench: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></svg>,
-    CheckCircle: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>,
-    Build: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>,
-    Refresh: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>,
+    // Original 18 — visual parity with the previous hand-rolled set
+    User: <IconUser {...ICON_BASE} />,
+    Nexus: <IconNexus {...ICON_BASE} />,
+    Play: <IconPlay size={12} fill="currentColor" />,
+    Check: <IconCheck {...ICON_BASE} />,
+    UpArrow: <IconUpArrow size={14} strokeWidth={2.5} />,
+    Brain: <IconBrain {...ICON_BASE} />,
+    Loader: <IconLoader size={12} className="spin" />,
+    Eye: <IconEye {...ICON_BASE} />,
+    Plus: <IconPlus {...ICON_BASE} />,
+    Trash: <IconTrash {...ICON_BASE} />,
+    Search: <IconSearch {...ICON_BASE} />,
+    Read: <IconRead {...ICON_BASE} />,
+    Code: <IconCode {...ICON_BASE} />,
+    Alert: <IconAlert {...ICON_BASE} />,
+    Wrench: <IconWrench {...ICON_BASE} />,
+    CheckCircle: <IconCheckCircle {...ICON_BASE} />,
+    Build: <IconBuild {...ICON_BASE} />,
+    Refresh: <IconRefresh {...ICON_BASE} />,
+    // New for T2 — used at emoji replacement sites
+    File: <IconFile {...ICON_BASE} />,
+    Clipboard: <IconClipboard {...ICON_BASE} />,
+    Link: <IconLink {...ICON_BASE} />,
+    Warning: <IconWarning {...ICON_BASE} />,
+    Wand: <IconWand {...ICON_BASE} />,
+    Stop: <IconStop size={14} fill="currentColor" />,
+    Restart: <IconRestart {...ICON_BASE} />,
+    Sparkles: <IconSparkles {...ICON_BASE} />,
+    Zap: <IconZap {...ICON_BASE} />,
+    Save: <IconSave {...ICON_BASE} />,
+    Flask: <IconFlask {...ICON_BASE} />,
+    Archive: <IconArchive {...ICON_BASE} />,
+    Edit: <IconEdit {...ICON_BASE} />,
+    ExternalLink: <IconExternalLink size={12} />,
+    XCircle: <IconXCircle {...ICON_BASE} />,
+    Undo: <IconUndo {...ICON_BASE} />,
+    FilePen: <IconFilePen {...ICON_BASE} />
 };
 
 export default function App() {
+    const { t } = useTranslation();
     const chatTokenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const reasoningTokenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -131,6 +200,10 @@ export default function App() {
     const [taskTokens, setTaskTokens] = useState<Record<string, { prompt: number, completion: number }>>({});
 
     const [taskSteps, setTaskSteps] = useState<Record<string, AgentStep[]>>({});
+    // Component 2B-4a: tool-call cards state. Keyed by callId (every event
+    // carries one). The reducer in toolEvents.ts handles created/updated
+    // semantics. Cards are filtered + rendered by taskId matching.
+    const [toolCallState, setToolCallState] = useState<Map<string, ToolCallState>>(new Map());
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
     const [hasKey, setHasKey] = useState<boolean>(true);
@@ -456,6 +529,17 @@ export default function App() {
                 });
             }
 
+            // Component 2B-4: tool-call lifecycle events from the
+            // Coordinator's ReAct loop (and eventually planAgent +
+            // verificationAgent). Each event mutates per-callId state
+            // via applyToolEvent. Cards render from this state.
+            //
+            // Forward-compat: applyToolEvent silently ignores unknown
+            // event types, so newer events don't crash an older bundle.
+            if (data.type === 'toolCallEvent') {
+                setToolCallState(prev => applyToolEvent(prev, data.event as ToolLifecycleEvent));
+            }
+
             if (data.type === 'searchResults') {
                 const lineMatch = data.originalQuery?.match(/:\d+(?:-\d+)?$/);
                 const suffix = lineMatch ? lineMatch[0] : '';
@@ -658,21 +742,21 @@ export default function App() {
         }
     }, [messages, taskStatuses, taskSummaries, taskFiles, hasKey, isLoaded]);
 
-    if (!isLoaded) return <div style={{ padding: '20px', textAlign: 'center', color: 'var(--nexus-subtext)' }}>Loading Nexus...</div>;
+    if (!isLoaded) return <div style={{ padding: '20px', textAlign: 'center', color: 'var(--nexus-subtext)' }}>{t("chat.loading_nexus")}</div>;
 
     if (!hasKey) {
         return (
             <div className="auth-screen">
-                <h2>Welcome to Andromeda</h2>
-                <p>To use Enterprise features, please securely store your API Key.</p>
+                <h2>{t("onboarding.welcome_andromeda")}</h2>
+                <p>{t("onboarding.save_key_prompt")}</p>
                 <input type="password" id="api-key-input" placeholder="sk-proj-..." />
                 <button className="auth-btn primary" onClick={() => {
                     const val = (document.getElementById('api-key-input') as HTMLInputElement).value;
                     if (val) vscode.postMessage({ type: 'saveApiKey', value: val });
-                }}>Save Key to OS Vault</button>
+                }}>{t("onboarding.save_key_button")}</button>
                 <button className="auth-btn secondary" onClick={() => {
                     vscode.postMessage({ type: 'saveApiKey', value: 'lm-studio' });
-                }}>Use Local LLM (Skip)</button>
+                }}>{t("onboarding.skip_local_button")}</button>
             </div>
         );
     }
@@ -771,7 +855,9 @@ export default function App() {
     return (
         <div className="app-wrapper" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
             <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)', flexShrink: 0 }}>
-                {metaMode ? '⚠️ SELF-EVOLUTION ACTIVE' : 'Andromeda'}
+                {metaMode
+                    ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Warning} SELF-EVOLUTION ACTIVE</span>
+                    : 'Andromeda'}
             </div>
 
             {/*  TABS HEADER */}
@@ -806,7 +892,7 @@ export default function App() {
                             vscode.postMessage({ type: 'requestWorkspaceGraph' });
                         }
                     }}
-                    title="Visualize Workspace Context Graph"
+                    title={t("buttons.visualize_graph")}
                 >
                     Map
                 </button>
@@ -883,8 +969,8 @@ export default function App() {
                                     opacity: 0.8
                                 }}>
                                     <details>
-                                        <summary style={{ fontWeight: 'bold', outline: 'none' }}>
-                                            🗜️ Context Compacted (Old messages summarized to save tokens)
+                                        <summary style={{ fontWeight: 'bold', outline: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                                            {Icons.Archive} Context Compacted (Old messages summarized to save tokens)
                                         </summary>
                                         <div style={{ marginTop: '8px', padding: '8px', backgroundColor: 'var(--vscode-editor-background)', borderRadius: '4px', border: '1px solid var(--vscode-widget-border)' }}>
                                             <ReactMarkdown>{msg.content || ''}</ReactMarkdown>
@@ -911,7 +997,7 @@ export default function App() {
                                     <div className="message-attachments">
                                         {msg.attachments.map((att, i) => (
                                             <details key={i} className="attachment-details">
-                                                <summary>📄 {att.file}</summary>
+                                                <summary style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.File} {att.file}</summary>
                                                 <div className="markdown-body">
                                                     <pre><code className={`language-${att.language}`}>{att.code}</code></pre>
                                                 </div>
@@ -947,7 +1033,7 @@ export default function App() {
                                                 borderBottom: '1px solid var(--vscode-widget-border)'
                                             }}
                                         >
-                                            <span>📋 Master Implementation Plan</span>
+                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Clipboard} Master Implementation Plan</span>
                                             <span style={{ fontSize: '11px', color: 'var(--nexus-subtext)', fontWeight: 'normal' }}>
                                                 {msg.plan.implementationTasks.length} Tasks (Click to fold)
                                             </span>
@@ -995,11 +1081,11 @@ export default function App() {
 
                                                             {/* Compact Status Badges for the Header */}
                                                             <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                {status === 'reviewing' && <span style={{ color: 'var(--vscode-charts-orange)', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}><span className="spin">{Icons.Loader}</span> Working...</span>}
-                                                                {status === 'approved' && <span style={{ color: 'var(--vscode-testing-iconPassed)', fontSize: '11px', fontWeight: 'bold' }}>✅ Approved</span>}
-                                                                {status === 'rejected' && <span style={{ color: 'var(--vscode-testing-iconFailed)', fontSize: '11px', fontWeight: 'bold' }}>❌ Rejected</span>}
-                                                                {status === 'error' && <span style={{ color: 'var(--vscode-testing-iconFailed)', fontSize: '11px', fontWeight: 'bold' }}>⚠️ Error</span>}
-                                                                {status === 'undone' && <span style={{ color: 'var(--vscode-descriptionForeground)', fontSize: '11px' }}>⏪ Reverted</span>}
+                                                                {status === 'reviewing' && <span style={{ color: 'var(--vscode-charts-orange)', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}><span className="spin">{Icons.Loader}</span> {t("chat.working")}</span>}
+                                                                {status === 'approved' && <span style={{ color: 'var(--vscode-testing-iconPassed)', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.CheckCircle} Approved</span>}
+                                                                {status === 'rejected' && <span style={{ color: 'var(--vscode-testing-iconFailed)', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.XCircle} Rejected</span>}
+                                                                {status === 'error' && <span style={{ color: 'var(--vscode-testing-iconFailed)', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.Warning} Error</span>}
+                                                                {status === 'undone' && <span style={{ color: 'var(--vscode-descriptionForeground)', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.Undo} Reverted</span>}
                                                             </div>
                                                         </summary>
 
@@ -1008,16 +1094,16 @@ export default function App() {
 
                                                             {/* Context & Prompts */}
                                                             <div>
-                                                                {taskObj && <div style={{ fontSize: '11px', color: 'var(--vscode-descriptionForeground)', fontFamily: 'monospace', marginBottom: '4px' }}>📄 {taskFile}</div>}
+                                                                {taskObj && <div style={{ fontSize: '11px', color: 'var(--vscode-descriptionForeground)', fontFamily: 'monospace', marginBottom: '4px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.File} {taskFile}</div>}
                                                                 {taskReq && (
-                                                                    <div style={{ fontSize: '10px', color: 'var(--vscode-textLink-foreground)', fontStyle: 'italic', background: 'var(--vscode-textCodeBlock-background)', padding: '2px 6px', borderRadius: '4px', display: 'inline-block' }}>
-                                                                        🔗 Ref: {taskReq}
+                                                                    <div style={{ fontSize: '10px', color: 'var(--vscode-textLink-foreground)', fontStyle: 'italic', background: 'var(--vscode-textCodeBlock-background)', padding: '2px 6px', borderRadius: '4px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                                                        {Icons.Link} Ref: {taskReq}
                                                                     </div>
                                                                 )}
 
                                                                 {taskObj && taskObj.detailedInstructions && (
                                                                     <details style={{ marginTop: '8px', fontSize: '11px', color: 'var(--vscode-descriptionForeground)' }}>
-                                                                        <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none', fontWeight: 'bold', opacity: 0.8 }}>View Prompt Instructions</summary>
+                                                                        <summary style={{ cursor: 'pointer', outline: 'none', userSelect: 'none', fontWeight: 'bold', opacity: 0.8 }}>{t("chat.view_prompt_instructions")}</summary>
                                                                         <div style={{ marginTop: '6px', padding: '8px', borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', background: 'var(--vscode-editor-inactiveSelectionBackground)', whiteSpace: 'pre-wrap', borderRadius: '0 4px 4px 0' }}>
                                                                             {taskObj.detailedInstructions}
                                                                         </div>
@@ -1028,7 +1114,7 @@ export default function App() {
                                                             {/* AI Execution Steps */}
                                                             {taskSteps[taskKey] && taskSteps[taskKey].length > 0 && (
                                                                 <div className="agent-steps-container" style={{ background: 'var(--vscode-input-background)', padding: '8px', borderRadius: '6px', border: '1px solid var(--vscode-input-border)' }}>
-                                                                    <div style={{ fontSize: '10px', fontWeight: 'bold', color: 'var(--nexus-subtext)', marginBottom: '6px', textTransform: 'uppercase' }}>Swarm Execution Logs</div>
+                                                                    <div style={{ fontSize: '10px', fontWeight: 'bold', color: 'var(--nexus-subtext)', marginBottom: '6px', textTransform: 'uppercase' }}>{t("chat.swarm_execution_logs")}</div>
                                                                     {taskSteps[taskKey].map((step, sIdx) => (
                                                                         <div key={sIdx} className="agent-step-card" style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '6px 8px', borderLeft: '2px solid var(--vscode-editorIndentGuide-activeBackground)', marginLeft: '4px' }}>
                                                                             <div className="agent-step-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1065,21 +1151,16 @@ export default function App() {
                                                             )}
 
                                                             {terminalStreams[taskKey] && (
-                                                                <div style={{
-                                                                    background: '#0d1117', // Pitch black terminal feel
-                                                                    padding: '10px',
-                                                                    borderRadius: '6px',
-                                                                    border: '1px solid #30363d',
-                                                                    marginTop: '8px',
-                                                                    fontFamily: 'monospace',
-                                                                    fontSize: '10.5px',
-                                                                    color: '#c9d1d9',
-                                                                    maxHeight: '150px',
-                                                                    overflowY: 'auto',
-                                                                    whiteSpace: 'pre-wrap'
-                                                                }}>
-                                                                    <div style={{ color: '#8b949e', marginBottom: '6px', userSelect: 'none' }}>$ terminal execution</div>
-                                                                    {terminalStreams[taskKey]}
+                                                                <div style={{ marginTop: '8px' }}>
+                                                                    <CommandCard
+                                                                        command={taskObj ? taskObj.step : taskKey}
+                                                                        output={terminalStreams[taskKey] ?? ''}
+                                                                        status={
+                                                                            status === 'error' ? 'error' :
+                                                                            status === 'approved' ? 'success' :
+                                                                            'running'
+                                                                        }
+                                                                    />
                                                                 </div>
                                                             )}
 
@@ -1092,8 +1173,8 @@ export default function App() {
                                                                 {/* 🚀 Render Task-Specific Tokens */}
                                                                 {taskTokens[taskKey] && (
                                                                     <div style={{ fontSize: '10px', color: 'var(--nexus-subtext)', display: 'flex', gap: '8px', background: 'var(--vscode-editor-inactiveSelectionBackground)', padding: '2px 6px', borderRadius: '4px' }}>
-                                                                        <span title="Task Input Tokens">📥 {taskTokens[taskKey].prompt.toLocaleString()}</span>
-                                                                        <span title="Task Output Tokens">📤 {taskTokens[taskKey].completion.toLocaleString()}</span>
+                                                                        <span title={t("tokens.task_input")}>📥 {taskTokens[taskKey].prompt.toLocaleString()}</span>
+                                                                        <span title={t("tokens.task_output")}>📤 {taskTokens[taskKey].completion.toLocaleString()}</span>
                                                                     </div>
                                                                 )}
 
@@ -1101,8 +1182,8 @@ export default function App() {
                                                                     {/* 1. Approved State: Diff and Undo */}
                                                                     {status === 'approved' && taskFiles[taskKey] && (
                                                                         <>
-                                                                            <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })} title="Compare Changes">⚖️ Diff</button>
-                                                                            <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'undoTaskEdit', task: taskKey })} title="Undo Edit">↩️ Undo</button>
+                                                                            <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'showDiff', filepath: taskFiles[taskKey] })} title={t("buttons.compare_changes")}>⚖️ Diff</button>
+                                                                            <button className="micro-btn" onClick={() => vscode.postMessage({ type: 'undoTaskEdit', task: taskKey })} title={t("buttons.undo_edit")}>↩️ Undo</button>
                                                                         </>
                                                                     )}
 
@@ -1116,11 +1197,11 @@ export default function App() {
                                                                         <>
                                                                             {/* Only show Verify if it has never been run */}
                                                                             {!status && (
-                                                                                <button className="micro-btn" onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt }); }} title="Verify manual code">👁️ Verify</button>
+                                                                                <button className="micro-btn" onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'verifyTask', task: taskKey, prompt: taskPrompt }); }} title={t("buttons.verify_manual")}>👁️ Verify</button>
                                                                             )}
 
                                                                             {/* Main Execution / Retry Button */}
-                                                                            <button className="micro-btn btn-primary" style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }} title="Auto-execute task">
+                                                                            <button className="micro-btn btn-primary" style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }} onClick={() => { setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' })); setTaskSteps(prev => ({ ...prev, [taskKey]: [] })); setTaskReasoning(prev => ({ ...prev, [taskKey]: '' })); vscode.postMessage({ type: 'executeTask', task: taskKey, prompt: taskPrompt, codingStyle: codingStyleRef.current }); }} title={t("buttons.auto_execute")}>
                                                                                 {status === 'rejected' || status === 'error' ? '▶ Retry Execution' : '▶ Execute'}
                                                                             </button>
                                                                         </>
@@ -1165,6 +1246,28 @@ export default function App() {
                         }
                         return null;
                     })}
+
+                    {/*
+                      Component 2B-4: Tool-call cards.
+                      Renders all tool calls received in this session, sorted by
+                      start order (per ToolCallState.startSeq). Per-task affinity
+                      is a deferred refinement — for 2B-4a we render flat in the
+                      chat flow so the user can see the agent's tool activity
+                      in real time. A future patch can group by taskId once the
+                      Coordinator's taskId scheme is reconciled with the
+                      webview's taskKey scheme.
+
+                      Hidden when no tool calls yet (avoids empty section).
+                    */}
+                    {toolCallState.size > 0 && (
+                        <div className="tool-call-cards-region">
+                            {Array.from(toolCallState.values())
+                                .sort((a, b) => a.startSeq - b.startSeq)
+                                .map(state => (
+                                    <ToolCallCard key={state.callId} state={state} />
+                                ))}
+                        </div>
+                    )}
 
                     {loading && !agentStatus && (
                         <div className="message">
@@ -1229,31 +1332,31 @@ export default function App() {
                 </div>
 
                 {agentStatus && (
-                    <div className="agent-status" style={{ flexShrink: 0 }}>
-                        {!agentStatus.includes('⚠️') && !agentStatus.includes('🛑') && Icons.Loader}
-                        <span style={{ marginLeft: agentStatus.includes('⚠️') ? '0' : '4px' }}>
-                            {agentStatus}
-                        </span>
-                    </div>
+                    <WorkingBar
+                        status={agentStatus}
+                        onCancel={() => {
+                            vscode.postMessage({ type: 'cancelTask' });
+                        }}
+                    />
                 )}
 
                 {pendingEdits && (
                     <div className="review-dock" style={{ flexShrink: 0 }}>
                         <div className="review-header">
-                            <span>⚠️ Review Proposed Edits</span>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Warning} Review Proposed Edits</span>
                             <span style={{ cursor: 'pointer', color: 'var(--nexus-subtext)' }} onClick={() => setPendingEdits(null)}>×</span>
                         </div>
                         <div style={{ maxHeight: '80px', overflowY: 'auto' }}>
                             {pendingEdits.map((edit, i) => (
                                 <div key={i} className="review-file">
-                                    <span>📄 {edit.filepath}</span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.File} {edit.filepath}</span>
                                     <span style={{ color: 'var(--nexus-border)' }}>({edit.action})</span>
                                 </div>
                             ))}
                         </div>
                         <div className="review-actions">
                             <button className="btn-primary" onClick={() => { setLoading(true); setAgentStatus("Committing..."); vscode.postMessage({ type: 'commitAtomicEdits', edits: pendingEdits }); }}>✅ Commit All</button>
-                            <button className="btn-secondary" onClick={() => setPendingEdits(null)}>Cancel</button>
+                            <button className="btn-secondary" onClick={() => setPendingEdits(null)}>{t("common.cancel")}</button>
                         </div>
                     </div>
                 )}
@@ -1263,18 +1366,20 @@ export default function App() {
                         {attachedContexts.length > 0 && (
                             <div className="context-chips">
                                 {attachedContexts.map((ctx, idx) => (
-                                    <div key={idx} className="context-chip" title={ctx.code}>
-                                        <span className="chip-icon">📄</span>
-                                        <span className="chip-label">{ctx.file}</span>
-                                        <span className="chip-close" onClick={() => setAttachedContexts(prev => prev.filter((_, i) => i !== idx))}>×</span>
-                                    </div>
+                                    <FileChip
+                                        key={idx}
+                                        filepath={ctx.file}
+                                        language={ctx.language}
+                                        title={ctx.code}
+                                        onRemove={() => setAttachedContexts(prev => prev.filter((_, i) => i !== idx))}
+                                    />
                                 ))}
                             </div>
                         )}
 
                         {showMentionMenu && mentionResults.length > 0 && (
                             <div className="mention-menu">
-                                <div className="mention-header">Attach File Context</div>
+                                <div className="mention-header">{t("mention.attach_file_context")}</div>
                                 {mentionResults.map(res => (
                                     <div key={res} className="mention-item" onClick={() => {
                                         vscode.postMessage({ type: 'readFileContext', file: res });
@@ -1284,7 +1389,7 @@ export default function App() {
                                         setInput(words.join(' ') + (words.length > 0 ? ' ' : ''));
                                         document.getElementById('chat-input')?.focus();
                                     }}>
-                                        📄 {res}
+                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.File} {res}</span>
                                     </div>
                                 ))}
                             </div>
@@ -1292,12 +1397,12 @@ export default function App() {
 
                         <textarea
                             id="chat-input" value={input} onChange={handleInput} onKeyDown={handleKeyDown}
-                            placeholder={metaMode ? "Modify source code..." : "Ask a question or request a build..."}
+                            placeholder={metaMode ? t("chat.input.placeholder_meta_mode") : t("chat.input.placeholder")}
                             rows={1}
                         />
 
                         {loading ? (
-                            <button className="send-btn stop-btn" onClick={() => { setLoading(false); vscode.postMessage({ type: 'cancelTask' }); }} title="Stop Generation">■</button>
+                            <button className="send-btn stop-btn" onClick={() => { setLoading(false); vscode.postMessage({ type: 'cancelTask' }); }} title={t("buttons.stop_generation")}>■</button>
                         ) : (
                             <button className="send-btn" onClick={() => handleSubmit()} disabled={!input.trim() && attachedContexts.length === 0}>{Icons.UpArrow}</button>
                         )}
@@ -1306,7 +1411,7 @@ export default function App() {
                     <div className="micro-toolbar">
                         <div className="toolbar-group">
                             <select className="micro-select" value={selectedModel} onChange={(e) => { setSelectedModel(e.target.value); vscode.postMessage({ type: 'setModel', value: e.target.value }); }}>
-                                {availableModels.length === 0 && <option value="">Loading...</option>}
+                                {availableModels.length === 0 && <option value="">{t("common.loading")}</option>}
                                 {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
                             </select>
 
@@ -1335,7 +1440,7 @@ export default function App() {
                                 className="micro-btn"
                                 style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-charts-orange)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.9, padding: 0 }}
                                 onClick={() => vscode.postMessage({ type: 'generateAndRunTests', autopilot: isAutopilot })}
-                                title="Auto-Generate & Run Tests for the currently open file">
+                                title={t("buttons.auto_run_tests")}>
                                 Auto-Test
                             </button>
 
@@ -1343,28 +1448,28 @@ export default function App() {
                                 className="micro-btn"
                                 style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-testing-iconPassed)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.9, padding: 0 }}
                                 onClick={() => vscode.postMessage({ type: 'runGlobalCompiler' })}
-                                title="Run strict project-wide compilation check">
+                                title={t("buttons.strict_compile")}>
                                 {Icons.Build} Compile
                             </button>
                             <button
                                 className="micro-btn"
                                 style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }}
                                 onClick={handleClearHistory}
-                                title="Clear Chat History">
+                                title={t("buttons.clear_chat")}>
                                 {Icons.Trash} Clear
                             </button>
                             <button
                                 className="micro-btn"
                                 style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }}
                                 onClick={() => vscode.postMessage({ type: 'refreshCodeLens' })}
-                                title="Refresh UI">
+                                title={t("buttons.refresh_ui")}>
                                 {Icons.Refresh}
                             </button>
 
                             {/* 🚀 Render Global Tokens */}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '10px', color: 'var(--nexus-subtext)', borderLeft: '1px solid var(--vscode-widget-border)', paddingLeft: '8px', marginLeft: '4px' }}>
-                                <span title="Total Input Tokens">📥 {globalTokens.prompt.toLocaleString()}</span>
-                                <span title="Total Output Tokens">📤 {globalTokens.completion.toLocaleString()}</span>
+                                <span title={t("tokens.total_input")}>📥 {globalTokens.prompt.toLocaleString()}</span>
+                                <span title={t("tokens.total_output")}>📤 {globalTokens.completion.toLocaleString()}</span>
                             </div>
                         </div>
                     </div>
@@ -1377,17 +1482,19 @@ export default function App() {
             <div style={{ display: activeTab === 'builder' ? 'flex' : 'none', flexDirection: 'column', padding: '20px', flex: 1, overflowY: 'auto' }}>
                 {(!requirements || requirements.trim() === '') && !isGeneratingReqs && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        <h3 style={{ margin: 0, color: 'var(--vscode-foreground)' }}>Start a New Project</h3>
-                        <p style={{ margin: 0, fontSize: '12px', color: 'var(--nexus-subtext)' }}>Describe your app idea. Attach API docs or reference files to enforce exact payloads.</p>
+                        <h3 style={{ margin: 0, color: 'var(--vscode-foreground)' }}>{t("project.start_new")}</h3>
+                        <p style={{ margin: 0, fontSize: '12px', color: 'var(--nexus-subtext)' }}>{t("project.describe_idea")}</p>
 
                         {builderContexts.length > 0 && (
                             <div className="context-chips" style={{ marginBottom: '5px' }}>
                                 {builderContexts.map((ctx, idx) => (
-                                    <div key={idx} className="context-chip" title={ctx.code}>
-                                        <span className="chip-icon">📄</span>
-                                        <span className="chip-label">{ctx.file}</span>
-                                        <span className="chip-close" onClick={() => setBuilderContexts(prev => prev.filter((_, i) => i !== idx))}>×</span>
-                                    </div>
+                                    <FileChip
+                                        key={idx}
+                                        filepath={ctx.file}
+                                        language={ctx.language}
+                                        title={ctx.code}
+                                        onRemove={() => setBuilderContexts(prev => prev.filter((_, i) => i !== idx))}
+                                    />
                                 ))}
                             </div>
                         )}
@@ -1404,7 +1511,7 @@ export default function App() {
                         {isSearching && (
                             <div style={{ background: 'var(--vscode-editor-background)', border: '1px solid var(--nexus-border)', borderRadius: '6px', padding: '10px', marginBottom: '10px', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                    <span style={{ fontSize: '11px', fontWeight: 'bold' }}>Search Workspace</span>
+                                    <span style={{ fontSize: '11px', fontWeight: 'bold' }}>{t("search.header")}</span>
                                     <button style={{ background: 'none', border: 'none', color: 'var(--nexus-subtext)', cursor: 'pointer' }} onClick={() => setIsSearching(false)}>✖</button>
                                 </div>
                                 <input
@@ -1416,17 +1523,17 @@ export default function App() {
                                         if (e.target.value.length > 2) vscode.postMessage({ type: 'searchFiles', query: e.target.value });
                                         else setSearchResults([]);
                                     }}
-                                    placeholder="Search files by name (e.g., stripe.ts)..."
+                                    placeholder={t("search.placeholder_files")}
                                     style={{ width: '100%', boxSizing: 'border-box', padding: '6px', marginBottom: '8px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '4px' }}
                                 />
                                 <div style={{ maxHeight: '120px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                     {searchResults.map(res => (
-                                        <button key={res} style={{ textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', padding: '4px', fontSize: '12px' }}
+                                        <button key={res} style={{ textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', padding: '4px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                                             onClick={() => vscode.postMessage({ type: 'readFileContext', file: res })}>
-                                            📄 {res}
+                                            {Icons.File} {res}
                                         </button>
                                     ))}
-                                    {searchQuery.length > 2 && searchResults.length === 0 && <div style={{ fontSize: '11px', color: 'var(--nexus-subtext)' }}>No files found.</div>}
+                                    {searchQuery.length > 2 && searchResults.length === 0 && <div style={{ fontSize: '11px', color: 'var(--nexus-subtext)' }}>{t("search.no_files_found")}</div>}
                                 </div>
                             </div>
                         )}
@@ -1453,7 +1560,7 @@ export default function App() {
                                 vscode.postMessage({ type: 'generateRequirements', text: rawIdea, context: contextStr });
                             }}
                         >
-                            🪄 Auto-Generate RAG-Enhanced PRD
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Wand} Auto-Generate RAG-Enhanced PRD</span>
                         </button>
                     </div>
                 )}
@@ -1477,7 +1584,7 @@ export default function App() {
                                     setIsGeneratingDesign(false);
                                 }}
                             >
-                                🛑 Stop
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Stop} Stop</span>
                             </button>
                         </div>
                         <div style={{ padding: '15px', flex: 1, overflowY: 'auto', background: 'var(--vscode-input-background)', color: 'var(--vscode-descriptionForeground)', fontFamily: 'monospace', fontSize: '12px', borderBottomLeftRadius: '6px', borderBottomRightRadius: '6px' }}>
@@ -1495,21 +1602,21 @@ export default function App() {
                 {(requirements && requirements.trim() !== '') && !design && !isGeneratingReqs && !isGeneratingDesign && (
                     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
-                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold' }}>
+                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                                 {phaseState?.requirements === 'approved'
-                                    ? '✅ PRD approved · .nexus/specs/main/requirements.md'
-                                    : '📝 PRD draft · .nexus/specs/main/requirements.md'}
+                                    ? <>{Icons.CheckCircle} PRD approved · .nexus/specs/main/requirements.md</>
+                                    : <>{Icons.FilePen} PRD draft · .nexus/specs/main/requirements.md</>}
                             </span>
                             <div style={{ display: 'flex', gap: '10px' }}>
-                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px' }} onClick={() => setIsEditingReqs(!isEditingReqs)}>
-                                    {isEditingReqs ? '👁️ Preview' : '✏️ Edit'}
+                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }} onClick={() => setIsEditingReqs(!isEditingReqs)}>
+                                    {isEditingReqs ? <>{Icons.Eye} Preview</> : <>{Icons.Edit} Edit</>}
                                 </button>
-                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px' }}
+                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                                     onClick={() => {
                                         setRequirements(''); setRawIdea(''); setReqLogs([]); setIsEditingReqs(false);
                                         vscode.postMessage({ type: 'updateRequirements', text: '' });
                                     }}>
-                                    🔄 Start Over
+                                    {Icons.Restart} Start Over
                                 </button>
                             </div>
                         </div>
@@ -1533,13 +1640,13 @@ export default function App() {
                                     style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
                                     onClick={() => vscode.postMessage({ type: 'rejectPhase', phase: 'requirements' })}
                                 >
-                                    ↩️ Reject & Regenerate
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Restart} Reject &amp; Regenerate</span>
                                 </button>
                                 <button
                                     style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
                                     onClick={() => vscode.postMessage({ type: 'approvePhase', phase: 'requirements' })}
                                 >
-                                    ✅ Approve PRD
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Check} Approve PRD</span>
                                 </button>
                             </div>
                         ) : (
@@ -1551,7 +1658,7 @@ export default function App() {
                                     vscode.postMessage({ type: 'generateDesign', requirements });
                                 }}
                             >
-                                🚀 Generate Architecture Design
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Sparkles} Generate Architecture Design</span>
                             </button>
                         )}
                     </div>
@@ -1560,21 +1667,21 @@ export default function App() {
                 {(requirements && design) && !isGeneratingDesign && (
                     <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
-                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold' }}>
+                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                                 {phaseState?.design === 'approved'
-                                    ? '✅ Design approved · .nexus/specs/main/'
-                                    : '📝 Design draft · .nexus/specs/main/'}
+                                    ? <>{Icons.CheckCircle} Design approved · .nexus/specs/main/</>
+                                    : <>{Icons.FilePen} Design draft · .nexus/specs/main/</>}
                             </span>
                             <div style={{ display: 'flex', gap: '10px' }}>
-                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px' }} onClick={() => setIsEditingDesign(!isEditingDesign)}>
-                                    {isEditingDesign ? '👁️ Preview' : '✏️ Edit Design'}
+                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }} onClick={() => setIsEditingDesign(!isEditingDesign)}>
+                                    {isEditingDesign ? <>{Icons.Eye} Preview</> : <>{Icons.Edit} Edit Design</>}
                                 </button>
-                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px' }}
+                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                                     onClick={() => {
                                         setRequirements(''); setDesign(''); setRawIdea(''); setReqLogs([]); setIsEditingReqs(false); setIsEditingDesign(false);
                                         vscode.postMessage({ type: 'updateRequirements', text: '' });
                                     }}>
-                                    🔄 Start Over
+                                    {Icons.Restart} Start Over
                                 </button>
                             </div>
                         </div>
@@ -1615,13 +1722,13 @@ export default function App() {
                                         style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
                                         onClick={() => vscode.postMessage({ type: 'rejectPhase', phase: 'design' })}
                                     >
-                                        ↩️ Reject & Regenerate
+                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Restart} Reject &amp; Regenerate</span>
                                     </button>
                                     <button
                                         style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
                                         onClick={() => vscode.postMessage({ type: 'approvePhase', phase: 'design' })}
                                     >
-                                        ✅ Approve Design
+                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Check} Approve Design</span>
                                     </button>
                                 </div>
                             ) : (
@@ -1634,7 +1741,7 @@ export default function App() {
                                             setActiveTab('coder');
                                         }}
                                     >
-                                        💾 Just Save
+                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Save} Just Save</span>
                                     </button>
                                     <button
                                         style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
@@ -1643,7 +1750,7 @@ export default function App() {
                                             vscode.postMessage({ type: 'generateProjectTasks' });
                                         }}
                                     >
-                                        ⚡ Generate Implementation Plan
+                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Zap} Generate Implementation Plan</span>
                                     </button>
                                 </div>
                             )
@@ -1657,7 +1764,7 @@ export default function App() {
             {/* ========================================================= */}
             <div style={{ display: activeTab === 'rules' ? 'flex' : 'none', flexDirection: 'column', padding: '20px', flex: 1, overflowY: 'auto' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                    <h3 style={{ margin: '0 0 5px 0', color: 'var(--vscode-foreground)' }}>Agent Skills & Directives</h3>
+                    <h3 style={{ margin: '0 0 5px 0', color: 'var(--vscode-foreground)' }}>{t("skills.header")}</h3>
                     <p style={{ margin: '0 0 15px 0', fontSize: '12px', color: 'var(--nexus-subtext)' }}>
                         Define custom behaviors, preferred libraries, and architectural rules. The AI will strictly follow these instructions when writing code. Saves to <code>.nexusrules</code>.
                     </p>
@@ -1686,8 +1793,8 @@ export default function App() {
                 {/* Header Controls with New Map Toggles */}
                 <div style={{ padding: '15px', borderBottom: '1px solid #30363d', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(13, 17, 23, 0.8)', zIndex: 1000, flexShrink: 0 }}>
                     <div>
-                        <h3 style={{ margin: 0, color: 'white' }}>Traceability Matrix</h3>
-                        <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '4px' }}>Click a 3D Node to view its structural text data.</div>
+                        <h3 style={{ margin: 0, color: 'white' }}>{t("traceability.header")}</h3>
+                        <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '4px' }}>{t("traceability.subheader")}</div>
                     </div>
 
                     {/*  TRACEABILITY TOGGLES */}
@@ -1695,7 +1802,7 @@ export default function App() {
                         <button
                             style={{ padding: '6px 12px', background: activeMapType === 'codeMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}
                             onClick={() => setActiveMapType('codeMap')}
-                        >Code AST</button>
+                        >{t("buttons.code_ast")}</button>
 
                         <button
                             style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: activeMapType === 'reqMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}
@@ -1753,7 +1860,7 @@ export default function App() {
                         )}
 
                         {!graphData ? (
-                            <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>Scanning workspace geometry...</div>
+                            <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>{t("search.scanning_workspace")}</div>
                         ) : (
                             <ForceGraph3D
                                 key={activeMapType}
@@ -1793,7 +1900,7 @@ export default function App() {
                             <div style={{ background: 'rgba(88, 166, 255, 0.1)', border: '1px solid rgba(88, 166, 255, 0.3)', borderRadius: '6px', padding: '10px', display: 'flex', gap: '10px', alignItems: 'center' }}>
                                 <div style={{ color: '#58a6ff' }} className="spin">{Icons.Loader}</div>
                                 <div style={{ fontSize: '11px', color: '#c9d1d9', lineHeight: '1.4' }}>
-                                    <strong>Matrix Computing:</strong> The graph currently shows physical files. Semantic AI links are being calculated in the background and will appear here shortly.
+                                    <strong>{t("traceability.matrix_computing_label")}</strong> {t("traceability.matrix_computing")}
                                 </div>
                             </div>
                         )}
@@ -1811,7 +1918,7 @@ export default function App() {
                             {/* 🚀 GLOBAL PROJECT TDD BUTTON */}
                             <button
                                 onClick={() => vscode.postMessage({ type: 'generateProjectTests' })}
-                                title="Generate Master TDD Suite (Markdown Plan + Code) in /nexuscode"
+                                title={t("buttons.tdd_master_suite")}
                                 style={{
                                     background: '#238636',
                                     border: '1px solid rgba(240, 246, 252, 0.1)',
@@ -1824,7 +1931,7 @@ export default function App() {
                                     boxShadow: '0 2px 5px rgba(0,0,0,0.2)'
                                 }}
                             >
-                                🧪 Generate Project TDD
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Flask} Generate Project TDD</span>
                             </button>
                         </div>
 
@@ -1876,7 +1983,7 @@ export default function App() {
                                                 {/* THE UPGRADE: Relational Connections & Vector Math */}
                                                 {nodeEdges.length > 0 && (
                                                     <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px dashed var(--vscode-input-border)' }}>
-                                                        <div style={{ fontSize: '10px', fontWeight: 'bold', color: 'var(--nexus-subtext)', marginBottom: '6px' }}>🔗 CONNECTIONS</div>
+                                                        <div style={{ fontSize: '10px', fontWeight: 'bold', color: 'var(--nexus-subtext)', marginBottom: '6px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.Link} CONNECTIONS</div>
                                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                                             {nodeEdges.map((edge: any, idx: number) => {
                                                                 const srcId = typeof edge.source === 'object' ? edge.source.id : edge.source;
@@ -1898,8 +2005,8 @@ export default function App() {
 
                                                                         {/* Render the Mathematical Cosine Similarity Score */}
                                                                         {isSemantic && weight && (
-                                                                            <span style={{ color: '#fca311', fontWeight: 'bold', fontSize: '10px', background: 'rgba(252, 163, 17, 0.1)', padding: '2px 6px', borderRadius: '4px', flexShrink: 0 }}>
-                                                                                🧠 {weight} match
+                                                                            <span style={{ color: '#fca311', fontWeight: 'bold', fontSize: '10px', background: 'rgba(252, 163, 17, 0.1)', padding: '2px 6px', borderRadius: '4px', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                                                                {Icons.Brain} {weight} match
                                                                             </span>
                                                                         )}
                                                                         {!isSemantic && (
@@ -1934,8 +2041,8 @@ export default function App() {
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
                                                 {/* 🚀 THE FIX: Added flex: 1 and minWidth: 0 to force the ellipsis to trigger */}
                                                 <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', paddingRight: '10px', flex: 1, minWidth: 0 }}>
-                                                    <span style={{ color: 'var(--vscode-foreground)', fontWeight: 'bold', fontSize: '13px', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }} title={fileName}>
-                                                        📄 {fileName}
+                                                    <span style={{ color: 'var(--vscode-foreground)', fontWeight: 'bold', fontSize: '13px', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', display: 'inline-flex', alignItems: 'center', gap: '6px' }} title={fileName}>
+                                                        {Icons.File} {fileName}
                                                     </span>
                                                     {dirName && (
                                                         <span style={{ color: 'var(--nexus-subtext)', fontSize: '10px', marginTop: '2px', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', fontFamily: 'monospace' }} title={dirName}>
@@ -1945,10 +2052,10 @@ export default function App() {
                                                 </div>
 
                                                 <button
-                                                    style={{ background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: '1px solid var(--vscode-button-border, transparent)', cursor: 'pointer', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', flexShrink: 0 }}
-                                                    title="Open File in Editor"
+                                                    style={{ background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: '1px solid var(--vscode-button-border, transparent)', cursor: 'pointer', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: 'bold', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                                    title={t("buttons.open_in_editor")}
                                                     onClick={() => vscode.postMessage({ type: 'openFile', filepath: filepath })}>
-                                                    OPEN ↗
+                                                    OPEN {Icons.ExternalLink}
                                                 </button>
                                             </div>
 
@@ -1956,17 +2063,17 @@ export default function App() {
                                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '11px' }}>
                                                 {node.exports?.length > 0 && (
                                                     <div style={{ background: 'rgba(81, 207, 102, 0.1)', color: '#51cf66', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(81, 207, 102, 0.3)' }}>
-                                                        <strong>Exports:</strong> {node.exports.join(', ')}
+                                                        <strong>{t("node_details.exports_label")}</strong> {node.exports.join(', ')}
                                                     </div>
                                                 )}
                                                 {node.classes?.length > 0 && (
                                                     <div style={{ background: 'rgba(252, 163, 17, 0.1)', color: '#fca311', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(252, 163, 17, 0.3)' }}>
-                                                        <strong>Classes:</strong> {node.classes.join(', ')}
+                                                        <strong>{t("node_details.classes_label")}</strong> {node.classes.join(', ')}
                                                     </div>
                                                 )}
                                                 {node.functions?.length > 0 && (
                                                     <div style={{ background: 'rgba(51, 154, 240, 0.1)', color: '#339af0', padding: '4px 8px', borderRadius: '4px', border: '1px solid rgba(51, 154, 240, 0.3)' }}>
-                                                        <strong>Functions:</strong> {node.functions.join(', ')}
+                                                        <strong>{t("node_details.functions_label")}</strong> {node.functions.join(', ')}
                                                     </div>
                                                 )}
                                                 {node.imports?.length > 0 && (

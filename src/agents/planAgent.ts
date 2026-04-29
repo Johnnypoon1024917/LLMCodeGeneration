@@ -1,11 +1,17 @@
 // src/agents/planAgent.ts
 
-import { getLLMConfig, resilientFetch, authHeaders} from '../llmService';
-import { agentToolDefinitions, executeAgentTool } from '../agentTools';
+import { getProvider } from '../llm';
+import type { ChatMessage, ToolCall } from '../llm';
+import { getToolDefinitions } from './toolRegistry';
+import { dispatchWithEvents } from './toolDispatchWithEvents';
+import { allowAllHook } from './securityHook';
+// Trigger registration of all tools by importing the barrel. Without
+// this import the registry would be empty when planAgent runs.
+import './tools';
 
 export async function runPlannerAgent(
     task: string,
-    workspaceRoot: string,                                 // ABSOLUTE filesystem path — used by executeAgentTool
+    workspaceRoot: string,                                 // ABSOLUTE filesystem path — used by tool execution
     initialContext: string,                                // Output from runExplorerAgent (codebase hints)
     prd: string,                                           // Active requirements.md content (may be empty)
     design: string,                                        // Active design.md content (may be empty)
@@ -46,57 +52,75 @@ OUTPUT FORMAT (strict XML — every tag is required):
   - Bulleted list of conditions that MUST hold for the code to be considered complete.
 </verification_rules>`;
 
-    const { endpoint, model, apiKey, enableTools } = await getLLMConfig();
+    // Migrated to Provider abstraction (Component 2A). The hand-rolled
+    // resilientFetch + manual response.json() parse is replaced by
+    // provider.chatCompletion which:
+    //   - Returns the structured AssistantMessage (with tool_calls)
+    //   - Auto-detects tool-call capability per endpoint and falls
+    //     back to a tool-free request if the endpoint can't do tools
+    //     (replaces the old enableTools config flag — see PATCH.md
+    //     for migration notes)
+    //   - Carries the same retry/rate-limit machinery internally
+    const provider = await getProvider();
 
-    const messages: any[] = [
-        { role: "system", content: systemPrompt },
-        { role: "user",   content: `Task: ${task}\n\nExplore the codebase using your tools, then emit the final XML plan.` }
+    // Component 2B-3b: planner uses only read-only tools. We restrict
+    // the catalog rather than expose the full 10-tool set because:
+    //   - planAgent shouldn't be writing files or running commands
+    //     (that's Coordinator's job during execution)
+    //   - a smaller tool list keeps prompt-token cost down
+    //   - the planner's existing system prompt is tuned for these tools
+    const plannerTools = getToolDefinitions(['read_file', 'list_directory', 'search_codebase']);
+
+    const messages: ChatMessage[] = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: `Task: ${task}\n\nExplore the codebase using your tools, then emit the final XML plan.` }
     ];
 
     const MAX_STEPS = 8; // ReAct loop ceiling — prevents runaway tool-call cycles
 
     for (let step = 0; step < MAX_STEPS; step++) {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: messages,
-                tools: enableTools ? agentToolDefinitions : undefined,
-                tool_choice: enableTools ? "auto" : undefined,
-                temperature: 0.2
-            })
-        }, (msg) => log(`Planner API hiccup: ${msg}`));
+        const aiMessage = await provider.chatCompletion(messages, {
+            tools: plannerTools,
+            toolChoice: 'auto',
+            temperature: 0.2,
+            onRetryLog: (msg) => log(`Planner API hiccup: ${msg}`)
+        });
 
-        const data = await response.json() as any;
-        const aiMessage = data.choices?.[0]?.message;
-        if (!aiMessage) {
-            throw new Error("Planner Agent: empty response from LLM.");
-        }
+        // Append the assistant's response to message history. Even when
+        // tool_calls is undefined, we still push so the next iteration
+        // sees the model's prior turn (in case we re-prompt).
         messages.push(aiMessage);
 
-        // ReAct: did the model invoke a tool?
+        // ReAct: did the model invoke any tools?
         if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) {
             for (const toolCall of aiMessage.tool_calls) {
-                const funcName = toolCall.function.name;
-                let funcArgs: any = {};
-                try { funcArgs = JSON.parse(toolCall.function.arguments || '{}'); } catch { /* tolerate malformed */ }
+                logToolCall(toolCall, log);
 
-                log(
-                    `Planner inspecting codebase…`,
-                    "tool",
-                    `${funcName}(${funcArgs.filepath || funcArgs.dirpath || funcArgs.keyword || ''})`
+                // Component 2B-3b: route through dispatchWithEvents.
+                // No emitter wired (planAgent runs before user-visible
+                // task starts, and the existing log() callback already
+                // surfaces planner activity to the UI). The 'planner'
+                // source tag would let 2B-4 add planner cards later
+                // without changing this code — just pass an emitter.
+                const dispatchResult = await dispatchWithEvents(
+                    toolCall,
+                    { workspaceRoot },
+                    {
+                        source: 'planner',
+                        preDispatchHook: allowAllHook
+                    }
                 );
-
-                // workspaceRoot is now the ACTUAL filesystem path — tool calls work correctly.
-                const toolResult = await executeAgentTool(toolCall, workspaceRoot);
-                messages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
+                messages.push({
+                    role: 'tool',
+                    tool_call_id: toolCall.id,
+                    content: dispatchResult.llmContent
+                });
             }
             continue; // Loop back so the LLM can react to the tool results
         }
 
         // No tools called — did it produce the structured plan?
-        const content = (aiMessage.content || '').trim();
+        const content = (aiMessage.content ?? '').trim();
 
         if (content.includes('<execution_plan>')) {
             log("Planner Agent: Architecture spec finalized.", "success", "Plan rigorously verified against the codebase.");
@@ -110,10 +134,37 @@ OUTPUT FORMAT (strict XML — every tag is required):
 
         // The model chatted without using tools and without producing the plan. Re-prompt strictly.
         messages.push({
-            role: "user",
+            role: 'user',
             content: "You must either call a tool to explore further, or emit the final plan using the exact XML tags: <analysis>, <files_to_modify>, <execution_plan>, <verification_rules>. No prose outside those tags."
         });
     }
 
     throw new Error("Planner Agent failed to generate a valid execution plan.");
+}
+
+/**
+ * Surface a tool invocation to the planner's log callback.
+ *
+ * Extracted into a helper so the loop body stays readable and the
+ * mock-Provider tests can exercise the loop logic without having to
+ * stub out logging behavior.
+ */
+function logToolCall(
+    toolCall: ToolCall,
+    log: (msg: string, stepType?: string, details?: string) => void
+): void {
+    const funcName = toolCall.function.name;
+    let funcArgs: { filepath?: string; dirpath?: string; keyword?: string } = {};
+    try {
+        funcArgs = JSON.parse(toolCall.function.arguments || '{}');
+    } catch {
+        // Tolerate malformed arguments — the model occasionally emits
+        // partial JSON, particularly mid-stream. The actual execution
+        // happens in dispatchWithEvents which has its own error handling.
+    }
+    log(
+        `Planner inspecting codebase…`,
+        'tool',
+        `${funcName}(${funcArgs.filepath || funcArgs.dirpath || funcArgs.keyword || ''})`
+    );
 }

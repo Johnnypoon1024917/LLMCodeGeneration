@@ -1,6 +1,7 @@
 // src/utilities/importResolver.ts
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { log } from '../logger';
 
 /**
  * Scans the active document for relative imports and automatically fixes:
@@ -22,6 +23,7 @@ export async function resolveMissingImports(editor: vscode.TextEditor): Promise<
 
     while ((match = importRegex.exec(text)) !== null) {
         const importPath = match[1];
+        if (importPath === undefined || match[0] === undefined) continue;
 
         // Skip third-party node_modules (like 'react' or 'lodash')
         if (!importPath.startsWith('.')) continue;
@@ -73,7 +75,7 @@ export async function resolveMissingImports(editor: vscode.TextEditor): Promise<
                         const newPath = importPath + ext;
                         workspaceEdit.replace(document.uri, pathRange, newPath);
                         hasFixes = true;
-                        console.log(`[Import Resolver] Auto-fixed: ${importPath} -> ${newPath}`);
+                        log.info(`[Import Resolver] Auto-fixed: ${importPath} -> ${newPath}`);
                         break;
                     }
                 } catch {
@@ -90,4 +92,4 @@ export async function resolveMissingImports(editor: vscode.TextEditor): Promise<
             vscode.window.setStatusBarMessage("✨ NexusCode: Imports resolved.", 3000);
         }
     }
-}   
+}

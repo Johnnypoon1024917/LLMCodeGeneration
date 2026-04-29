@@ -39,10 +39,11 @@ exports.getRepoContent = getRepoContent;
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
+const logger_1 = require("./logger");
 const contextCache = new Map();
 function invalidateProjectContext() {
     contextCache.clear();
-    console.log("[DEBUG] 🗑️ Project context cache cleared.");
+    logger_1.log.debug("[DEBUG] 🗑️ Project context cache cleared.");
 }
 /**
  * Normalizes a file path to handle Windows drive letter inconsistencies.
@@ -57,7 +58,7 @@ function normalizePath(p) {
  */
 async function getProjectContext(rootPath) {
     // Determine the root directory: Use the argument if provided (Meta-Mode), otherwise use workspace (User-Mode)
-    const rawRootDir = rootPath || (vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : "");
+    const rawRootDir = rootPath || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 ? vscode.workspace.workspaceFolders[0].uri.fsPath : "");
     if (!rawRootDir)
         return "No workspace open.";
     const rootDir = normalizePath(rawRootDir);
@@ -92,7 +93,7 @@ async function getProjectContext(rootPath) {
 async function getRepoContent(tokenBudgetChars = 200000, rootPath) {
     let fullContent = "REPOSITORY CODEBASE CONTEXT:\n\n";
     let currentChars = 0;
-    const rawRootDir = rootPath || (vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders[0].uri.fsPath : "");
+    const rawRootDir = rootPath || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 ? vscode.workspace.workspaceFolders[0].uri.fsPath : "");
     if (!rawRootDir)
         return "";
     const rootDir = normalizePath(rawRootDir);
@@ -192,7 +193,7 @@ function generateAsciiTree(paths) {
             currentLevel = currentLevel[part];
         });
     });
-    function drawTree(node, prefix = '', isLast = true) {
+    function drawTree(node, prefix = '', _isLast = true) {
         const keys = Object.keys(node);
         let result = '';
         keys.forEach((key, index) => {

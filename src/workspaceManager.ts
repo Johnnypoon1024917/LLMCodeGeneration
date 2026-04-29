@@ -1,14 +1,16 @@
 // src/workspaceManager.ts
 import * as vscode from 'vscode';
+import { t } from './i18n';
+import { log } from './logger';
 
 export async function createWorkspaceStructure(folderStructure: string[]) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
-        vscode.window.showWarningMessage("Please open a workspace folder first.");
+        vscode.window.showWarningMessage(t("workspace.no_folder_open"));
         return;
     }
 
-    const rootUri = workspaceFolders[0].uri;
+    const rootUri = workspaceFolders[0]!.uri; // length > 0 guarded above
 
     for (const filePath of folderStructure) {
         try {
@@ -20,7 +22,7 @@ export async function createWorkspaceStructure(folderStructure: string[]) {
             try {
                 // If this succeeds, the file exists -> DO NOT TOUCH IT
                 await vscode.workspace.fs.stat(fileUri);
-                // console.log(`Skipping existing file: ${filePath}`);
+                // log.info(`Skipping existing file: ${filePath}`);
                 continue; 
             } catch {
                 // If stat throws, the file does NOT exist -> Safe to create
@@ -28,7 +30,7 @@ export async function createWorkspaceStructure(folderStructure: string[]) {
             }
             
         } catch (error) {
-            console.error(`Failed to scaffold ${filePath}:`, error);
+            log.error(`Failed to scaffold ${filePath}:`, error);
         }
     }
 }

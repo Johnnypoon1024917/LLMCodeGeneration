@@ -1,19 +1,21 @@
 import * as vscode from 'vscode';
+import { t } from '../i18n';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { globalContext } from '../extension'; // Assuming globalContext is exported from your extension.ts
+import { log } from '../logger';
+import { getDeps } from '../container';
 
 export class AuthManager {
     static async login(token: string) {
-        await globalContext.secrets.store('nexus_auth_token', token);
+        await getDeps().secrets.store('nexus_auth_token', token);
     }
 
     static async logout() {
-        await globalContext.secrets.delete('nexus_auth_token');
+        await getDeps().secrets.delete('nexus_auth_token');
     }
 
     static async getToken(): Promise<string | undefined> {
-        return await globalContext.secrets.get('nexus_auth_token');
+        return await getDeps().secrets.get('nexus_auth_token');
     }
 
     static async isAuthenticated(): Promise<boolean> {
@@ -26,7 +28,7 @@ export class AccessControl {
     static async verifyAccess(): Promise<boolean> {
         const isAuth = await AuthManager.isAuthenticated();
         if (!isAuth) {
-            vscode.window.showErrorMessage("🛡️ Nexus Security: Access Denied. Please log in to use the Swarm.");
+            vscode.window.showErrorMessage(t("security.access_denied_swarm"));
             return false;
         }
         
@@ -50,7 +52,7 @@ export class AuditLogger {
             const logFile = path.join(logDir, 'audit_log.jsonl');
             
             // Grab the user identity if possible (fallback to local OS user)
-            const user = (await AuthManager.getToken()) ? "AuthenticatedUser" : process.env.USER || "Anonymous";
+            const user = (await AuthManager.getToken()) ? "AuthenticatedUser" : process.env['USER'] || "Anonymous";
 
             const logEntry = {
                 timestamp: new Date().toISOString(),
@@ -61,7 +63,7 @@ export class AuditLogger {
             
             await fs.appendFile(logFile, JSON.stringify(logEntry) + '\n', 'utf8');
         } catch (e) {
-            console.warn("Critical Failure in Audit Logger:", e);
+            log.warn("Critical Failure in Audit Logger:", e);
         }
     }
 }

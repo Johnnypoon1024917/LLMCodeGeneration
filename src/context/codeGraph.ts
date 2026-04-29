@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { ASTParser } from '../utilities/astParser';
+import { log } from '../logger';
 
 export interface FileNode {
     filepath: string;
@@ -108,7 +109,7 @@ export async function buildWorkspaceGraph(rootUri?: vscode.Uri) {
             const doc = await vscode.workspace.openTextDocument(file);
             await addFileToGraph(file.fsPath, doc.getText());
         } catch (e) {
-            console.warn(`Failed to parse ${file.fsPath} for GraphRAG`);
+            log.warn(`Failed to parse ${file.fsPath} for GraphRAG`);
         }
     }
 }

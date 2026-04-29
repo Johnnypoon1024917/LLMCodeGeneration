@@ -36,13 +36,15 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.createWorkspaceStructure = createWorkspaceStructure;
 // src/workspaceManager.ts
 const vscode = __importStar(require("vscode"));
+const i18n_1 = require("./i18n");
+const logger_1 = require("./logger");
 async function createWorkspaceStructure(folderStructure) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
-        vscode.window.showWarningMessage("Please open a workspace folder first.");
+        vscode.window.showWarningMessage((0, i18n_1.t)("workspace.no_folder_open"));
         return;
     }
-    const rootUri = workspaceFolders[0].uri;
+    const rootUri = workspaceFolders[0].uri; // length > 0 guarded above
     for (const filePath of folderStructure) {
         try {
             const fileUri = vscode.Uri.joinPath(rootUri, filePath);
@@ -52,7 +54,7 @@ async function createWorkspaceStructure(folderStructure) {
             try {
                 // If this succeeds, the file exists -> DO NOT TOUCH IT
                 await vscode.workspace.fs.stat(fileUri);
-                // console.log(`Skipping existing file: ${filePath}`);
+                // log.info(`Skipping existing file: ${filePath}`);
                 continue;
             }
             catch {
@@ -61,7 +63,7 @@ async function createWorkspaceStructure(folderStructure) {
             }
         }
         catch (error) {
-            console.error(`Failed to scaffold ${filePath}:`, error);
+            logger_1.log.error(`Failed to scaffold ${filePath}:`, error);
         }
     }
 }

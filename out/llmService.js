@@ -46,7 +46,6 @@ exports.runAgenticExploration = runAgenticExploration;
 exports.generateTests = generateTests;
 exports.healError = healError;
 exports.generateAtomicEdits = generateAtomicEdits;
-exports.streamCoder = streamCoder;
 exports.getAvailableModels = getAvailableModels;
 exports.generateDesign = generateDesign;
 exports.generateTasks = generateTasks;
@@ -61,9 +60,18 @@ exports.generateMCTSApproaches = generateMCTSApproaches;
 // src/llmService.ts
 const vscode = __importStar(require("vscode"));
 const agentTools_1 = require("./agentTools");
-const extension_1 = require("./extension");
+const toolDispatchWithEvents_1 = require("./agents/toolDispatchWithEvents");
+const securityHook_1 = require("./agents/securityHook");
+// Trigger registration of all tools by importing the barrel.
+require("./agents/tools");
+const container_1 = require("./container");
 const RetryManager_1 = require("./infrastructure/RetryManager");
 const RateLimitManager_1 = require("./infrastructure/RateLimitManager");
+const errors_1 = require("./utilities/errors");
+const jsonRequest_1 = require("./llm/jsonRequest");
+const llm_1 = require("./llm");
+const jsonSchemas_1 = require("./llm/jsonSchemas");
+const logger_1 = require("./logger");
 let _apiKeyMigrated = false;
 function decodeHTMLEntities(text) {
     const entities = {
@@ -74,7 +82,7 @@ function decodeHTMLEntities(text) {
         '&apos;': "'",
     };
     let decoded = text.replace(/&[a-z0-9]+;/gi, (match) => entities[match] || match);
-    decoded = decoded.replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(dec));
+    decoded = decoded.replace(/&#(\d+);/g, (_match, dec) => String.fromCharCode(dec));
     return decoded;
 }
 async function resilientFetch(url, options, logCallback) {
@@ -94,41 +102,52 @@ async function resilientFetch(url, options, logCallback) {
         }
         catch (error) {
             // 🚀 FIX: Catch Fetch Abort (from Cancel button or Timeout) and force fast-fail
-            if (error.name === 'AbortError' || error.message?.includes('aborted') || options?.signal?.aborted) {
-                error.name = 'AbortError';
-                error.status = 400; // 400 causes RetryManager to skip retries!
-                throw error;
+            if ((0, errors_1.isAbortError)(error) || options?.signal?.aborted) {
+                // Throw a freshly constructed AbortError carrying status=400 so RetryManager
+                // skips retries. Mutating the caught `unknown` is hostile to the type system
+                // and risky if the runtime threw something exotic.
+                const abortErr = new Error('AbortError');
+                abortErr.name = 'AbortError';
+                abortErr.status = 400;
+                throw abortErr;
             }
             throw error;
         }
     }, 3, 1000, (attempt, delay, error) => {
-        const msg = `⚠️ Nexus API Hiccup (${error.message}). Retrying in ${delay / 1000}s (Attempt ${attempt}/3)...`;
+        const msg = `⚠️ Nexus API Hiccup (${(0, errors_1.errorMessage)(error)}). Retrying in ${delay / 1000}s (Attempt ${attempt}/3)...`;
         if (logCallback)
             logCallback(msg);
         else
-            console.warn(msg);
+            logger_1.log.warn(msg);
     });
 }
 async function getLLMConfig() {
-    const config = vscode.workspace.getConfiguration('nexuscode');
+    const config = (0, container_1.getDeps)().config;
     // ── One-shot migration: plain settings.json key → SecretStorage ──
-    if (!_apiKeyMigrated) {
+    //
+    // Only attempt migration if the config source supports `update()`.
+    // The IDE's VSCodeConfigSource does; the CLI's CliConfigSource does
+    // not (CLI has no obvious place to persist back). In CLI mode we
+    // skip the migration step — there's nothing to migrate from anyway,
+    // since the CLI gets its api key from env/flags/cli.json, not from
+    // a `nexuscode.apiKey` settings entry.
+    if (!_apiKeyMigrated && config.update) {
         _apiKeyMigrated = true; // set first so a failed migration can't loop
         try {
             const plain = config.get('apiKey') ?? '';
             const isRealKey = plain.length > 5 && plain !== 'lm-studio';
             if (isRealKey) {
-                await extension_1.globalContext.secrets.store('nexuscode_apikey', plain);
-                await config.update('apiKey', '', vscode.ConfigurationTarget.Global);
+                await (0, container_1.getDeps)().secrets.store('nexuscode_apikey', plain);
+                await config.update('apiKey', '');
                 vscode.window.showInformationMessage("NexusCode: API key migrated to VS Code SecretStorage. The plain 'nexuscode.apiKey' setting has been cleared.");
             }
         }
         catch (e) {
             // Migration is best-effort — never block startup on it
-            console.warn('NexusCode: API key migration skipped:', e);
+            logger_1.log.warn('NexusCode: API key migration skipped:', e);
         }
     }
-    const secureKey = await extension_1.globalContext.secrets.get('nexuscode_apikey');
+    const secureKey = await (0, container_1.getDeps)().secrets.get('nexuscode_apikey');
     return {
         endpoint: config.get('apiEndpoint') || 'http://127.0.0.1:1234/v1/chat/completions',
         model: config.get('model') || 'qwen2.5-coder',
@@ -143,6 +162,17 @@ function authHeaders(apiKey) {
     }
     return headers;
 }
+/**
+ * @deprecated Use `jsonRequest` from `./llm/jsonRequest` for new code.
+ *
+ * This is the legacy character-by-character JSON healer. It's retained
+ * because (a) `jsonRequest`'s fallback path calls into it for endpoints
+ * that don't support `response_format: { type: "json_schema" }`, and
+ * (b) `traceabilityGraph.ts` and a couple of other callers outside this
+ * module still depend on it.
+ *
+ * Do not introduce new call sites. Migrate to `jsonRequest` instead.
+ */
 function safeParseJSON(jsonString) {
     try {
         const startObj = jsonString.indexOf('{');
@@ -163,6 +193,8 @@ function safeParseJSON(jsonString) {
         let lastMeaningfulChar = '';
         for (let i = 0; i < extract.length; i++) {
             const char = extract[i];
+            if (char === undefined)
+                continue; // bounded by length; defensive
             const isWhitespace = /[ \n\r\t]/.test(char);
             if (inString) {
                 if (isEscaping) {
@@ -189,15 +221,19 @@ function safeParseJSON(jsonString) {
                     let j = i + 1;
                     // Look ahead to see what the next real character is
                     while (j < extract.length) {
-                        if (!/[ \n\r\t]/.test(extract[j])) {
-                            nextMeaningful = extract[j];
+                        const cj = extract[j];
+                        if (cj !== undefined && !/[ \n\r\t]/.test(cj)) {
+                            nextMeaningful = cj;
                             if (nextMeaningful === '"') {
                                 let k = j + 1;
                                 while (k < extract.length && extract[k] !== '"') {
                                     k++;
                                 }
                                 k++;
-                                while (k < extract.length && /[ \n\r\t]/.test(extract[k])) {
+                                while (k < extract.length) {
+                                    const ck = extract[k];
+                                    if (ck === undefined || !/[ \n\r\t]/.test(ck))
+                                        break;
                                     k++;
                                 }
                                 if (extract[k] === ':') {
@@ -274,12 +310,12 @@ function safeParseJSON(jsonString) {
         return JSON.parse(healed);
     }
     catch (e) {
-        console.error("=======================================================");
-        console.error("🚨 FATAL JSON PARSE ERROR 🚨");
-        console.error("The AI generated this exact string which caused the crash:");
-        console.error("-------------------------------------------------------");
-        console.error(jsonString);
-        console.error("=======================================================");
+        logger_1.log.error("=======================================================");
+        logger_1.log.error("🚨 FATAL JSON PARSE ERROR 🚨");
+        logger_1.log.error("The AI generated this exact string which caused the crash:");
+        logger_1.log.error("-------------------------------------------------------");
+        logger_1.log.error(jsonString);
+        logger_1.log.error("=======================================================");
         throw new Error("Failed to extract JSON: " + String(e));
     }
 }
@@ -292,36 +328,19 @@ Analyze the user's prompt and classify it into EXACTLY ONE of these four categor
 3. "explain" - The user is asking for a high-level summary or architectural overview of the project.
 4. "ask" - The user is asking a general question, or just chatting.
 
-Reply ONLY with the exact word: "build", "explore", "explain", or "ask".`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
+Return JSON: {"intent": "<one of: build, explore, explain, ask>"}`;
     try {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: prompt }],
-                temperature: 0.1,
-                response_format: { type: "json_object" }
-            })
+        const result = await (0, jsonRequest_1.jsonRequestData)({
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: prompt }
+            ],
+            schema: jsonSchemas_1.intentSchema,
+            temperature: 0.1
         });
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status} - ${await response.text()}`);
-        }
-        const data = await response.json();
-        if (!data.choices || data.choices.length === 0) {
-            return 'ask';
-        }
-        const intent = data.choices[0].message.content.trim().toLowerCase();
-        if (intent.includes('build')) {
-            return 'build';
-        }
-        // 🔥 2. Add the routing check so it actually returns 'explore'
-        if (intent.includes('explore')) {
-            return 'explore';
-        }
-        if (intent.includes('explain')) {
-            return 'explain';
+        const intent = result.intent;
+        if (intent === 'build' || intent === 'explore' || intent === 'explain' || intent === 'ask') {
+            return intent;
         }
         return 'ask';
     }
@@ -330,7 +349,32 @@ Reply ONLY with the exact word: "build", "explore", "explain", or "ask".`;
     }
 }
 async function streamChat(prompt, contextStr, history, onToken, abortSignal) {
-    const { endpoint, model, apiKey } = await getLLMConfig();
+    // Provider abstraction (Component 1, Session 1):
+    // streamChat is now an orchestration layer over `Provider.streamCompletion`.
+    // It still owns:
+    //   - System prompt construction
+    //   - History message massaging (compacted-memory injection, plan-stub
+    //     replacement)
+    //   - Audit emission on success / error / abort
+    //   - The token callback contract (for the Sidebar UI's incremental render)
+    //
+    // The Provider owns:
+    //   - HTTP transport (retry, rate limiting)
+    //   - SSE protocol parsing (data: prefixes, [DONE] sentinel, etc.)
+    //   - Wire-shape concerns (model field, response_format, etc.)
+    //
+    // This split lets a future MindIEProvider replace the transport without
+    // touching the prompt logic here.
+    const provider = await (0, llm_1.getProvider)();
+    // Build audit context up-front so the catch block can emit on failure
+    // without re-reading config. Endpoint URL is logged but apiKey is NOT
+    // (we deliberately exclude apiKey to avoid leaking it into audit logs).
+    const auditPayload = {
+        model: provider.model,
+        endpoint: provider.endpoint,
+        promptPreview: prompt.substring(0, 200),
+        status: 'ok' // overwritten below if it errors
+    };
     const systemPrompt = `You are Nexus, an elite Enterprise AI Software Architect. 
 You are having a conversation with the developer about their codebase. 
 Use the provided codebase context (Directory Tree, Open Files, and Vector DB results) to accurately answer their questions.
@@ -351,78 +395,37 @@ Always format your response in clean, highly readable Markdown. Use bullet point
         const safeContent = msg.content || (msg.plan ? "[Implementation Plan Generated]" : "Empty Message");
         return { role: msg.role === 'user' ? 'user' : 'assistant', content: safeContent };
     });
+    const messages = [
+        { role: "system", content: systemPrompt },
+        ...formattedHistory,
+        { role: "user", content: userPrompt }
+    ];
     try {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    ...formattedHistory,
-                    { role: "user", content: userPrompt }
-                ],
-                temperature: 0.3,
-                stream: true,
-                response_format: { type: "json_object" }
-            }),
-            signal: abortSignal
-        });
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+        const completionOptions = {
+            temperature: 0.3
+        };
+        if (abortSignal) {
+            completionOptions.signal = abortSignal;
         }
-        if (!response.body) {
-            throw new Error("No readable stream.");
-        }
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        let networkBuffer = "";
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-                break;
-            }
-            networkBuffer += decoder.decode(value, { stream: true });
-            let lines = networkBuffer.split('\n');
-            networkBuffer = lines.pop() || "";
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed) {
-                    continue;
-                }
-                if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
-                    try {
-                        const data = JSON.parse(trimmed.substring(6));
-                        const token = data.choices[0]?.delta?.content || data.choices[0]?.message?.content || "";
-                        if (token)
-                            onToken(token);
-                    }
-                    catch (e) { }
-                }
-                else if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-                    try {
-                        const data = JSON.parse(trimmed);
-                        const token = data.choices[0]?.message?.content || "";
-                        if (token)
-                            onToken(token);
-                    }
-                    catch (e) { }
-                }
-            }
-        }
-        if (networkBuffer.trim().startsWith('{')) {
-            try {
-                const data = JSON.parse(networkBuffer.trim());
-                const token = data.choices?.[0]?.message?.content || data.choices?.[0]?.delta?.content || "";
-                if (token)
-                    onToken(token);
-            }
-            catch (e) { }
+        const stream = await provider.streamCompletion(messages, completionOptions);
+        for await (const chunk of stream) {
+            onToken(chunk);
         }
     }
     catch (error) {
+        auditPayload.status = (0, errors_1.isAbortError)(error) ? 'aborted' : 'error';
+        auditPayload.errorMessage = (0, errors_1.errorMessage)(error);
+        // Audit emit is fire-and-forget (returns a promise we don't await
+        // here — getDeps().audit serializes writes internally). We don't
+        // want a slow audit write to delay the rethrow.
+        void (0, container_1.getDeps)().audit.logLlmCall(auditPayload);
         throw error;
     }
+    // Success path: emit a successful llm_call record. The token counts
+    // aren't tracked in this stream-chat path (no usage callback wired
+    // here), so they're omitted from the payload. When/if Coordinator
+    // routes through this path with a usage callback, we can add them.
+    void (0, container_1.getDeps)().audit.logLlmCall(auditPayload);
 }
 async function generateRequirements(rawIdea, contextStr = "", abortSignal) {
     const systemPrompt = `You are an elite Staff Product Manager. 
@@ -442,7 +445,7 @@ async function generateRequirements(rawIdea, contextStr = "", abortSignal) {
                 "edgeCases": ["Network timeout during DB write", "Malformed JSON payload"]
             }
         ],
-        "nonFunctionalRequirements": ["99.9% Uptime", "Sub-200ms latency"]
+        "successMetrics": ["99.9% Uptime", "Sub-200ms latency"]
     }
     
     CRITICAL RULES:
@@ -452,86 +455,53 @@ async function generateRequirements(rawIdea, contextStr = "", abortSignal) {
     4. THE SINGLE QUOTE PROTOCOL: Use single quotes inside your JSON values to avoid breaking the parser.
     5. PERFECT JSON SYNTAX: Properly close all arrays and strings.`;
     const userPrompt = contextStr ? `--- ATTACHED DOCUMENTATION CONTEXT ---\n${contextStr}\n\n--- RAW IDEA ---\n${rawIdea}` : `Raw Idea: ${rawIdea}`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-            temperature: 0.2,
-            response_format: { type: "json_object" }
-        }),
-        signal: abortSignal //  NEW: Wire the kill switch
-    });
-    const data = await response.json();
-    if (data.error)
-        throw new Error(data.error.message);
-    const content = data.choices[0].message.content;
-    //  DEBUG LOG: See exactly what the AI PM wrote
-    console.log("[DEBUG-PM-AGENT] Raw AI Output:\n", content);
-    const jsonStart = content.indexOf('{');
-    const jsonEnd = content.lastIndexOf('}');
-    return safeParseJSON(content.substring(jsonStart, jsonEnd + 1));
+    const opts = {
+        messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+        ],
+        schema: jsonSchemas_1.requirementPlanSchema,
+        temperature: 0.2
+    };
+    if (abortSignal) {
+        opts.signal = abortSignal;
+    }
+    return (0, jsonRequest_1.jsonRequestData)(opts);
 }
 async function generatePlan(prompt, projectContext) {
     const systemPrompt = `You are the Coordinator Agent (Lead Architect).
     Your job is to analyze the user's request and the EXISTING DIRECTORY STRUCTURE, then break it down into atomic tasks.
     YOU DO NOT WRITE THE FINAL CODE. You only generate the blueprint for the Coder Agent.
-    
-    1. First, write a brief 1-2 sentence explanation of the architectural approach.
-    2. Then, output the implementation plan in STRICT JSON format.
-    
-    CRITICAL RULES FOR JSON:
+
+    Return JSON with two fields:
+      "explanation": a 1-2 sentence summary of the architectural approach
+      "plan": { "implementationTasks": [...] }
+
+    CRITICAL RULES:
     - ADAPT to the existing folder structure. Do not invent new paradigms.
-    - In "folderStructure", list EVERY file that needs to be created OR modified.
     - ATOMIC TASKS: Break down "implementationTasks" so EACH task targets ONE file.
 
     Example Output:
-    We need to add a new Booking tab to the navigation menu.
-    \`\`\`json
     {
-      "folderStructure": ["public/index.html"],
-      "implementationTasks": ["Add booking tab to navigation in public/index.html"]
-    }
-    \`\`\``;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `EXISTING DIRECTORY STRUCTURE:\n${projectContext}\n\nUSER REQUEST: ${prompt}` }
-            ],
-            temperature: 0.1,
-            response_format: { type: "json_object" }
-        })
+      "explanation": "We need to add a new Booking tab to the navigation menu.",
+      "plan": {
+        "implementationTasks": [
+          { "id": "TASK-001", "description": "Add booking tab to navigation in public/index.html", "targetFile": "public/index.html" }
+        ]
+      }
+    }`;
+    const result = await (0, jsonRequest_1.jsonRequestData)({
+        messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `EXISTING DIRECTORY STRUCTURE:\n${projectContext}\n\nUSER REQUEST: ${prompt}` }
+        ],
+        schema: jsonSchemas_1.planEnvelopeSchema,
+        temperature: 0.1
     });
-    const data = await response.json();
-    if (data.error) {
-        throw new Error(`LLM API Error: ${data.error.message}`);
-    }
-    if (!data.choices || data.choices.length === 0) {
-        throw new Error("Invalid response from LLM API.");
-    }
-    const rawText = data.choices[0].message.content;
-    const jsonStart = rawText.indexOf('{');
-    const jsonEnd = rawText.lastIndexOf('}');
-    let explanation = "Here is the implementation plan:";
-    let jsonStr = '{"folderStructure":[], "implementationTasks":[]}';
-    if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd >= jsonStart) {
-        const textBefore = rawText.substring(0, jsonStart).replace(/```json/g, '').replace(/```/g, '').trim();
-        if (textBefore) {
-            explanation = textBefore;
-        }
-        jsonStr = rawText.substring(jsonStart, jsonEnd + 1);
-    }
-    else {
-        explanation = rawText;
-    }
-    return { explanation, plan: safeParseJSON(jsonStr) };
+    return {
+        explanation: result.explanation || "Here is the implementation plan:",
+        plan: result.plan || { implementationTasks: [] }
+    };
 }
 async function inferTargetFile(taskDescription, projectContext, lastActiveFile) {
     const contextHint = lastActiveFile ? `CONTEXT: You just modified "${lastActiveFile}". Unless explicitly mentioned, MUST continue working on "${lastActiveFile}".` : "";
@@ -539,29 +509,35 @@ async function inferTargetFile(taskDescription, projectContext, lastActiveFile) 
     Decide exactly ONE file that needs to be reviewed, modified, or created.
     ${contextHint}
     Return ONLY valid JSON: { "filepath": "src/file.ts", "reasoning": "..." }`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Directory:\n${projectContext}\n\nTask: ${taskDescription}` }],
-            temperature: 0.1,
-            response_format: { type: "json_object" }
-        })
+    return (0, jsonRequest_1.jsonRequestData)({
+        messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Directory:\n${projectContext}\n\nTask: ${taskDescription}` }
+        ],
+        schema: jsonSchemas_1.targetFileSchema,
+        temperature: 0.1
     });
-    const data = await response.json();
-    if (data.error) {
-        throw new Error(`API Error: ${data.error.message}`);
-    }
-    let content = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    return safeParseJSON(content);
 }
 async function runAgenticExploration(taskDescription, projectContext, // 🚀 NEW: Accept the pre-fetched AST
 workspaceRoot, statusCallback, abortSignal) {
-    const { endpoint, model, apiKey, enableTools } = await getLLMConfig();
-    if (!enableTools)
-        return "";
+    // Component 2A migration: switched from inline resilientFetch + manual
+    // tool_calls parsing to provider.chatCompletion.
+    // Component 2B-3b migration: read_file / list_directory now dispatch
+    // through the typed registry (dispatchWithEvents) instead of the
+    // legacy executeAgentTool shim. The grep_search / find_file inline
+    // implementations stay inline — they have specific hallucination
+    // guards and project-tuned exclude patterns that the generic registry
+    // tools don't carry. Eventually those could move to registered tools
+    // but it's not a 2B-3 concern.
+    //
+    // The original code also set `response_format: { type: "json_object" }`
+    // which was wrong — the model produces tool_calls and READY_TO_CODE
+    // text, not JSON. Removed (same fix pattern as Component 1's
+    // generateDesign / generateTasks fixes).
+    //
+    // The `enableTools` short-circuit is removed: the Provider's
+    // capability probe handles tool-incapable endpoints transparently.
+    const provider = await (0, llm_1.getProvider)();
     const explorePrompt = `You are the Explorer Agent. Your role is EXCLUSIVELY to search and analyze the codebase dynamically using tools.
     
      CRITICAL RULES 
@@ -573,9 +549,9 @@ workspaceRoot, statusCallback, abortSignal) {
     
     --- DIRECTORY TREE ---
     ${projectContext}`;
-    let messages = [
-        { role: "system", content: explorePrompt },
-        { role: "user", content: `Task: ${taskDescription}\nYou already know the file paths. Call 'read_file' on the targets immediately in a single batch, then exit with READY_TO_CODE!` }
+    const messages = [
+        { role: 'system', content: explorePrompt },
+        { role: 'user', content: `Task: ${taskDescription}\nYou already know the file paths. Call 'read_file' on the targets immediately in a single batch, then exit with READY_TO_CODE!` }
     ];
     //  Inject the Claude-Style Dynamic Grep & Find Tools
     const dynamicTools = [
@@ -601,14 +577,14 @@ workspaceRoot, statusCallback, abortSignal) {
     statusCallback('analyze', 'Initializing Dynamic Search');
     for (let step = 0; step < 2; step++) {
         try {
-            const response = await resilientFetch(endpoint, {
-                method: 'POST',
-                headers: authHeaders(apiKey),
-                body: JSON.stringify({ model: model, messages: messages, tools: dynamicTools, tool_choice: "auto", temperature: 0.1, response_format: { type: "json_object" } }),
-                signal: abortSignal
-            });
-            const data = await response.json();
-            const aiMessage = data.choices[0].message;
+            const chatOptions = {
+                tools: dynamicTools,
+                toolChoice: 'auto',
+                temperature: 0.1
+            };
+            if (abortSignal)
+                chatOptions.signal = abortSignal;
+            const aiMessage = await provider.chatCompletion(messages, chatOptions);
             messages.push(aiMessage);
             if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) {
                 for (const toolCall of aiMessage.tool_calls) {
@@ -639,9 +615,10 @@ workspaceRoot, statusCallback, abortSignal) {
                                         const content = new TextDecoder('utf8').decode(fileData);
                                         const lines = content.split('\n');
                                         for (let i = 0; i < lines.length; i++) {
-                                            if (regex.test(lines[i])) {
+                                            const line = lines[i];
+                                            if (line !== undefined && regex.test(line)) {
                                                 const relativePath = vscode.workspace.asRelativePath(file);
-                                                toolResult += `${relativePath}:${i + 1}: ${lines[i].trim().substring(0, 100)}\n`;
+                                                toolResult += `${relativePath}:${i + 1}: ${line.trim().substring(0, 100)}\n`;
                                                 matchCount++;
                                                 if (matchCount >= 30)
                                                     return;
@@ -677,7 +654,13 @@ workspaceRoot, statusCallback, abortSignal) {
                             const uri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), funcArgs.filepath);
                             await vscode.workspace.fs.stat(uri);
                             statusCallback('read', 'Read file(s)', funcArgs.filepath);
-                            toolResult = await (0, agentTools_1.executeAgentTool)(toolCall, workspaceRoot);
+                            // Component 2B-3b: dispatchWithEvents replaces the
+                            // legacy executeAgentTool shim. No emitter wired
+                            // (this code path is exploration before user-visible
+                            // task work begins). source='planner' tags events
+                            // for any future emitter the caller might attach.
+                            const dispatchResult = await (0, toolDispatchWithEvents_1.dispatchWithEvents)(toolCall, { workspaceRoot }, { source: 'planner', preDispatchHook: securityHook_1.allowAllHook });
+                            toolResult = dispatchResult.llmContent;
                         }
                         catch (e) {
                             toolResult = `ERROR: File '${funcArgs.filepath}' does not exist. STOP guessing paths. Use 'find_file' to locate it.`;
@@ -689,17 +672,23 @@ workspaceRoot, statusCallback, abortSignal) {
                             const uri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), funcArgs.path || "");
                             await vscode.workspace.fs.stat(uri);
                             statusCallback('search', 'List Directory', funcArgs.path);
-                            toolResult = await (0, agentTools_1.executeAgentTool)(toolCall, workspaceRoot);
+                            const dispatchResult = await (0, toolDispatchWithEvents_1.dispatchWithEvents)(toolCall, { workspaceRoot }, { source: 'planner', preDispatchHook: securityHook_1.allowAllHook });
+                            toolResult = dispatchResult.llmContent;
                         }
                         catch (e) {
                             toolResult = `ERROR: Directory '${funcArgs.path}' does not exist. Look at the DIRECTORY TREE.`;
                         }
                     }
                     else {
-                        toolResult = await (0, agentTools_1.executeAgentTool)(toolCall, workspaceRoot);
+                        // Fallback for any tool not specifically handled above
+                        // (shouldn't fire today since the tool list is fixed,
+                        // but kept as a safety net). Same dispatchWithEvents
+                        // path as the explicit cases above.
+                        const dispatchResult = await (0, toolDispatchWithEvents_1.dispatchWithEvents)(toolCall, { workspaceRoot }, { source: 'planner', preDispatchHook: securityHook_1.allowAllHook });
+                        toolResult = dispatchResult.llmContent;
                     }
                     gatheredContext += `\n--- Tool Result: ${funcName}(${JSON.stringify(funcArgs)}) ---\n${toolResult}\n`;
-                    messages.push({ role: "tool", tool_call_id: toolCall.id, content: toolResult });
+                    messages.push({ role: 'tool', tool_call_id: toolCall.id, content: toolResult });
                 }
             }
             else {
@@ -737,254 +726,44 @@ async function generateTests(fileName, fileContent, projectRules = "") {
        - \`validateSync()\` can return null. ALWAYS use optional chaining (e.g., \`expect(err?.errors?.username).toBeDefined();\`) to avoid TS18047 "possibly null" errors.
        - NEVER access deep Mongoose properties like \`.properties.message\` on errors. Just assert the field error exists: \`expect(err?.errors?.email).toBeDefined();\`.
     
-    Return valid JSON: { "installCommand": "...", "testCommand": "...", "filepath": "...", "code": "..." }`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Target: ${fileName}\n\n\`\`\`\n${fileContent}\n\`\`\`` }],
-            temperature: 0.1,
-            response_format: { type: "json_object" }
-        })
+    Return valid JSON matching: { "language": "...", "framework": "...", "testFilePath": "...", "testCode": "...", "setupCommands": ["..."] }`;
+    return (0, jsonRequest_1.jsonRequestData)({
+        messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Target: ${fileName}\n\n\`\`\`\n${fileContent}\n\`\`\`` }
+        ],
+        schema: jsonSchemas_1.testSetupSchema,
+        temperature: 0.1
     });
-    const data = await response.json();
-    let jsonStr = data.choices[0].message.content;
-    // 1. Strip markdown code blocks if the LLM used them
-    jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```/g, '').trim();
-    // 2. Surgically extract ONLY the JSON object using Regex
-    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-        throw new Error("Failed to extract JSON object from the AI response.");
-    }
-    // 3. Pass the strictly extracted JSON to our Enterprise Healer
-    return safeParseJSON(jsonMatch[0]);
 }
 async function healError(errorOutput, sourceFilePath, sourceCode, testFilePath, testCode) {
     const systemPrompt = `You are an expert debugger. Determine if the error is in the source code OR the test code. Fix ONLY the file causing the error.
-    Respond with valid XML: <filepath>path/to/file</filepath> <code>...</code>`;
+    Return JSON: { "filepath": "<path>", "code": "<full file content>" }
+    The "code" field must contain the COMPLETE file content, not a diff. Use \\n for line breaks inside the JSON string.`;
     const userPrompt = `Source: ${sourceFilePath}\n\`\`\`\n${sourceCode}\n\`\`\`\nTest: ${testFilePath}\n\`\`\`\n${testCode}\n\`\`\`\nError:\n\`\`\`\n${errorOutput}\n\`\`\``;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1, response_format: { type: "json_object" } })
+    const result = await (0, jsonRequest_1.jsonRequestData)({
+        messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt }
+        ],
+        schema: jsonSchemas_1.healErrorSchema,
+        temperature: 0.1
     });
-    const data = await response.json();
-    let content = data.choices[0].message.content;
-    const filepathMatch = content.match(/<filepath>(.*?)<\/filepath>/s);
-    const codeMatch = content.match(/<code>(.*?)<\/code>/s);
-    if (!filepathMatch || !codeMatch) {
-        throw new Error("Auto-healer failed to return XML tags.");
-    }
-    let extractedCode = decodeHTMLEntities(codeMatch[1].trim()).replace(/^```[\w]*\n/, '').replace(/\n```$/, '').trim();
-    return { filepath: filepathMatch[1].trim(), code: extractedCode };
+    // Strip markdown fences the model may have wrapped around the code
+    const extractedCode = decodeHTMLEntities(result.code.trim()).replace(/^```[\w]*\n/, '').replace(/\n```$/, '').trim();
+    return { filepath: result.filepath.trim(), code: extractedCode };
 }
-async function generateAtomicEdits(tasks, projectContext, codingStyle) {
-    const systemPrompt = `Return a JSON array of edits: [{ "filepath": "...", "code": "...", "action": "replace" }]`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Tasks: ${tasks.join(', ')}\n\nContext:\n${projectContext}` }],
-            temperature: 0.1,
-            response_format: { type: "json_object" }
-        })
+async function generateAtomicEdits(tasks, projectContext, _codingStyle) {
+    const systemPrompt = `Return JSON: { "edits": [{ "filepath": "...", "code": "...", "action": "replace" }] }`;
+    const result = await (0, jsonRequest_1.jsonRequestData)({
+        messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: `Tasks: ${tasks.join(', ')}\n\nContext:\n${projectContext}` }
+        ],
+        schema: jsonSchemas_1.atomicEditsSchema,
+        temperature: 0.1
     });
-    const data = await response.json();
-    const content = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    return safeParseJSON(content);
-}
-async function streamCoder(taskDescription, availableFiles = [], currentFileContent = "", codingStyle = "precise", chatHistory = [], callbacks, abortSignal, agentMode = 'creator' //  THE SPLIT
-) {
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    let personaBrain = "";
-    if (agentMode === 'creator') {
-        personaBrain = `You are the Lead Software Engineer. Your job is to implement the requested feature or bug fix perfectly on the first try.`;
-    }
-    else if (agentMode === 'healer') {
-        personaBrain = `You are the Build-Healer. The previous code crashed the compiler. Your ONLY job is to read the compiler errors and fix the syntax. DO NOT add new features. DO NOT refactor unrelated logic.`;
-    }
-    else if (agentMode === 'rewriter') {
-        personaBrain = `You are the Redemption Agent. Your previous implementation was REJECTED by the Principal Engineer. You must read their critique and fix the logic completely. Do not repeat your previous mistakes.`;
-    }
-    const lineCount = agentMode === 'rewriter' ? 0 : (currentFileContent.trim() ? currentFileContent.split('\n').length : 0);
-    const forceReplace = lineCount === 0;
-    const chunkingRules = !forceReplace
-        ? `PRECISE EDITING PROTOCOL:
-    This file already exists. You MUST NOT use 'replace'. 
-    Use <action>insert_before</action> to add new routes/logic. Target the EXACT LINE of code where the new code should be inserted above.
-    Output ONLY the specific new code to be inserted.`
-        : `<action> rules: 
-    - 'replace': Overwrites the file completely from scratch. You MUST output the ENTIRE file content.`;
-    const systemPrompt = `${personaBrain}
-    
-    CRITICAL RULE: ATOMIC SINGLE-FILE MODE. You are executing exactly ONE atomic task.
-    
-     MULTI-FILE EDITING IS STRICTLY FORBIDDEN 
-    Output exactly ONE block of code.
-    
-    ZERO CONVERSATIONAL FILLER ALLOWED. Go straight to the point.
-    
-    🛠️ ENTERPRISE ENGINEERING STANDARDS 🛠️
-    1. NO UNNECESSARY ADDITIONS: Don't add features, refactor code, or make "improvements" beyond what was asked.
-    2. NO PREMATURE ABSTRACTIONS: Don't design for hypothetical future requirements.
-    3. NO UNNECESSARY ERROR HANDLING: Don't add fallbacks for scenarios that can't happen.
-    4. NO COMPATIBILITY HACKS: Delete unused code completely.
-    5. THE "NO STUBS" PROTOCOL: NEVER use placeholders like "// TODO". Write complete, production-ready logic.
-    6. UNIVERSAL LANGUAGE RULES: Match the existing module system.
-    
-    ${chunkingRules}
-    
-    🛑 STRICT OUTPUT TEMPLATE 🛑
-    You are a machine communicating with a rigid parser. You MUST output EXACTLY this sequence. 
-    NEVER skip a tag. If you break this formatting, the system will crash.
-    
-    EXAMPLE EXACT OUTPUT:
-    <plan>1 sentence explaining what you will do.</plan>
-    <filepath>src/exact/path/to/file.ext</filepath>
-    <action>${forceReplace ? 'replace' : 'insert_before'}</action>
-    ${!forceReplace ? '<target>line</target>' : ''}<self_critique>Briefly critique your own plan. Did you follow the NO STUBS rule? Did you match the project's existing style?</self_critique>
-    \`\`\`typescript
-    // YOUR CODE GOES HERE. TRIPLE BACKTICKS ARE MANDATORY!
-    \`\`\`
-    <command></command>`;
-    const userPrompt = currentFileContent.trim() ? `Task: ${taskDescription}\n\nEXISTING FILE:\n\`\`\`\n${currentFileContent}\n\`\`\`` : `Task: ${taskDescription}`;
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({ model: model, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }], temperature: 0.1, stream: true, response_format: { type: "json_object" } }),
-        signal: abortSignal
-    });
-    if (!response.body) {
-        throw new Error("No readable stream available.");
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-    let isStreamingCode = false;
-    let isReasoningCompleted = false;
-    let isFirstCodeChunk = false;
-    let hasFinishedCodeBlock = false;
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done)
-            break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-                try {
-                    const dataStr = line.substring(6).trim();
-                    if (!dataStr)
-                        continue;
-                    const data = JSON.parse(dataStr);
-                    const token = data.choices[0]?.delta?.content || "";
-                    buffer += token;
-                    //  1. GLOBAL COMMAND EXTRACTOR (Routes purely to onCommand)
-                    const cmdRegex = /<command>\s*(.*?)\s*<\/command>/is;
-                    let cmdMatch;
-                    while ((cmdMatch = buffer.match(cmdRegex)) !== null) {
-                        if (callbacks.onCommand) {
-                            await callbacks.onCommand(cmdMatch[1].trim());
-                        }
-                        buffer = buffer.replace(cmdMatch[0], '');
-                    }
-                    if (!isStreamingCode) {
-                        // Stream the AI's internal thoughts to the UI, stripping out the XML tags
-                        if (callbacks.onReasoning) {
-                            let cleanToken = token.replace(/<\/?(plan|filepath|action|target|command|self_critique)[^>]*>/gi, '');
-                            if (cleanToken) {
-                                await callbacks.onReasoning(cleanToken);
-                            }
-                        }
-                        //  THE STRICT XML TRANSITION FIX
-                        const fpMatch = buffer.match(/<filepath>\s*(.*?)\s*<\/filepath>/i);
-                        const acMatch = buffer.match(/<action>\s*(.*?)\s*<\/action>/i);
-                        const targetMatch = buffer.match(/<target>\s*(.*?)\s*<\/target>/i);
-                        // 🛑 NO MORE GUESSWORK. WE STRICTLY WAIT FOR THE TRIPLE BACKTICKS!
-                        const codeStartRegex = /```[a-zA-Z]*\n|<code>/i;
-                        const codeStartMatch = buffer.match(codeStartRegex);
-                        if (fpMatch && acMatch && codeStartMatch) {
-                            const filepath = fpMatch[1].trim();
-                            const action = acMatch[1].trim().toLowerCase();
-                            const target = targetMatch ? targetMatch[1].trim() : undefined;
-                            await callbacks.onSetup(action, filepath, target);
-                            // Slice the buffer exactly after the backticks finish
-                            const cutIndex = codeStartMatch.index + codeStartMatch[0].length;
-                            buffer = buffer.substring(cutIndex);
-                            isStreamingCode = true;
-                            isFirstCodeChunk = true;
-                        }
-                    }
-                    else {
-                        if (isFirstCodeChunk) {
-                            if (buffer.length < 30 && !buffer.includes('\n')) {
-                                continue;
-                            }
-                            // Strip standard markdown backticks
-                            buffer = buffer.replace(/^\s*```[a-z]*\s*\n?/i, '');
-                            // 🔥 POLYGLOT FIX 1: Strip raw language words for ALL major languages
-                            buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json|python|py|go|rust|rs|java|c|cpp|php|ruby)\s*\n?/i, '');
-                            // STRIP MALFORMED TAGS (e.g., </javascript)
-                            buffer = buffer.replace(/^\s*<\/[a-z]+>\s*\n?/i, '');
-                            // 🔥 POLYGLOT FIX 2: Strip language words colliding with code syntax (including def, func, fn)
-                            buffer = buffer.replace(/^\s*(typescript|javascript|tsx|jsx|ts|js|html|css|json|python|py|go|rust|rs|java|c|cpp|php|ruby)\s+(import |const |let |var |export |class |function |router|def |func |fn |struct )/i, '$2');
-                            isFirstCodeChunk = false;
-                        }
-                        const codeEndMatch = buffer.match(/```|<\/code>/i);
-                        const emergencyCommandMatch = buffer.match(/<command/i);
-                        if (codeEndMatch || emergencyCommandMatch) {
-                            const cutIndex = codeEndMatch ? codeEndMatch.index : emergencyCommandMatch.index;
-                            const finalCodeChunk = buffer.substring(0, cutIndex);
-                            if (finalCodeChunk && !hasFinishedCodeBlock) {
-                                await callbacks.onToken(finalCodeChunk);
-                            }
-                            if (callbacks.onFileComplete) {
-                                await callbacks.onFileComplete();
-                            }
-                            isStreamingCode = false;
-                            hasFinishedCodeBlock = true;
-                            buffer = buffer.substring(cutIndex + (codeEndMatch ? codeEndMatch[0].length : 0));
-                        }
-                        else {
-                            if (!hasFinishedCodeBlock) {
-                                const cmdStartIdx = buffer.lastIndexOf('<command');
-                                let safeTailLength = 15;
-                                if (cmdStartIdx !== -1) {
-                                    safeTailLength = Math.max(15, buffer.length - cmdStartIdx);
-                                }
-                                if (buffer.length > safeTailLength) {
-                                    const emitChunk = buffer.substring(0, buffer.length - safeTailLength);
-                                    await callbacks.onToken(emitChunk);
-                                    buffer = buffer.substring(buffer.length - safeTailLength);
-                                }
-                            }
-                        }
-                    }
-                }
-                catch (e) { }
-            }
-        }
-    }
-    if (buffer.length > 0) {
-        const cmdRegex = /<command>\s*(.*?)\s*<\/command>/is;
-        let cmdMatch;
-        while ((cmdMatch = buffer.match(cmdRegex)) !== null) {
-            if (callbacks.onCommand)
-                await callbacks.onCommand(cmdMatch[1].trim());
-            buffer = buffer.replace(cmdMatch[0], '');
-        }
-        if (isStreamingCode) {
-            const cleanEnd = buffer.replace(/```$/, '').replace(/<\/code>$/, '');
-            await callbacks.onToken(cleanEnd);
-            if (callbacks.onFileComplete)
-                await callbacks.onFileComplete();
-        }
-    }
+    return result.edits;
 }
 async function getAvailableModels() {
     const config = vscode.workspace.getConfiguration('nexuscode');
@@ -1037,69 +816,22 @@ Example:
 ## API Specs
 (Use standard Markdown lists or tables to describe routes. DO NOT use <request> or <param> XML tags.)
 </api_routes>`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Requirements:\n${requirements}` }],
-            temperature: 0.2,
-            stream: true,
-            response_format: { type: "json_object" }
-        }),
-        signal: abortSignal //  NEW: Wire the kill switch
-    });
-    if (!response.ok)
-        throw new Error(`HTTP ${response.status}`);
-    if (!response.body)
-        throw new Error("No readable stream.");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let fullDesign = "";
-    let networkBuffer = "";
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done)
-            break;
-        networkBuffer += decoder.decode(value, { stream: true });
-        const packets = networkBuffer.split(/\r?\n\r?\n/);
-        networkBuffer = packets.pop() || "";
-        for (const packet of packets) {
-            const lines = packet.split(/\r?\n/);
-            for (const line of lines) {
-                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-                    try {
-                        const dataStr = line.substring(6).trim();
-                        if (!dataStr)
-                            continue;
-                        const data = JSON.parse(dataStr);
-                        if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
-                            fullDesign += data.choices[0].delta.content;
-                        }
-                    }
-                    catch (e) { }
-                }
-            }
-        }
-    }
-    if (networkBuffer) {
-        const lines = networkBuffer.split(/\r?\n/);
-        for (const line of lines) {
-            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-                try {
-                    const dataStr = line.substring(6).trim();
-                    if (dataStr) {
-                        const data = JSON.parse(dataStr);
-                        if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
-                            fullDesign += data.choices[0].delta.content;
-                        }
-                    }
-                }
-                catch (e) { }
-            }
-        }
-    }
+    // Migrated to Provider abstraction (Component 1, Session 2). Note:
+    // the original code set `response_format: { type: "json_object" }`
+    // despite the system prompt asking for markdown wrapped in XML tags
+    // — same bug pattern as streamChat in Session 1. The Provider's
+    // streamCompletion does not set this; the model is now free to
+    // produce the markdown the prompt asks for.
+    const provider = await (0, llm_1.getProvider)();
+    const completionOptions = {
+        temperature: 0.2
+    };
+    if (abortSignal)
+        completionOptions.signal = abortSignal;
+    const fullDesign = await provider.completion([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Requirements:\n${requirements}` }
+    ], completionOptions);
     return fullDesign.trim();
 }
 async function generateTasks(requirements, design, existingStructure, abortSignal) {
@@ -1128,97 +860,41 @@ async function generateTasks(requirements, design, existingStructure, abortSigna
         }
       ]
     }`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
-            ],
-            temperature: 0.1,
-            stream: true,
-            response_format: { type: "json_object" }
-        }),
-        signal: abortSignal
-    });
-    if (!response.ok)
-        throw new Error(`HTTP ${response.status}`);
-    if (!response.body)
-        throw new Error("No readable stream.");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let fullContent = "";
-    let networkBuffer = "";
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done)
-            break;
-        networkBuffer += decoder.decode(value, { stream: true });
-        const packets = networkBuffer.split(/\r?\n\r?\n/);
-        networkBuffer = packets.pop() || "";
-        for (const packet of packets) {
-            const lines = packet.split(/\r?\n/);
-            for (const line of lines) {
-                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-                    try {
-                        const dataStr = line.substring(6).trim();
-                        if (!dataStr)
-                            continue;
-                        const data = JSON.parse(dataStr);
-                        if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
-                            fullContent += data.choices[0].delta.content;
-                        }
-                    }
-                    catch (e) { }
-                }
-            }
-        }
-    }
-    if (networkBuffer) {
-        const lines = networkBuffer.split(/\r?\n/);
-        for (const line of lines) {
-            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-                try {
-                    const dataStr = line.substring(6).trim();
-                    if (dataStr) {
-                        const data = JSON.parse(dataStr);
-                        if (data.choices && data.choices[0].delta && data.choices[0].delta.content) {
-                            fullContent += data.choices[0].delta.content;
-                        }
-                    }
-                }
-                catch (e) { }
-            }
-        }
-    }
-    const jsonStart = fullContent.indexOf('{');
-    const jsonEnd = fullContent.lastIndexOf('}');
-    if (jsonStart === -1 || jsonEnd === -1) {
-        throw new Error("Failed to parse JSON plan.");
-    }
-    const parsedPlan = safeParseJSON(fullContent.substring(jsonStart, jsonEnd + 1));
-    if (parsedPlan && Array.isArray(parsedPlan.implementationTasks)) {
-        parsedPlan.implementationTasks = parsedPlan.implementationTasks.map((task) => {
-            if (typeof task === 'string') {
-                return {
-                    step: task,
-                    file: "unknown",
-                    detailedInstructions: task,
-                    relatedRequirement: "General",
-                    dependencies: [],
-                    verificationRules: []
-                };
-            }
-            return task;
-        });
-    }
+    // HOTFIX (post-Component 1 Session 2): regression where the Master
+    // Implementation Plan rendered with empty task titles and file paths.
+    //
+    // Root cause: Session 2 dropped `response_format: { type: "json_object" }`
+    // from this call, expecting `safeParseJSON` to tolerate any model output.
+    // It did parse successfully — but the model, freed from JSON-mode
+    // constraints, drifted to producing JSON whose `step` and `file` fields
+    // came back as empty strings (likely the model wrapped its real output
+    // in an unexpected envelope or flattened the wrong path).
+    //
+    // The fix: route through `provider.jsonCompletion(messages, schema)` which
+    // uses `response_format: { type: "json_schema" }` mode (stricter than
+    // json_object). The endpoint constrains decode-time output so the field
+    // names and types literally match the schema. This is the long-term
+    // correct shape — `jsonCompletion` is the Provider method designed for
+    // structured-output use cases. No part of this is a temporary band-aid.
+    //
+    // The old flow (provider.completion + manual JSON extraction +
+    // safeParseJSON) is GONE — it's not needed when the schema is enforced
+    // at decode time. Same with the special-case handling for tasks that
+    // came back as plain strings (the schema rules that out — items must
+    // be objects with `step`, `file`, `detailedInstructions`).
+    const provider = await (0, llm_1.getProvider)();
+    const completionOptions = {
+        temperature: 0.1
+    };
+    if (abortSignal)
+        completionOptions.signal = abortSignal;
+    const parsedPlan = await provider.jsonCompletion([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
+    ], jsonSchemas_1.tasksPlanSchema, completionOptions);
     return parsedPlan;
 }
 async function verifyAgainstSpec(techSpec, taskQuery, fileContent) {
-    const { endpoint, model, apiKey } = await getLLMConfig();
     // 🚀 THE FIX: Titanium-clad QA Prompting
     const systemPrompt = `You are an elite, ruthlessly objective Enterprise QA Verifier.
 Your ONLY job is to verify if the provided code satisfies the Technical Spec.
@@ -1247,35 +923,18 @@ ${fileContent}
 
 Evaluate the code and return the JSON.`;
     try {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: userPrompt }
-                ],
-                temperature: 0.0,
-                response_format: { type: "json_object" }
-            })
+        const result = await (0, jsonRequest_1.jsonRequest)({
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ],
+            schema: jsonSchemas_1.verificationSchema,
+            temperature: 0.0
         });
-        const data = await response.json();
-        const content = data.choices[0]?.message?.content || "{}";
-        try {
-            const parsed = JSON.parse(content);
-            return { ...parsed, usage: data?.usage }; // 🚀 Inject usage
-        }
-        catch (e) {
-            // Fallback regex parsing if the LLM wraps it in markdown
-            const match = content.match(/\{[\s\S]*\}/);
-            if (match)
-                return { ...JSON.parse(match[0]), usage: data?.usage }; // 🚀 Inject usage
-            throw new Error("Failed to parse QA JSON.");
-        }
+        return { ...result.data, usage: result.usage };
     }
     catch (error) {
-        return { verified: false, reasoning: `System QA Error: ${error.message}` };
+        return { verified: false, reasoning: `System QA Error: ${(0, errors_1.errorMessage)(error)}` };
     }
 }
 //  ENHANCEMENT A: The Living PRD QA Agent
@@ -1298,30 +957,19 @@ async function updateLivingPRD(prdContext, taskDescription, filepath, newCode) {
     }
     
     CRITICAL: If the code does NOT fully satisfy a criteria, do not include it. Return an empty array [] if nothing was fully completed.`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: `TASK:\n${taskDescription}\n\nFILE: ${filepath}\n\nNEW CODE:\n\`\`\`\n${newCode.substring(0, 10000)}\n\`\`\`\n\nCURRENT PRD:\n${prdContext}` }
-                ],
-                temperature: 0.1,
-                response_format: { type: "json_object" }
-            })
+        const result = await (0, jsonRequest_1.jsonRequestData)({
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `TASK:\n${taskDescription}\n\nFILE: ${filepath}\n\nNEW CODE:\n\`\`\`\n${newCode.substring(0, 10000)}\n\`\`\`\n\nCURRENT PRD:\n${prdContext}` }
+            ],
+            schema: jsonSchemas_1.livingPrdUpdateSchema,
+            temperature: 0.1
         });
-        const data = await response.json();
-        const content = data.choices[0].message.content;
-        const jsonStart = content.indexOf('{');
-        const jsonEnd = content.lastIndexOf('}');
-        const parsed = safeParseJSON(content.substring(jsonStart, jsonEnd + 1));
-        return parsed.replacements || [];
+        return result.replacements || [];
     }
     catch (e) {
-        console.warn("[DEBUG] QA Agent failed to parse PRD updates.");
+        logger_1.log.warn("[DEBUG] QA Agent failed to parse PRD updates.");
         return [];
     }
 }
@@ -1343,68 +991,48 @@ async function reviewCodeCompleteness(taskDescription, prdContext, generatedCode
         "critique": "Line 42 has a // TODO comment. You failed to implement the Stripe API call. Rewrite the entire file and implement the API call."
     }`;
     const userPrompt = `TASK:\n${taskDescription}\n\nPRD CONTEXT:\n${prdContext}\n\nGENERATED CODE TO REVIEW:\n\`\`\`\n${generatedCode}\n\`\`\``;
-    const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-                temperature: 0.1,
-                response_format: { type: "json_object" }
-            })
+        return await (0, jsonRequest_1.jsonRequestData)({
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ],
+            schema: jsonSchemas_1.completenessReviewSchema,
+            temperature: 0.1
         });
-        const data = await response.json();
-        const content = data.choices[0].message.content;
-        const jsonStart = content.indexOf('{');
-        const jsonEnd = content.lastIndexOf('}');
-        return safeParseJSON(content.substring(jsonStart, jsonEnd + 1));
     }
     catch (e) {
-        console.warn("[DEBUG] Completeness Reviewer failed, bypassing to avoid blockage.");
+        logger_1.log.warn("[DEBUG] Completeness Reviewer failed, bypassing to avoid blockage.");
         return { isComplete: true, critique: "" }; // Bypass if the reviewer itself crashes
     }
 }
 //  STEP 4: The Global Build-Healer Agent
-async function healGlobalBuild(buildErrors, filesContext, codingStyle) {
+async function healGlobalBuild(buildErrors, filesContext, _codingStyle) {
     const systemPrompt = `You are an elite Principal DevOps Engineer. The global project build just failed.
     You will be provided with the raw compiler error log and the contents of the files mentioned in the errors.
     
     Your job is to fix the cross-file mismatches, phantom imports, and type errors.
     
-    Return ONLY a JSON array of atomic edits matching this schema:
-    [
-        { 
-            "filepath": "src/routes/auth.ts", 
-            "code": "import { User } from '../models/user';\\n...", 
-            "action": "replace" 
-        }
-    ]
-    
+    Return JSON: { "edits": [ { "filepath": "src/routes/auth.ts", "code": "...", "action": "replace" } ] }
+
      CRITICAL RULES:
     1. Only fix the exact lines causing the compilation errors.
     2. Output the FULL file content for the "replace" action so we don't lose any existing logic.
-    3. Do NOT output markdown outside of the JSON array.`;
+    3. Do NOT output markdown outside of the JSON.`;
     const userPrompt = `COMPILER ERRORS:\n\`\`\`\n${buildErrors}\n\`\`\`\n\nBROKEN FILES CONTEXT:\n${filesContext}`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-                temperature: 0.1,
-                response_format: { type: "json_object" }
-            })
+        const result = await (0, jsonRequest_1.jsonRequestData)({
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ],
+            schema: jsonSchemas_1.atomicEditsSchema,
+            temperature: 0.1
         });
-        const data = await response.json();
-        const content = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        return safeParseJSON(content);
+        return result.edits || [];
     }
     catch (e) {
-        console.error("[DEBUG] Build-Healer failed to parse response.");
+        logger_1.log.error("[DEBUG] Build-Healer failed to parse response.");
         return [];
     }
 }
@@ -1412,31 +1040,26 @@ async function healGlobalBuild(buildErrors, filesContext, codingStyle) {
 async function askSecurityMonitor(command) {
     const systemPrompt = `You are an elite Security Monitor for an autonomous coding agent.
     Your ONLY job is to evaluate bash/terminal commands before they are executed.
-    
+
     THREAT MODEL:
     - Irreversible local destruction (e.g., rm -rf /, wiping databases).
     - Credential exfiltration (e.g., curl sending ~/.aws/credentials to a random IP).
     - Blind Git Applies (e.g., git push --force without review).
-    
+
     Standard dev commands (npm install, mkdir, touch, tsc, git status) are SAFE.
-    
-    If the command is SAFE, reply ONLY with: ALLOW
-    If the command violates the threat model, reply ONLY with: BLOCK`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
+
+    Return JSON: { "allowed": true|false, "reason": "<one-sentence justification>" }
+    Set "allowed" to false to BLOCK the command, true to ALLOW.`;
     try {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Command to evaluate: ${command}` }],
-                temperature: 0.0,
-                response_format: { type: "json_object" }
-            })
+        const result = await (0, jsonRequest_1.jsonRequestData)({
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `Command to evaluate: ${command}` }
+            ],
+            schema: jsonSchemas_1.securityDecisionSchema,
+            temperature: 0.0
         });
-        const data = await response.json();
-        const decision = data.choices[0].message.content.trim().toUpperCase();
-        return decision.includes("BLOCK"); // Returns true if it should be blocked
+        return !result.allowed; // returns true if it should be blocked
     }
     catch (e) {
         return true; // Fail-safe: If the security monitor crashes, BLOCK the command!
@@ -1449,21 +1072,16 @@ async function generateAdversarialTest(task, filepath, code) {
     Do NOT just test the "happy path". Test edge cases, null inputs, and boundaries.
     
     Return ONLY a raw JavaScript script that can be executed via 'node'. 
-    If the tests pass, the script MUST console.log("VERIFICATION_PASSED").
+    If the tests pass, the script MUST log.info("VERIFICATION_PASSED").
     If they fail, it MUST throw an Error.`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Task: ${task}\nFile: ${filepath}\nCode:\n\`\`\`\n${code}\n\`\`\`` }],
-            temperature: 0.1,
-            response_format: { type: "json_object" }
-        })
-    });
-    const data = await response.json();
-    let script = data.choices[0].message.content;
+    // Migrated to Provider abstraction (Component 1, Session 2).
+    // Returns a JavaScript script, not JSON — uses provider.completion()
+    // and the existing markdown-fence stripper.
+    const provider = await (0, llm_1.getProvider)();
+    const script = await provider.completion([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Task: ${task}\nFile: ${filepath}\nCode:\n\`\`\`\n${code}\n\`\`\`` }
+    ], { temperature: 0.1 });
     return script.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '').trim();
 }
 //  PHASE 2: THE COMPACTOR DAEMON
@@ -1482,22 +1100,14 @@ async function compactConversationHistory(messages) {
         <important_discoveries>Hard lessons, bugs caught, or architectural rules discovered</important_discoveries>
     </memory_state>`;
     const formattedHistory = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
-    const { endpoint, model, apiKey } = await getLLMConfig();
-    const response = await resilientFetch(endpoint, {
-        method: 'POST',
-        headers: authHeaders(apiKey),
-        body: JSON.stringify({
-            model: model,
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `CONVERSATION TO COMPACT:\n\`\`\`\n${formattedHistory}\n\`\`\`` }
-            ],
-            temperature: 0.1,
-            response_format: { type: "json_object" }
-        })
-    });
-    const data = await response.json();
-    return data.choices[0].message.content.trim();
+    // Migrated to Provider abstraction (Component 1, Session 2).
+    // Returns XML <memory_state>, not JSON — uses provider.completion().
+    const provider = await (0, llm_1.getProvider)();
+    const result = await provider.completion([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `CONVERSATION TO COMPACT:\n\`\`\`\n${formattedHistory}\n\`\`\`` }
+    ], { temperature: 0.1 });
+    return result.trim();
 }
 //  PHASE 4: MONTE CARLO TREE SEARCH (MCTS) PLANNER
 async function generateMCTSApproaches(task, context) {
@@ -1516,22 +1126,16 @@ async function generateMCTSApproaches(task, context) {
         "Description of Approach C and exactly what logic to write..."
       ]
     }`;
-    const { endpoint, model, apiKey } = await getLLMConfig();
     try {
-        const response = await resilientFetch(endpoint, {
-            method: 'POST',
-            headers: authHeaders(apiKey),
-            body: JSON.stringify({
-                model: model,
-                messages: [{ role: "system", content: systemPrompt }, { role: "user", content: `Task: ${task}\n\nContext:\n${context}` }],
-                temperature: 0.4,
-                response_format: { type: "json_object" }
-            })
+        const result = await (0, jsonRequest_1.jsonRequestData)({
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `Task: ${task}\n\nContext:\n${context}` }
+            ],
+            schema: jsonSchemas_1.mctsApproachesSchema,
+            temperature: 0.4
         });
-        const data = await response.json();
-        const jsonStr = data.choices[0].message.content.replace(/```json\n?/g, '').replace(/```/g, '').trim();
-        const parsed = JSON.parse(jsonStr);
-        return parsed.approaches || [task];
+        return result.approaches || [task];
     }
     catch (e) {
         return [task]; // Fallback to standard single execution if JSON fails
