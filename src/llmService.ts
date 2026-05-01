@@ -1,8 +1,5 @@
 // src/llmService.ts
 import * as vscode from 'vscode';
-import { agentToolDefinitions } from './agentTools';
-import { dispatchWithEvents } from './agents/toolDispatchWithEvents';
-import { allowAllHook } from './agents/securityHook';
 // Trigger registration of all tools by importing the barrel.
 import './agents/tools';
 import { getDeps } from './container';
@@ -43,6 +40,26 @@ export interface LLMConfig {
      */
     enableTools: boolean;
 }
+
+/**
+ * Per-agent role used for model routing. Each role can have its own
+ * preferred model (configured via `nexuscode.modelPlanner`,
+ * `nexuscode.modelCoder`, `nexuscode.modelVerifier`); when not set,
+ * the role falls through to the global `nexuscode.model` default.
+ *
+ * Why per-role routing: long-horizon agentic reasoning (Planner) and
+ * per-step code generation (Coder) have different cost / quality /
+ * latency profiles. Cheaper-but-faster models work fine for Coder's
+ * focused per-file edits, but Planner often benefits from a stronger
+ * reasoning model. Routing lets users pay for quality only where it
+ * matters. When all role keys are unset, behavior is identical to
+ * pre-routing (everyone uses the global default).
+ *
+ * `'default'` is the implicit role for callers that don't specify
+ * one — equivalent to omitting the parameter, returns the global
+ * model.
+ */
+export type AgentRole = 'planner' | 'coder' | 'verifier' | 'default';
 
 export interface AgileUserStory {
     epic: string;
@@ -109,7 +126,7 @@ export async function resilientFetch(url: string, options: any, logCallback?: (m
     });
 }
 
-export async function getLLMConfig(): Promise<LLMConfig> {
+export async function getLLMConfig(role: AgentRole = 'default'): Promise<LLMConfig> {
     const config = getDeps().config;
 
     // ── One-shot migration: plain settings.json key → SecretStorage ──
@@ -140,9 +157,33 @@ export async function getLLMConfig(): Promise<LLMConfig> {
 
     const secureKey = await getDeps().secrets.get('nexuscode_apikey');
 
+    // Role-specific model resolution. The per-role keys are optional —
+    // when set, they override the global `nexuscode.model` for that
+    // role only. When unset (typical user), every role uses the global
+    // default and behavior is identical to pre-routing.
+    //
+    // Precedence per role:
+    //   1. `nexuscode.modelPlanner` / `modelCoder` / `modelVerifier`
+    //      (matching the role parameter)
+    //   2. `nexuscode.model` (global default)
+    //   3. hardcoded fallback ('qwen2.5-coder')
+    //
+    // The 'default' role skips step 1 and goes straight to the global,
+    // which matches old behavior — useful for code paths that aren't
+    // role-tagged yet.
+    const globalModel = config.get<string>('model') || 'qwen2.5-coder';
+    let resolvedModel = globalModel;
+    if (role === 'planner') {
+        resolvedModel = config.get<string>('modelPlanner') || globalModel;
+    } else if (role === 'coder') {
+        resolvedModel = config.get<string>('modelCoder') || globalModel;
+    } else if (role === 'verifier') {
+        resolvedModel = config.get<string>('modelVerifier') || globalModel;
+    }
+
     return {
         endpoint: config.get<string>('apiEndpoint') || 'http://127.0.0.1:1234/v1/chat/completions',
-        model: config.get<string>('model') || 'qwen2.5-coder',
+        model: resolvedModel,
         apiKey: secureKey || undefined,                       // <-- no placeholder
         enableTools: config.get<boolean>('enableTools') ?? true
     };
@@ -569,6 +610,55 @@ export function validateTasksPlan(plan: AIPlan): string | null {
     return head.join('; ');
 }
 
+/**
+ * Build a corrective system message tailored to the SPECIFIC validation
+ * failure pattern.
+ *
+ * Hotfix (post-2B): the original corrective was a generic "fields must
+ * be non-empty" message — useful when the failure is empty fields, but
+ * misleading when the failure is "zero tasks". The model reads "field
+ * must not be empty" and tries to populate fields that... don't exist
+ * because the tasks array is empty. Tailoring the message to the
+ * actual failure helps the model recover on the retry.
+ *
+ * The xgrammar backend on vLLM doesn't enforce minLength or minItems
+ * (per vLLM issues #12201 and #16880), so the schema can't catch these
+ * at decode time. Post-validation + targeted corrective is the only
+ * reliable approach.
+ */
+function buildCorrectiveMessage(issues: string): string {
+    if (issues.includes('zero tasks')) {
+        return (
+            `Your previous response had: ${issues}.\n\n` +
+            `You returned an empty implementationTasks array. This is INVALID. ` +
+            `You MUST produce AT LEAST ONE task. Do not return an empty array under any circumstances.\n\n` +
+            `If the user's request is "create a website" or similar broad scaffolding, START with bootstrapping tasks: ` +
+            `one task to create package.json with the dependencies, one task to create tsconfig.json, ` +
+            `one task to create src/index.tsx (entry point), one task to create src/App.tsx, etc. Each gets ` +
+            `its own task object with concrete step, file, and detailedInstructions.\n\n` +
+            `If the request is to modify existing code, identify the SINGLE most important file to change ` +
+            `and produce one well-scoped task targeting it.\n\n` +
+            `Re-emit the entire JSON. Make sure implementationTasks contains at least one fully-populated task object.`
+        );
+    }
+    if (issues.includes('no implementationTasks array')) {
+        return (
+            `Your previous response had: ${issues}.\n\n` +
+            `The "plan" object MUST contain an "implementationTasks" array. ` +
+            `Re-emit the entire JSON with a properly-shaped plan object: ` +
+            `{ "folderStructure": [...], "implementationTasks": [ {...}, {...} ] }.`
+        );
+    }
+    // Field-level failure — the original generic message.
+    return (
+        `Your previous response had a structural problem: ${issues}.\n\n` +
+        `Every task MUST have non-empty values for "step", "file", and "detailedInstructions". ` +
+        `Do not return placeholder strings, single spaces, or empty strings for these fields. ` +
+        `Each task should describe a concrete file-creation or code-editing action with a real target path.`
+    );
+}
+
+
 export async function generatePlan(prompt: string, projectContext: string): Promise<{ explanation: string, plan: AIPlan }> {
     // Hotfix (post-2B audit): generatePlan was using `aiPlanSchema` /
     // `implementationTaskSchema` which has fields `{id, description,
@@ -614,7 +704,9 @@ Return JSON matching this exact shape:
 CRITICAL RULES:
 - ADAPT to the existing folder structure. Do not invent new paradigms.
 - ATOMIC TASKS: Break down "implementationTasks" so EACH task targets ONE file.
-- Every task MUST have non-empty values for "step", "file", and "detailedInstructions".`;
+- Every task MUST have non-empty values for "step", "file", and "detailedInstructions".
+- "implementationTasks" MUST contain AT LEAST ONE task. NEVER return an empty array. If you are unsure how to break the request down, produce one well-scoped task targeting the most important file.
+- For new projects (empty directory tree), START with bootstrapping tasks: package.json, tsconfig.json, src/index.tsx, src/App.tsx, etc. Each as a separate task.`;
 
     const baseMessages = [
         { role: 'system' as const, content: systemPrompt },
@@ -654,14 +746,15 @@ CRITICAL RULES:
         // system message that names the failure and try once more.
         // No infinite retries; the user gets a clear error if both
         // attempts fail.
+        //
+        // Hotfix (post-2B): the corrective message is now tailored to
+        // the failure pattern. "Zero tasks" gets a very different
+        // corrective from "field is empty" — see buildCorrectiveMessage.
         const correctiveMessages: typeof baseMessages = [
             ...baseMessages,
             {
                 role: 'system' as const,
-                content: `Your previous response had a structural problem: ${issues}.\n\n` +
-                    `Every task MUST have non-empty values for "step", "file", and "detailedInstructions". ` +
-                    `Do not return placeholder strings, single spaces, or empty strings for these fields. ` +
-                    `Each task should describe a concrete file-creation or code-editing action with a real target path.`
+                content: buildCorrectiveMessage(issues)
             }
         ];
         result = await jsonRequestData<{ explanation?: string, plan?: AIPlan }>({
@@ -701,207 +794,6 @@ export async function inferTargetFile(taskDescription: string, projectContext: s
         schema: targetFileSchema,
         temperature: 0.1
     });
-}
-
-export async function runAgenticExploration(
-    taskDescription: string,
-    projectContext: string, // 🚀 NEW: Accept the pre-fetched AST
-    workspaceRoot: string,
-    statusCallback: (stepType: string, desc: string, details?: string) => void,
-    abortSignal?: AbortSignal
-): Promise<string> {
-    // Component 2A migration: switched from inline resilientFetch + manual
-    // tool_calls parsing to provider.chatCompletion.
-    // Component 2B-3b migration: read_file / list_directory now dispatch
-    // through the typed registry (dispatchWithEvents) instead of the
-    // legacy executeAgentTool shim. The grep_search / find_file inline
-    // implementations stay inline — they have specific hallucination
-    // guards and project-tuned exclude patterns that the generic registry
-    // tools don't carry. Eventually those could move to registered tools
-    // but it's not a 2B-3 concern.
-    //
-    // The original code also set `response_format: { type: "json_object" }`
-    // which was wrong — the model produces tool_calls and READY_TO_CODE
-    // text, not JSON. Removed (same fix pattern as Component 1's
-    // generateDesign / generateTasks fixes).
-    //
-    // The `enableTools` short-circuit is removed: the Provider's
-    // capability probe handles tool-incapable endpoints transparently.
-    const provider = await getProvider();
-
-    const explorePrompt = `You are the Explorer Agent. Your role is EXCLUSIVELY to search and analyze the codebase dynamically using tools.
-    
-     CRITICAL RULES 
-    1. DO NOT HALLUCINATE PATHS: You already have the full Directory Tree below. ONLY call 'read_file' on files that actually exist in this tree. Do not guess folder names.
-    2. USE FIND_FILE: If you are looking for a file but don't know the exact path, use the 'find_file' tool. DO NOT guess the path.
-    3. YOU ARE STRICTLY PROHIBITED FROM: Creating new files, modifying files, or writing code.
-    4. Use 'grep_search' to find where specific functions, classes, or variables are defined.
-    5. Once you have enough context, reply with: "READY_TO_CODE".
-    
-    --- DIRECTORY TREE ---
-    ${projectContext}`;
-
-    const messages: import('./llm').ChatMessage[] = [
-        { role: 'system', content: explorePrompt },
-        { role: 'user', content: `Task: ${taskDescription}\nYou already know the file paths. Call 'read_file' on the targets immediately in a single batch, then exit with READY_TO_CODE!` }
-    ];
-
-    //  Inject the Claude-Style Dynamic Grep & Find Tools
-    const dynamicTools: import('./llm').ToolDefinition[] = [
-        {
-            type: "function",
-            function: {
-                name: "grep_search",
-                description: "Search the entire codebase for a regex or string pattern (like ripgrep). Use this to hunt down where functions are used.",
-                parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] }
-            }
-        },
-        {
-            type: "function",
-            function: {
-                name: "find_file",
-                description: "Search the directory tree for a specific file by its name or partial name if you don't know the exact folder path.",
-                parameters: { type: "object", properties: { filename: { type: "string" } }, required: ["filename"] }
-            }
-        },
-        ...agentToolDefinitions.filter(t => ['read_file', 'list_directory'].includes(t.function.name))
-    ];
-
-    let gatheredContext = "";
-    statusCallback('analyze', 'Initializing Dynamic Search');
-
-    for (let step = 0; step < 2; step++) {
-        try {
-            const chatOptions: import('./llm').CompletionOptions = {
-                tools: dynamicTools,
-                toolChoice: 'auto',
-                temperature: 0.1
-            };
-            if (abortSignal) chatOptions.signal = abortSignal;
-
-            const aiMessage = await provider.chatCompletion(messages, chatOptions);
-            messages.push(aiMessage);
-
-            if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) {
-                for (const toolCall of aiMessage.tool_calls) {
-                    const funcName = toolCall.function.name;
-                    const funcArgs = JSON.parse(toolCall.function.arguments);
-                    let toolResult = "";
-
-                    if (funcName === 'grep_search') {
-                        statusCallback('search', 'Grep Search', `Pattern: ${funcArgs.pattern}`);
-                        try {
-                            if (funcArgs.pattern.length < 3) {
-                                toolResult = "Pattern too short. Please use a more specific search term.";
-                            } else {
-                                // 🚀 CROSS-PLATFORM BATCH GREP: 
-                                // Fetch targets, then read them concurrently while bypassing the slow fs.stat()
-                                const files = await vscode.workspace.findFiles(
-                                    '**/*.{ts,tsx,js,jsx,json,html,css,py,java,cpp,c,go,rs,rb,md,txt}',
-                                    '{**/node_modules/**,**/.git/**,**/dist/**,**/build/**,**/out/**,**/.next/**}',
-                                    150 // Strict limit to prevent memory hangs
-                                );
-
-                                const regex = new RegExp(funcArgs.pattern, 'i');
-                                let matchCount = 0;
-
-                                await Promise.all(files.map(async (file) => {
-                                    if (matchCount >= 30) return;
-                                    try {
-                                        const fileData = await vscode.workspace.fs.readFile(file);
-
-                                        // 🚀 INSTANT SKIP: Ignore empty files or files > 500KB without needing fs.stat
-                                        if (fileData.byteLength === 0 || fileData.byteLength > 512000) return;
-
-                                        const content = new TextDecoder('utf8').decode(fileData);
-                                        const lines = content.split('\n');
-
-                                        for (let i = 0; i < lines.length; i++) {
-                                            const line = lines[i];
-                                            if (line !== undefined && regex.test(line)) {
-                                                const relativePath = vscode.workspace.asRelativePath(file);
-                                                toolResult += `${relativePath}:${i + 1}: ${line.trim().substring(0, 100)}\n`;
-                                                matchCount++;
-                                                if (matchCount >= 30) return;
-                                            }
-                                        }
-                                    } catch (err) {
-                                        // Silently skip unreadable files
-                                    }
-                                }));
-
-                                toolResult = toolResult ? toolResult : "No matches found.";
-                            }
-                        } catch (e) {
-                            toolResult = "Grep failed due to invalid regex.";
-                        }
-                    } else if (funcName === 'find_file') {
-                        statusCallback('search', 'Finding File', funcArgs.filename);
-                        try {
-                            const files = await vscode.workspace.findFiles(`**/*${funcArgs.filename}*`, '{**/node_modules/**,**/.git/**,**/dist/**}', 10);
-                            toolResult = files.length > 0
-                                ? files.map(f => vscode.workspace.asRelativePath(f)).join('\n')
-                                : "File not found. Do not guess the path.";
-                        } catch (e) {
-                            toolResult = "File search failed.";
-                        }
-                    } else if (funcName === 'read_file') {
-                        // 🚀 HALLUCINATION GUARD: Fast fail if the file doesn't exist
-                        try {
-                            const uri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), funcArgs.filepath);
-                            await vscode.workspace.fs.stat(uri);
-                            statusCallback('read', 'Read file(s)', funcArgs.filepath);
-                            // Component 2B-3b: dispatchWithEvents replaces the
-                            // legacy executeAgentTool shim. No emitter wired
-                            // (this code path is exploration before user-visible
-                            // task work begins). source='planner' tags events
-                            // for any future emitter the caller might attach.
-                            const dispatchResult = await dispatchWithEvents(
-                                toolCall,
-                                { workspaceRoot },
-                                { source: 'planner', preDispatchHook: allowAllHook }
-                            );
-                            toolResult = dispatchResult.llmContent;
-                        } catch (e) {
-                            toolResult = `ERROR: File '${funcArgs.filepath}' does not exist. STOP guessing paths. Use 'find_file' to locate it.`;
-                        }
-                    } else if (funcName === 'list_directory') {
-                        // 🚀 HALLUCINATION GUARD: Fast fail if the folder doesn't exist
-                        try {
-                            const uri = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), funcArgs.path || "");
-                            await vscode.workspace.fs.stat(uri);
-                            statusCallback('search', 'List Directory', funcArgs.path);
-                            const dispatchResult = await dispatchWithEvents(
-                                toolCall,
-                                { workspaceRoot },
-                                { source: 'planner', preDispatchHook: allowAllHook }
-                            );
-                            toolResult = dispatchResult.llmContent;
-                        } catch (e) {
-                            toolResult = `ERROR: Directory '${funcArgs.path}' does not exist. Look at the DIRECTORY TREE.`;
-                        }
-                    } else {
-                        // Fallback for any tool not specifically handled above
-                        // (shouldn't fire today since the tool list is fixed,
-                        // but kept as a safety net). Same dispatchWithEvents
-                        // path as the explicit cases above.
-                        const dispatchResult = await dispatchWithEvents(
-                            toolCall,
-                            { workspaceRoot },
-                            { source: 'planner', preDispatchHook: allowAllHook }
-                        );
-                        toolResult = dispatchResult.llmContent;
-                    }
-
-                    gatheredContext += `\n--- Tool Result: ${funcName}(${JSON.stringify(funcArgs)}) ---\n${toolResult}\n`;
-                    messages.push({ role: 'tool', tool_call_id: toolCall.id, content: toolResult });
-                }
-            } else {
-                if (aiMessage.content?.includes("READY_TO_CODE")) break;
-            }
-        } catch (e) { break; }
-    }
-    return gatheredContext;
 }
 
 export async function generateTests(fileName: string, fileContent: string, projectRules: string = ""): Promise<TestSetupPlan> {
@@ -1032,9 +924,11 @@ Example:
     // the original code set `response_format: { type: "json_object" }`
     // despite the system prompt asking for markdown wrapped in XML tags
     // — same bug pattern as streamChat in Session 1. The Provider's
-    // streamCompletion does not set this; the model is now free to
-    // produce the markdown the prompt asks for.
-    const provider = await getProvider();
+    // Per-agent routing: design generation is planner-like reasoning
+    // work (analyzing requirements + producing structured architectural
+    // output). Routes to `nexuscode.modelPlanner` when configured,
+    // falls back to global `nexuscode.model` when unset.
+    const provider = await getProvider('planner');
     const completionOptions: import('./llm').CompletionOptions = {
         temperature: 0.2
     };
@@ -1060,6 +954,8 @@ export async function generateTasks(requirements: string, design: string, existi
     2. ATOMIC FILES: Each task MUST target exactly ONE primary 'file'.
     3. EXISTING CONTEXT: Map tasks to the provided EXISTING DIRECTORY STRUCTURE.
     4. NO METADATA TASKS: DO NOT create tasks for "reviewing", "testing", "debugging", or "verifying". Our Swarm Engine handles QA automatically in the background. ONLY output concrete file-creation or code-editing tasks.
+    5. NEVER RETURN AN EMPTY TASK LIST. "implementationTasks" MUST contain AT LEAST ONE task. If the PRD scope is small, produce one well-scoped task. If the directory is empty (new project), START with bootstrapping tasks: package.json, tsconfig.json, src/index.tsx, src/App.tsx, etc. Each as a separate task.
+    6. EVERY TASK MUST HAVE NON-EMPTY VALUES for "step", "file", and "detailedInstructions". Empty strings are INVALID.
     
     Return ONLY valid JSON matching this exact schema:
     {
@@ -1107,9 +1003,10 @@ export async function generateTasks(requirements: string, design: string, existi
     // `file: ""`, `detailedInstructions: ""` that pass schema validation
     // but produce empty cards in the UI. We post-validate and, on
     // failure, retry once with a corrective system message that points
-    // out the specific failure mode. If the retry also fails, we throw
-    // a clear error so the user knows to retry/fix their inputs.
-    const provider = await getProvider();
+    // Per-agent routing: task generation reads the design and produces
+    // a structured plan. Same reasoning category as generateDesign —
+    // routes via 'planner' role.
+    const provider = await getProvider('planner');
     const completionOptions: import('./llm').CompletionOptions = {
         temperature: 0.1
     };
@@ -1135,14 +1032,15 @@ export async function generateTasks(requirements: string, design: string, existi
         // unlikely to succeed on attempt 3. One retry catches the
         // "model got confused once" case; persistent failure surfaces
         // to the user.
+        //
+        // Hotfix (post-2B): corrective message is now tailored to the
+        // failure pattern (zero-tasks vs empty-fields vs missing-array).
+        // See buildCorrectiveMessage for the branching logic.
         const correctiveMessages: typeof baseMessages = [
             ...baseMessages,
             {
                 role: 'system' as const,
-                content: `Your previous response had a structural problem: ${issues}.\n\n` +
-                    `Every task MUST have non-empty values for "step", "file", and "detailedInstructions". ` +
-                    `Do not return placeholder strings, single spaces, or empty strings for these fields. ` +
-                    `Each task should describe a concrete file-creation or code-editing action with a real target path.`
+                content: buildCorrectiveMessage(issues)
             }
         ];
         parsedPlan = await provider.jsonCompletion<AIPlan>(
@@ -1205,6 +1103,11 @@ Evaluate the code and return the JSON.`;
                 { role: "user", content: userPrompt }
             ],
             schema: verificationSchema,
+            // Per-agent routing: verifier uses 'verifier' role so the
+            // QA-review LLM call can be routed independently of the
+            // Coder. Falls back to global default when
+            // `nexuscode.modelVerifier` is unset.
+            role: 'verifier',
             temperature: 0.0
         });
         return { ...result.data, usage: result.usage };
@@ -1358,9 +1261,11 @@ export async function generateAdversarialTest(task: string, filepath: string, co
     If they fail, it MUST throw an Error.`;
 
     // Migrated to Provider abstraction (Component 1, Session 2).
-    // Returns a JavaScript script, not JSON — uses provider.completion()
-    // and the existing markdown-fence stripper.
-    const provider = await getProvider();
+    // Per-agent routing: adversarial test generation is verifier-class
+    // work — same category as verifyAgainstSpec (QA-side LLM call,
+    // tolerant of smaller/faster models for cost optimization). Routes
+    // to 'verifier' role.
+    const provider = await getProvider('verifier');
     const script = await provider.completion(
         [
             { role: 'system', content: systemPrompt },

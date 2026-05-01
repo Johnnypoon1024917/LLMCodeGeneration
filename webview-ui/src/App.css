@@ -502,6 +502,143 @@ body, html, #root {
   margin-bottom: 0; /* Removes the gap at the very bottom of the chat */
 }
 
+/* ─── Session tab bar — Phase 1.6 redesign ──────────────────────────
+ *
+ * Multi-session workspace tabs. Distinct from the main tabs (.nexus-tabs)
+ * — these represent in-progress chat sessions, with close-X and add-new
+ * affordances. Visual signature inspired by Kiro and modern editor tab
+ * conventions:
+ *   - Active tab raised slightly with bg color match
+ *   - Inactive tabs are subtle, hover-revealed
+ *   - Status dot (the original magenta) preserved as a visual anchor
+ *   - Close X visible on hover only — reduces visual noise
+ *
+ * The container scrolls horizontally for many sessions; the "+" button
+ * uses .nexus-btn-icon (already imported in Phase 1.5).
+ */
+
+.nexus-session-tabs {
+  display: flex;
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  overflow-x: auto;
+  padding: 4px 8px 0 8px;
+  gap: 2px;
+  flex-shrink: 0;
+  /* Hide native horizontal scrollbar — the tabs should look like a
+   * clean strip, not a scrollable region. Falls back to visible
+   * scroll on browsers without webkit. */
+  scrollbar-width: thin;
+}
+
+.nexus-session-tabs::-webkit-scrollbar {
+  height: 0;
+}
+
+.nexus-session-tab {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px 6px 12px;
+  min-width: 100px;
+  max-width: 200px;
+  font-size: 11px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--vscode-tab-inactiveForeground);
+  border-top: 2px solid transparent;
+  border-top-left-radius: 4px;
+  border-top-right-radius: 4px;
+  transition: background 0.12s ease, color 0.12s ease;
+  flex-shrink: 0;
+}
+
+.nexus-session-tab:hover {
+  background: var(--nexus-overlay-mid);
+  color: var(--vscode-foreground);
+}
+
+.nexus-session-tab.active {
+  background: var(--vscode-editor-background);
+  color: var(--vscode-tab-activeForeground);
+  border-top-color: var(--nexus-accent);
+}
+
+.nexus-session-tab-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nexus-session-tab-dot {
+  /* The status dot indicator. Preserved from the original design — a
+   * small visual anchor that distinguishes session tabs from main
+   * tabs at a glance. Uses VS Code's terminal magenta which is
+   * theme-aware. */
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--vscode-terminal-ansiMagenta);
+  flex-shrink: 0;
+}
+
+.nexus-session-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--nexus-subtext);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  /* Hidden by default; revealed on tab hover or focus. Keeps the
+   * default state visually clean. */
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+  flex-shrink: 0;
+}
+
+.nexus-session-tab:hover .nexus-session-tab-close,
+.nexus-session-tab.active .nexus-session-tab-close,
+.nexus-session-tab-close:focus-visible {
+  opacity: 1;
+}
+
+.nexus-session-tab-close:hover {
+  background: var(--vscode-toolbar-hoverBackground, var(--nexus-overlay-high));
+  color: var(--vscode-foreground);
+}
+
+.nexus-session-tab-close:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* ─── Auth screen — Phase 1.6 redesign ──────────────────────────────
+ *
+ * Replaces the spartan centered-stack layout with a card-based design
+ * inspired by Kiro's onboarding screens. Visual signature:
+ *   - Centered card with subtle elevation, not full-screen content
+ *   - Clear visual hierarchy: brand → tagline → form → footer
+ *   - Accent-colored brand mark
+ *   - Single primary button + ghost secondary (not two equal buttons)
+ *   - Generous whitespace; the screen feels intentional, not crowded
+ *
+ * The legacy .auth-screen class is preserved for the outer container
+ * (sets the full-height background), but its child styling is updated.
+ * The legacy .auth-btn class is preserved for backwards compat but the
+ * new JSX uses .nexus-btn-primary / .nexus-btn-ghost instead.
+ */
+
 .auth-screen {
   display: flex;
   flex-direction: column;
@@ -509,24 +646,98 @@ body, html, #root {
   align-items: center;
   height: 100vh;
   padding: 24px;
-  text-align: center;
   background: var(--nexus-bg);
+  /* No more text-align: center on the container — let the inner card
+   * control its own alignment so headings can be left-aligned for
+   * readability while the card stays centered on screen. */
 }
 
-.auth-screen h2 { color: var(--nexus-text); margin-bottom: 8px; }
-.auth-screen p { color: var(--nexus-subtext); font-size: var(--nexus-text-base); margin-bottom: 24px; }
-
-.auth-screen input {
+.auth-screen-card {
+  /* Centered card, max width keeps the form readable on wide layouts. */
+  display: flex;
+  flex-direction: column;
   width: 100%;
-  padding: 10px;
-  margin-bottom: 12px;
-  border-radius: var(--nexus-radius-sm);
-  border: 1px solid var(--nexus-card-border);
-  background: var(--nexus-input-bg);
-  color: var(--nexus-text);
-  outline: none;
+  max-width: 360px;
+  padding: 28px 24px;
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--nexus-border-default);
+  border-radius: 8px;
+  box-shadow: var(--nexus-elev-2);
+  gap: 16px;
 }
-.auth-screen input:focus { border-color: var(--nexus-border); }
+
+.auth-screen-brand {
+  /* Brand row at the top. Accent-colored, slightly larger font. */
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--nexus-accent);
+  letter-spacing: 0.3px;
+  margin-bottom: 4px;
+}
+
+.auth-screen-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  margin: 0;
+  line-height: 1.3;
+}
+
+.auth-screen-subtitle {
+  font-size: 13px;
+  color: var(--nexus-subtext);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.auth-screen-divider {
+  /* Hairline divider between the form and the alternative-action area
+   * (Skip / Local mode). Soft, doesn't compete with the form's borders. */
+  height: 1px;
+  background: var(--nexus-border-hairline);
+  margin: 4px 0;
+}
+
+.auth-screen-input {
+  /* Replaces .auth-screen input selector. More restrained padding,
+   * theme-token border, transition on focus. */
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-input-border);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.12s ease;
+  box-sizing: border-box;
+}
+
+.auth-screen-input:focus {
+  border-color: var(--nexus-border-active);
+}
+
+.auth-screen-input::placeholder {
+  color: var(--nexus-subtext);
+  opacity: 0.7;
+}
+
+.auth-screen-footer {
+  /* Footer text below the alternative-action button. Used for
+   * disclaimers / tooltips. */
+  font-size: 11px;
+  color: var(--nexus-subtext);
+  text-align: center;
+  margin-top: 4px;
+}
+
+/* Legacy .auth-btn — preserved for backwards compatibility but no
+ * longer applied in App.tsx. Removable in a future cleanup bundle
+ * once we've confirmed nothing else references it. */
 
 .auth-btn {
   width: 100%;
@@ -1663,4 +1874,1887 @@ body, html, #root {
      advisory, not error. */
   color: var(--vscode-charts-orange, #cca700);
   font-style: italic;
+}
+
+/* ─── Phase 1: per-task tool-card affinity ──────────────────────────
+ *
+ * Styles for the new per-task affinity feature. The card structure
+ * itself is unchanged (ToolCallCard renders its own borders/padding);
+ * these styles cover the NEW layout-level elements: the per-task
+ * cards region inside each task expansion, the unscoped fallback
+ * region, the section labels, and the live activity count badge on
+ * the task header.
+ *
+ * Design notes:
+ *   - `--nexus-accent` is a single hue used to mark per-task
+ *     activity regions and active highlights. Defined relative to
+ *     VS Code's theme so it adapts to light/dark mode without
+ *     fighting the user's IDE theme.
+ *   - The per-task region gets a subtle left border (accent color)
+ *     to visually anchor it to the task it belongs to.
+ *   - Spacing uses the existing --nexus-space-* design tokens for
+ *     consistency with the rest of the app.
+ */
+
+:root {
+  /* NexusCode accent: blue-violet, distinct from VS Code's
+   * editorLink/textLink colors so per-task highlights don't compete
+   * with hyperlinks. Set on :root with a fallback for environments
+   * where VS Code variables aren't available (e.g., webview previews
+   * during dev).
+   *
+   * The two-stop fallback (--vscode-charts-blue → hardcoded hex) means:
+   * inside VS Code we inherit the IDE's blue chart color (theme-aware);
+   * outside VS Code we get a stable purple-blue regardless of context.
+   */
+  --nexus-accent: var(--vscode-charts-blue, #6e8ce8);
+  --nexus-accent-soft: color-mix(in srgb, var(--nexus-accent) 12%, transparent);
+  --nexus-accent-line: color-mix(in srgb, var(--nexus-accent) 40%, transparent);
+}
+
+.tool-call-cards-region.per-task {
+  /* Per-task region: tight indentation under the task expansion and
+   * a subtle accent border-left to visually link cards to their
+   * parent task. Margin-top creates breathing room from the agent
+   * steps block above. */
+  margin-top: var(--nexus-space-3);
+  margin-bottom: var(--nexus-space-2);
+  padding-left: var(--nexus-space-3);
+  border-left: 2px solid var(--nexus-accent-line);
+  /* Smooth fade-in when the first card lands in this region. The
+   * region itself is conditionally rendered, so the animation only
+   * fires once per task, not every render cycle. */
+  animation: nexus-fadein 180ms ease-out;
+}
+
+.tool-call-cards-region.unscoped {
+  /* Fallback region for cards without a task mapping. Subtle muted
+   * background so it's visually distinct from per-task cards (which
+   * have an accent border) without competing for attention. */
+  margin-bottom: var(--nexus-space-4);
+  padding: var(--nexus-space-2);
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  border-radius: 4px;
+  border: 1px dashed var(--vscode-widget-border);
+}
+
+.tool-cards-region-label {
+  /* Small section heading inside the unscoped region — mirrors the
+   * "SWARM EXECUTION LOGS" label style used elsewhere for visual
+   * consistency. */
+  font-size: 10px;
+  font-weight: bold;
+  color: var(--nexus-subtext);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: var(--nexus-space-2);
+}
+
+.task-activity-badge {
+  /* Compact activity-count pill on the task header. Visible whether
+   * the task is expanded or collapsed, so users see at-a-glance how
+   * much tool activity each task has. Uses the accent color in soft-
+   * background form so it reads as informational, not alerting. */
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--nexus-accent);
+  background: var(--nexus-accent-soft);
+  border: 1px solid var(--nexus-accent-line);
+  border-radius: 999px; /* fully rounded — pill shape */
+  user-select: none;
+}
+
+@keyframes nexus-fadein {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Phase 1: utility classes for common inline-style patterns ─────
+ *
+ * The most repeated inline-style patterns in App.tsx, captured as
+ * named utility classes. Migration of existing call sites happens
+ * gradually — these classes coexist with inline styles during the
+ * transition.
+ *
+ * Naming: `nexus-flex-*` for flex helpers, `nexus-status-*` for
+ * status pills, `nexus-btn-*` for button variants. Prefix prevents
+ * collisions with VS Code's own classes and any future Tailwind-
+ * style additions.
+ */
+
+.nexus-flex-row {
+  /* Inline-flex row, center-aligned, 6px gap. Replaces the most
+   * common inline-style pattern in App.tsx (16 occurrences as of
+   * Phase 1). */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nexus-flex-row-tight {
+  /* Same shape with 4px gap — used for status labels with adjacent
+   * icons. Tighter spacing prevents the icon and text from looking
+   * disconnected. */
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nexus-flex-block-row {
+  /* Block-level flex row (not inline-flex). Used for the row layouts
+   * that need to take full width. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nexus-flex-between {
+  /* Block flex row with space-between justification — common for
+   * header rows with title on the left and actions on the right. */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.nexus-flex-col {
+  /* Column flex container, fills available height. Used for panel
+   * bodies that contain a scrollable region + a footer. */
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.nexus-status-pill {
+  /* Base status pill: small rounded label with icon + text. Variants
+   * (.success, .error, .warning, .info) override the colors. */
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: bold;
+  border-radius: 4px;
+  user-select: none;
+}
+
+.nexus-status-pill.success {
+  color: var(--vscode-testing-iconPassed);
+}
+
+.nexus-status-pill.error {
+  color: var(--vscode-testing-iconFailed);
+}
+
+.nexus-status-pill.warning {
+  color: var(--vscode-charts-orange);
+}
+
+.nexus-status-pill.info {
+  color: var(--vscode-textLink-foreground);
+}
+
+.nexus-btn-primary {
+  /* Primary button: VS Code's themed button colors. Used for the
+   * "Execute" / "Apply" / "Confirm" actions. */
+  flex: 2;
+  padding: 10px;
+  cursor: pointer;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 4px;
+  font-weight: bold;
+}
+
+.nexus-btn-primary:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.nexus-btn-primary:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.nexus-btn-secondary {
+  /* Secondary button: VS Code's secondary palette. Used for "Cancel"
+   * / "Discard" / lower-priority actions. */
+  flex: 1;
+  padding: 10px;
+  cursor: pointer;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border: none;
+  border-radius: 4px;
+  font-weight: bold;
+}
+
+.nexus-btn-secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.nexus-btn-secondary:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.nexus-btn-ghost {
+  /* Ghost button: transparent background, link-styled. Used for "View
+   * details" / "Show more" / inline actions. */
+  background: transparent;
+  color: var(--vscode-textLink-foreground);
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+}
+
+.nexus-btn-ghost:hover {
+  text-decoration: underline;
+}
+
+.nexus-btn-ghost:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ─── Phase 1: empty/loading state polish ─────────────────────────── */
+
+.nexus-empty-state {
+  /* Centered text + icon, used when a section has no content yet
+   * (e.g., before any tool calls have been emitted). */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--nexus-space-2);
+  padding: var(--nexus-space-6);
+  color: var(--nexus-subtext);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.nexus-loading-skeleton {
+  /* Skeleton placeholder for cards that haven't loaded yet. Pulse
+   * animation gives a sense of progress without showing fake data. */
+  height: 64px;
+  border-radius: 6px;
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  animation: nexus-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes nexus-skeleton-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+
+/* ─── Phase 1: additional utility classes (Wave A migration) ───────
+ *
+ * These cover the remaining repeated patterns from the inline-style
+ * audit. Each replaces a pattern that appears 2+ times in App.tsx.
+ * The naming keeps the `nexus-` prefix so all utility classes share
+ * a vocabulary and don't collide with VS Code's own classes.
+ *
+ * Composability: where a pattern is "common-flex-shape + specific
+ * color/weight," I split it into two classes (e.g. .nexus-flex-row +
+ * .nexus-text-success-bold) so callers can mix-and-match without
+ * combinatorial explosion. One concept per class.
+ */
+
+.nexus-flex-shrink-0 {
+  /* Standalone flex-shrink:0 — useful on items inside a flex
+   * container that should hold their natural width when siblings
+   * grow. */
+  flex-shrink: 0;
+}
+
+.nexus-flex-block-gap-2 {
+  /* Block flex row with 8px gap, no alignment constraints. Used for
+   * action button groups where vertical alignment doesn't matter
+   * (buttons inherit row baseline naturally). */
+  display: flex;
+  gap: 8px;
+}
+
+.nexus-flex-block-gap-3 {
+  /* Same as above but 10px gap. Slightly more breathing room — used
+   * for higher-level groupings (multiple control clusters). */
+  display: flex;
+  gap: 10px;
+}
+
+.nexus-flex-block-row-gap-3 {
+  /* Block flex row, center-aligned, 10px gap. Used for header rows
+   * where vertical alignment of mixed-height children matters. */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.nexus-flex-between-shrink {
+  /* Block flex row, space-between justification, vertical center
+   * alignment, with bottom margin and flex-shrink:0. Used for panel
+   * headers that should not collapse when the panel content scrolls. */
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.nexus-action-row {
+  /* Action button row at the bottom of a panel. Margin-top creates
+   * separation from the panel content; flex-shrink:0 keeps it pinned
+   * even when content above scrolls. 10px gap between buttons. */
+  display: flex;
+  gap: 10px;
+  margin-top: 15px;
+  flex-shrink: 0;
+}
+
+.nexus-textarea-mono {
+  /* Monospace textarea for code/prompt input. Used in builder panels
+   * and the meta-mode editor. Border + focus ring follow VS Code
+   * input conventions. */
+  flex: 1;
+  resize: none;
+  padding: 12px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 6px;
+  font-family: monospace;
+  margin-bottom: 15px;
+  line-height: 1.5;
+}
+
+.nexus-textarea-mono:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 0;
+}
+
+.nexus-scroll-preview {
+  /* Scrollable preview pane for generated content (e.g., requirements
+   * preview, design preview). Same border/background as the textarea
+   * variant for visual consistency between input and preview. */
+  flex: 1;
+  overflow-y: auto;
+  padding: 15px;
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 6px;
+  margin-bottom: 15px;
+}
+
+.nexus-input-panel {
+  /* Bordered panel with input-style background, used as a container
+   * for grouped form controls. Subtle box-shadow lifts it off the
+   * surrounding background. */
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 6px;
+  padding: 12px;
+  transition: border-color 0.3s;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.nexus-text-success-bold {
+  /* Bold success-colored inline text. Composed with .nexus-flex-row
+   * for the icon-and-label layouts. The hex (#51cf66) was the
+   * pre-existing "bright green" used for a few specific success
+   * indicators that wanted MORE saturation than VS Code's
+   * testing-iconPassed (which can be muted in some themes). */
+  color: #51cf66;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.nexus-text-error-bold {
+  /* Bold error-colored inline text, theme-aware. Composed with
+   * .nexus-flex-row-tight for the icon-and-label layouts.
+   *
+   * Why theme-aware here but hard-coded green above:
+   *   - The "bright" success #51cf66 was an intentional override
+   *     in the original code — preserving the choice
+   *   - Errors should always follow the IDE's testing-iconFailed
+   *     so they read as "failure" in both light and dark themes
+   */
+  color: var(--vscode-testing-iconFailed);
+  font-size: 11px;
+  font-weight: bold;
+}
+
+/* ─── Phase 1.5: Kiro-inspired chrome redesign ──────────────────────
+ *
+ * Goals:
+ *   - Cleaner tab bar with proper active-state hierarchy
+ *   - Task expansion cards with uniform typography + structure
+ *   - Consistent button system across the whole app
+ *   - Status indicators unified into a single pill vocabulary
+ *
+ * Design language reference: Kiro (AWS's agentic IDE, mid-2025+).
+ * Key visual signatures:
+ *   - VS Code chrome conventions inherited (theme tokens for colors)
+ *   - Single accent for active states (we use --nexus-accent from Phase 1)
+ *   - Functional status colors (green/red/orange) not decorative
+ *   - Generous whitespace, consistent spacing scale
+ *   - Card-based layouts with subtle borders, not heavy chrome
+ *
+ * What we DON'T do:
+ *   - Override VS Code's themed colors with branded ones
+ *   - Replace the existing tab/header layout structure
+ *   - Touch components beyond what App.tsx renders
+ */
+
+/* Refined design tokens (additive — does not replace --nexus-space-*).
+ *
+ * The existing token scale (--nexus-space-1 = 2px through --nexus-space-9
+ * = 24px) is preserved for backwards compatibility. These new tokens
+ * provide a Kiro-inspired tighter scale and elevation levels for the
+ * redesigned chrome.
+ *
+ * Naming convention:
+ *   --nexus-elev-N   = elevation/depth (shadow + border combo)
+ *   --nexus-rhythm-N = vertical rhythm (line-height-aware spacing)
+ */
+:root {
+  /* Elevation levels. 0 = flat, 1 = subtle lift, 2 = floating panel,
+   * 3 = modal overlay. Used by cards and dropdowns. */
+  --nexus-elev-1: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --nexus-elev-2: 0 2px 8px rgba(0, 0, 0, 0.16);
+  --nexus-elev-3: 0 8px 24px rgba(0, 0, 0, 0.24);
+
+  /* Border colors that respond to interaction. Subtle gradient from
+   * default → hover → active. Used by interactive cards. */
+  --nexus-border-default: var(--vscode-widget-border);
+  --nexus-border-hover: color-mix(in srgb, var(--nexus-accent) 30%, var(--vscode-widget-border));
+  --nexus-border-active: var(--nexus-accent);
+
+  /* Hairline border for nested-card boundaries. Lighter than the
+   * default border so deep card stacks don't get visually crowded. */
+  --nexus-border-hairline: color-mix(in srgb, var(--vscode-widget-border) 50%, transparent);
+}
+
+/* ─── Tab bar (.nexus-tabs) ─────────────────────────────────────────
+ *
+ * Replaces the four inline-styled tab buttons + wrapper that lived in
+ * App.tsx (lines 935–960 in pre-Phase-1.5 code). Single source of truth
+ * for tab styling. Uses --nexus-accent for the active indicator so the
+ * IDE-theme blue is the only accent color in the whole interface.
+ *
+ * Active state: bottom border (2px accent) + foreground color shift +
+ * font-weight bump. NO background change — keeps the tab bar visually
+ * lightweight, consistent with Kiro's chrome restraint.
+ *
+ * Hover state: subtle background tint using accent-soft. Implies
+ * interactivity without competing with the active tab.
+ */
+.nexus-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--nexus-border-default);
+  flex-shrink: 0;
+  margin-top: 5px;
+  /* Negative bottom-margin so the active tab's 2px border-bottom sits
+   * exactly on top of the tab bar's underline. Without this, there's
+   * a 1px gap that makes the active tab look detached. */
+  background: transparent;
+}
+
+.nexus-tab {
+  flex: 1;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  letter-spacing: 0.2px;
+  transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+  /* Tab labels need to be readable in collapsed states; truncate
+   * gracefully if a label gets long. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nexus-tab:hover {
+  background: var(--nexus-accent-soft);
+  color: var(--vscode-foreground);
+}
+
+.nexus-tab:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: -2px;
+}
+
+.nexus-tab.active {
+  /* Active tab: accent-colored bottom border + accent text. NO
+   * background change — matches Kiro's restrained tab treatment. */
+  color: var(--nexus-accent);
+  border-bottom-color: var(--nexus-accent);
+  font-weight: 600;
+}
+
+.nexus-tab.active:hover {
+  /* Active+hover: keep accent text, subtle background tint to signal
+   * the click affordance is still present. */
+  background: var(--nexus-accent-soft);
+}
+
+/* ─── Task expansion cards (.nexus-task-card) ───────────────────────
+ *
+ * Replaces .task-item-accordion's inline styling. The accordion <details>
+ * element is wrapped in this class. Visual signature:
+ *   - Subtle 1px border, accent-color when expanded
+ *   - Header row with task number + title + status pill
+ *   - Soft elevation shadow when expanded for depth cue
+ *   - Smooth border-color transition on expand/collapse
+ *
+ * The <details>/<summary> semantic is preserved — accordion behavior
+ * comes free with the browser, no JS state needed.
+ */
+.nexus-task-card {
+  margin-bottom: 8px;
+  border: 1px solid var(--nexus-border-default);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+  /* Border-color transition makes the accent-on-expanded effect feel
+   * intentional rather than abrupt. */
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.nexus-task-card[open] {
+  /* Expanded state: accent-colored border + subtle elevation. The
+   * elevation makes the open card feel "lifted" off the chat surface,
+   * helping the user keep track of which task they're inspecting. */
+  border-color: var(--nexus-border-active);
+  box-shadow: var(--nexus-elev-1);
+}
+
+.nexus-task-card-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  /* No bottom border by default — collapsed cards look like pills.
+   * The :where(...) selector adds the divider only when the card is
+   * expanded, matching Kiro's clean accordion treatment. */
+  list-style: none;
+}
+
+/* Hide the default <summary> disclosure triangle. We rely on the open
+ * attribute + chevron rotation for the affordance. */
+.nexus-task-card-summary::-webkit-details-marker {
+  display: none;
+}
+.nexus-task-card-summary::marker {
+  display: none;
+}
+
+.nexus-task-card[open] > .nexus-task-card-summary {
+  border-bottom: 1px solid var(--nexus-border-hairline);
+}
+
+.nexus-task-card-summary:hover {
+  background: var(--nexus-accent-soft);
+}
+
+.nexus-task-card-summary:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: -2px;
+}
+
+.nexus-task-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--vscode-foreground);
+  /* Task titles can be long; flex-1 lets them grow into available
+   * space, then truncate with ellipsis if they overflow. */
+  flex: 1;
+  min-width: 0;
+}
+
+.nexus-task-card-title-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nexus-task-card-number {
+  /* The "1." prefix at the start of each task title. Visually
+   * de-emphasized so the title itself is the focus. */
+  color: var(--nexus-subtext);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.nexus-task-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.nexus-task-card-body {
+  /* The expanded content area. Padding gives breathing room around
+   * the various status / steps / tool-cards regions. */
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ─── Status pill — extended variants for task lifecycle ─────────── */
+
+.nexus-status-pill.reviewing {
+  /* Working/reviewing state. Uses VS Code's chart-orange so it picks
+   * up theme-appropriate hues (yellow-orange in dark, deeper orange
+   * in light themes). */
+  color: var(--vscode-charts-orange);
+  background: color-mix(in srgb, var(--vscode-charts-orange) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-charts-orange) 30%, transparent);
+}
+
+.nexus-status-pill.approved {
+  color: var(--vscode-testing-iconPassed);
+  background: color-mix(in srgb, var(--vscode-testing-iconPassed) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-testing-iconPassed) 30%, transparent);
+}
+
+.nexus-status-pill.rejected,
+.nexus-status-pill.error {
+  color: var(--vscode-testing-iconFailed);
+  background: color-mix(in srgb, var(--vscode-testing-iconFailed) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-testing-iconFailed) 30%, transparent);
+}
+
+.nexus-status-pill.reverted,
+.nexus-status-pill.undone {
+  color: var(--nexus-subtext);
+  background: var(--nexus-overlay-low);
+  border: 1px solid var(--nexus-border-hairline);
+}
+
+/* Override .nexus-status-pill base — make it uniform with task-activity-badge
+ * shape for visual consistency across the app. The Phase 1 base used
+ * border-radius:4px without borders; the redesign uses pill-shape and
+ * borders for better integration with the rest of the chrome. */
+.nexus-status-pill {
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  /* Inherit from prior .nexus-status-pill base — the gap, display,
+   * align-items, etc. don't need re-stating. The selector specificity
+   * ensures these properties cascade. */
+}
+
+/* ─── Button system extensions ──────────────────────────────────────
+ *
+ * Phase 1 added .nexus-btn-primary, .nexus-btn-secondary, .nexus-btn-ghost.
+ * This adds the small/icon variants needed for the rest of the app
+ * (the existing .btn-execute-all, .send-btn, .micro-btn, .auth-btn
+ * patterns). New classes coexist with the legacy ones during transition.
+ */
+
+.nexus-btn-sm {
+  /* Small button variant — used inside cards / inline actions. Not
+   * standalone; combines with .nexus-btn-primary, .nexus-btn-secondary,
+   * or .nexus-btn-ghost to override sizing. */
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.nexus-btn-icon {
+  /* Icon-only square button. Used for chevrons, close buttons, etc.
+   * The sizing matches lucide-react's default 16px icons + 4px padding. */
+  width: 24px;
+  height: 24px;
+  padding: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--nexus-subtext);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.nexus-btn-icon:hover {
+  background: var(--nexus-accent-soft);
+  color: var(--vscode-foreground);
+}
+
+.nexus-btn-icon:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.nexus-btn-icon[disabled],
+.nexus-btn-icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: transparent;
+}
+
+/* Button modifier classes — composable variants for sites that don't
+ * fit the default flex:2 / flex:1 ratio of .nexus-btn-primary /
+ * .nexus-btn-secondary. Used by the command-approval modal (equal
+ * weighting) and by destructive secondary actions (Block, Delete).
+ *
+ * Naming convention: --modifier suffix to signal these are modifier
+ * classes, not standalone variants. Apply alongside the base class.
+ */
+
+.nexus-btn--equal {
+  /* Override the default flex weights — make any nexus-btn fill its
+   * flex parent equally instead of the 2:1 primary:secondary ratio. */
+  flex: 1 !important;
+}
+
+.nexus-btn--danger {
+  /* Destructive variant of .nexus-btn-secondary. Applies the error
+   * color to text + a subtle red border. Used for Block, Delete,
+   * and other irreversible-action confirmations. The !important is
+   * needed to override .nexus-btn-secondary's own border-color. */
+  background: transparent !important;
+  border: 1px solid var(--vscode-testing-iconFailed) !important;
+  color: var(--vscode-testing-iconFailed) !important;
+}
+
+.nexus-btn--danger:hover {
+  background: color-mix(in srgb, var(--vscode-testing-iconFailed) 12%, transparent) !important;
+}
+
+/* Compact button variant — used for review-dock confirmations where
+ * the buttons sit in a smaller footprint than the main approve/reject
+ * pair. Smaller padding, same colors as the base variant. */
+.nexus-btn--compact {
+  padding: 6px 12px !important;
+  font-size: 12px;
+}
+
+/* ─── Tool-cards region — extend Phase 1's per-task border ──────────
+ *
+ * The Phase 1 .tool-call-cards-region.per-task accent was a 2px left
+ * border. With the redesigned task card now showing accent-on-expanded
+ * itself, we don't want competing accents. Reduce the per-task region
+ * to a 1px hairline so it stays as a visual marker but doesn't compete.
+ */
+.nexus-task-card[open] .tool-call-cards-region.per-task {
+  border-left-width: 1px;
+  border-left-color: var(--nexus-border-hairline);
+}
+
+/* ─── Phase 1.6: chat input + messages + empty state ────────────────
+ *
+ * Demo-prep polish for the most-touched surfaces during a live demo:
+ *   - Chat input area at the bottom (used every interaction turn)
+ *   - Message bubbles (where users read what NexusCode says back)
+ *   - Empty state (first thing visible when no messages yet)
+ *   - Compacted-message inline (was 100% inline-styled, now classed)
+ *
+ * Design language continues from Phase 1.5: VS Code theme tokens for
+ * structural colors, --nexus-accent for the single brand accent,
+ * generous spacing using --nexus-space-* tokens, subtle elevation
+ * via --nexus-elev-* for focused surfaces.
+ *
+ * Visual differentiation in messages:
+ *   - User messages: subtle accent-soft background, right-aligned name
+ *   - Assistant messages: accent left-border, left-aligned name, accent icon
+ *   - Both share the same content typography for readability
+ */
+
+/* ─── Chat input area ───────────────────────────────────────────── */
+
+.nexus-input-shell {
+  /* Outer wrapper for the bottom input area. Replaces .bottom-area's
+   * minimal styling with proper top-elevation shadow, separating the
+   * input visually from the chat history above. */
+  background: var(--vscode-editor-background);
+  border-top: 1px solid var(--nexus-border-default);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+  z-index: 10;
+  /* Subtle upward elevation to distinguish the input area from the
+   * chat scroll area above. Important for the demo because it makes
+   * the input feel "anchored." */
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.nexus-input-composer {
+  /* The textarea + send button + toolbar wrapper. Acts as the
+   * focusable surface — focus-within brings up the accent border. */
+  position: relative;
+  background: var(--vscode-input-background);
+  border: 1px solid var(--nexus-border-default);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.nexus-input-composer:focus-within {
+  border-color: var(--nexus-border-active);
+  box-shadow: 0 0 0 1px var(--nexus-border-active);
+}
+
+.nexus-input-composer.meta-active {
+  /* Meta mode (writing instructions instead of submitting): error-toned
+   * border to signal "this is going to behave differently." */
+  border-color: var(--vscode-charts-orange);
+}
+
+.nexus-input-composer.meta-active:focus-within {
+  box-shadow: 0 0 0 1px var(--vscode-charts-orange);
+}
+
+.nexus-input-textarea {
+  /* The textarea itself. Transparent background so the composer's
+   * background shows through. Explicit padding-right to leave room
+   * for the absolutely-positioned send button. */
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--vscode-input-foreground);
+  padding: 12px 48px 12px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+  box-sizing: border-box;
+  max-height: 180px;
+  /* Placeholder gets a softer color so it doesn't compete with real
+   * content visually. */
+}
+
+.nexus-input-textarea::placeholder {
+  color: var(--nexus-subtext);
+  opacity: 0.7;
+}
+
+.nexus-send-button {
+  /* Primary action: send the message. Bigger than the legacy .send-btn
+   * (28×28 vs 24×24) for easier mouse target + better visual weight.
+   * Accent-colored to draw the eye. */
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 28px;
+  height: 28px;
+  background: var(--nexus-accent);
+  color: var(--vscode-editor-background);
+  border: none;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
+}
+
+.nexus-send-button:hover:not(:disabled) {
+  /* Slight scale up on hover for affordance. Accent gets a touch
+   * brighter via color-mix. */
+  background: color-mix(in srgb, var(--nexus-accent) 85%, white);
+  transform: scale(1.05);
+}
+
+.nexus-send-button:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.nexus-send-button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.nexus-send-button.stop {
+  /* Stop variant: shown while a task is running. Error-colored to
+   * signal "interrupt." Same shape, different semantic. */
+  background: var(--vscode-testing-iconFailed);
+}
+
+.nexus-send-button.stop:hover {
+  background: color-mix(in srgb, var(--vscode-testing-iconFailed) 85%, white);
+}
+
+/* ─── Chat messages ─────────────────────────────────────────────── */
+
+.nexus-message {
+  /* Replaces .message. Slightly tighter padding, supports the user/
+   * assistant variant via modifier classes. */
+  padding: 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: nexus-fadein 220ms ease-out;
+}
+
+.nexus-message.user {
+  /* User message: subtle accent-tinted background spanning the full
+   * width. Helps the eye scan: user prompts vs assistant responses
+   * read as visually distinct rows. */
+  background: var(--nexus-accent-soft);
+  border-left: 3px solid var(--nexus-accent-line);
+}
+
+.nexus-message.assistant {
+  /* Assistant message: accent border-left in active accent. Reads as
+   * "the assistant is talking." */
+  border-left: 3px solid var(--nexus-accent);
+  /* No background — keeps assistant messages visually lighter so the
+   * eye lands on user prompts in long sessions. */
+}
+
+.nexus-message-header {
+  /* Name + role icon row. Smaller and more discreet than the legacy
+   * .message-header so the actual content gets visual emphasis. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--nexus-subtext);
+}
+
+.nexus-message-header.user {
+  color: var(--nexus-subtext);
+}
+
+.nexus-message-header.assistant {
+  /* Assistant header gets accent text — reinforces the accent border. */
+  color: var(--nexus-accent);
+}
+
+.nexus-message-content {
+  /* Main content. Slightly tighter line-height than the legacy
+   * .message-content for denser reading. */
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--vscode-foreground);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* When the content is markdown-rendered, apply some Phase 1.6 polish
+ * over the existing .markdown-body styles. Doesn't override structure,
+ * just refines typography. */
+.nexus-message-content.markdown-body p {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.nexus-message-content.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.nexus-message-content.markdown-body code {
+  /* Inline code: slightly more padding and a subtler background for
+   * better legibility against the accent-tinted user-message background. */
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.nexus-message-content.markdown-body pre {
+  /* Code blocks: slightly more elevated treatment. */
+  margin-top: 8px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  background: var(--vscode-textBlockQuote-background, var(--vscode-editor-background));
+  border: 1px solid var(--nexus-border-hairline);
+}
+
+/* ─── Empty state ───────────────────────────────────────────────── */
+
+.nexus-chat-empty {
+  /* Replaces the bare text "How can I help you build today?" with a
+   * proper empty state. Centered vertically + horizontally in the
+   * chat area, with a subtle illustration via icon and a clear hint. */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 48px 24px;
+  min-height: 240px;
+  color: var(--nexus-subtext);
+  text-align: center;
+  /* Subtle fade-in so the empty state doesn't feel jarring on initial
+   * mount or session switch. */
+  animation: nexus-fadein 280ms ease-out;
+}
+
+.nexus-chat-empty-icon {
+  /* Icon container. Larger than inline icons, accent-tinted so it
+   * carries product identity rather than reading as decoration. */
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  background: var(--nexus-accent-soft);
+  border: 1px solid var(--nexus-accent-line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--nexus-accent);
+}
+
+.nexus-chat-empty-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  margin: 0;
+}
+
+.nexus-chat-empty-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--nexus-subtext);
+  max-width: 280px;
+  margin: 0;
+}
+
+.nexus-chat-empty-shortcuts {
+  /* Optional shortcut hints below the empty state — small chips that
+   * suggest what the user can do. Kept subtle so they don't compete
+   * with the main message. */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.nexus-chat-empty-shortcut {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--nexus-subtext);
+  background: var(--nexus-overlay-low);
+  border: 1px solid var(--nexus-border-hairline);
+  border-radius: 999px;
+}
+
+/* ─── Compacted-message banner ──────────────────────────────────── */
+
+.nexus-message-compacted {
+  /* The "Context Compacted" banner that appears between message
+   * groups when chat history was summarized. Was 100% inline-styled.
+   * This class produces an identical visual but lets us refine
+   * coherently with the rest of the redesign. */
+  margin: 16px 16px;
+  padding: 8px 12px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border-radius: 6px;
+  font-size: 11px;
+  border: 1px solid var(--nexus-border-default);
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
+}
+
+.nexus-message-compacted:hover {
+  opacity: 1;
+}
+
+.nexus-message-compacted summary {
+  font-weight: 600;
+  outline: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.nexus-message-compacted summary::-webkit-details-marker {
+  display: none;
+}
+
+.nexus-message-compacted-body {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--vscode-editor-background);
+  border-radius: 4px;
+  border: 1px solid var(--nexus-border-hairline);
+}
+
+/* ─── Phase 1.7: app header / product identity ───────────────────── */
+
+.nexus-app-header {
+  /* Top-of-panel header. Replaces .tiny-header's plain text with a
+   * proper product-identity row: brand mark on left, status on right.
+   * Demo-grade product polish — first thing client sees besides tabs. */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--nexus-border-default);
+  background: var(--vscode-editor-background);
+  flex-shrink: 0;
+  z-index: 10;
+  /* Header has its own subtle elevation underneath, mirroring the
+   * input shell's elevation above the chat. Both anchor the
+   * interactive zones around the chat scroll area. */
+  box-shadow: 0 1px 0 0 var(--nexus-border-default);
+}
+
+.nexus-app-header-brand {
+  /* Brand mark + wordmark cluster. Accent-colored so the product
+   * identity reads at a glance even without zooming. */
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--vscode-foreground);
+}
+
+.nexus-app-header-brand-icon {
+  /* Small accent-tinted square for the brand icon. Matches the
+   * empty-state icon container's visual language but smaller. */
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--nexus-accent-soft);
+  border: 1px solid var(--nexus-accent-line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--nexus-accent);
+  flex-shrink: 0;
+}
+
+.nexus-app-header-wordmark {
+  /* "NexusCode" text. Slight letter-spacing for product-feel. */
+  letter-spacing: 0.2px;
+}
+
+.nexus-app-header-status {
+  /* Right-aligned status area. Used for meta-mode indicator,
+   * connection state, or other ambient UI signals. Defaults to
+   * subtle subtext color. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--nexus-subtext);
+  white-space: nowrap;
+}
+
+.nexus-app-header-status.meta-active {
+  /* Meta mode: orange status, signaling self-evolution is on. */
+  color: var(--vscode-charts-orange);
+  font-weight: 600;
+}
+
+.nexus-app-header-status-dot {
+  /* Tiny status dot for connection/health indicators. 6×6, accent
+   * color by default, modifiable via parent class. */
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--nexus-accent);
+  flex-shrink: 0;
+}
+
+.nexus-app-header-status-dot.warning {
+  background: var(--vscode-charts-orange);
+}
+
+.nexus-app-header-status-dot.error {
+  background: var(--vscode-testing-iconFailed);
+}
+
+/* ─── Phase 1.7: tool-card visual sync with Phase 1.5/1.6 ─────────
+ *
+ * The .tool-call-card outer chrome already has a nice pattern:
+ * status-colored left border (orange running / green success / red error)
+ * that mirrors Phase 1.5's status pill colors. These small additions
+ * bring it into closer alignment with the rest of the redesign:
+ *
+ *   1. Subtle elevation lift when the card is in "running" state — the
+ *      active card visually rises off the chat surface, matching how
+ *      .nexus-task-card[open] uses elevation
+ *   2. Smooth border-color transition so status transitions don't snap
+ *   3. Slightly tighter typography to match Phase 1.6's 13px content
+ *      standard (was 12px / --nexus-text-sm)
+ *
+ * Why so few changes: the existing tool-card chrome is functional and
+ * the body components (DiffBody, ExecutableBody, InformationalBody,
+ * NetworkBody) have content-specific styling appropriate to what they
+ * render. A diff with a #0d1117 background reads more clearly than the
+ * editor-bg color; that's by design. Touching it would make diffs less
+ * readable for marginal aesthetic gain. Demo-grade restraint.
+ */
+
+.tool-call-card {
+  /* Add smooth transition to the existing class so status-color changes
+   * (running → success / error) animate rather than snap. The selector
+   * matches the existing .tool-call-card definition's properties; the
+   * transition is purely additive. */
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.tool-call-card[data-status="running"] {
+  /* Subtle elevation lift while a tool is running. Mirrors how
+   * .nexus-task-card[open] uses --nexus-elev-1 to "lift" expanded
+   * cards. The accent here is the orange border that's already set
+   * on running cards; we just add depth. */
+  box-shadow: var(--nexus-elev-1);
+}
+/* ─── Phase 1.8: security card + skill view + map refinements ──────
+ *
+ * Three small contained additions. Each has a clear purpose:
+ *   1. .nexus-security-card — replaces the inline-styled "SECURITY
+ *      INTERCEPTOR" warning banner that asks the user to allow/block
+ *      a shell command before execution. Critical UX moment because
+ *      it gates real code execution; deserves clear chrome.
+ *   2. .nexus-skill-view — the Skills tab content. Was inline-styled.
+ *      Just a header + textarea + save button, but each piece can
+ *      benefit from proper typography rhythm.
+ *   3. .nexus-map-toggle — the 3-button toolbar inside the Map view
+ *      (Code AST / Requirements / Combined Traceability). Refines
+ *      the existing inline styles WITHOUT touching the GitHub-dark
+ *      Map palette (intentional design for data-viz coherence).
+ */
+
+/* ─── Security card ─────────────────────────────────────────────── */
+
+.nexus-security-card {
+  /* Container for the "command requires approval" warning. Yellow-
+   * orange accent because security warnings should read as cautionary,
+   * not catastrophic. The user can choose to allow, so it's not an
+   * error — it's a "hold on, are you sure" moment. */
+  margin: 12px 16px;
+  border: 1px solid var(--vscode-charts-orange);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--vscode-editor-background);
+  /* Subtle elevation matching other interactive cards (task card open,
+   * running tool card). Signals "active decision required." */
+  box-shadow: var(--nexus-elev-1);
+  /* Animate-in when the banner appears so it draws attention. */
+  animation: nexus-fadein 220ms ease-out;
+}
+
+.nexus-security-card-header {
+  /* Yellow-tinted header strip. Reads as "warning" without being
+   * loud-red. Icon + label in uppercase. */
+  background: color-mix(in srgb, var(--vscode-charts-orange) 12%, transparent);
+  padding: 10px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--vscode-charts-orange);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--vscode-charts-orange) 30%, transparent);
+}
+
+.nexus-security-card-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--vscode-editor-background);
+}
+
+.nexus-security-card-message {
+  /* The plain-language explanation: "I'd like to run this command
+   * because..." Same typography as chat content for consistency. */
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vscode-foreground);
+}
+
+.nexus-security-card-command {
+  /* The actual shell command being requested. Black-on-green terminal
+   * aesthetic. The user sees EXACTLY what would run — non-negotiable
+   * for security trust. */
+  display: block;
+  padding: 10px 12px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #73c991;
+  font-family: var(--vscode-editor-font-family), Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  /* Long commands wrap rather than scrolling — user MUST see the
+   * whole command for an informed decision. */
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.nexus-security-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ─── Skill view ────────────────────────────────────────────────── */
+
+.nexus-skill-view {
+  /* Outer container. Padding matches the Spec/Coder tab content. */
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  flex: 1;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.nexus-skill-view-inner {
+  /* Inner column to host the header + description + textarea + button. */
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 12px;
+}
+
+.nexus-skill-view-header {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  margin: 0;
+  letter-spacing: 0.2px;
+}
+
+.nexus-skill-view-description {
+  /* Help text under the header. Slightly tighter line-height than
+   * chat content because it's instructional and short. */
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--nexus-subtext);
+}
+
+.nexus-skill-view-description code {
+  /* Inline code reference (e.g. `.nexusrules`). Subtle background tint
+   * so it reads as "filename" without being heavy. */
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--nexus-overlay-low);
+  border: 1px solid var(--nexus-border-hairline);
+  font-size: 11px;
+  color: var(--vscode-foreground);
+}
+
+.nexus-skill-view-textarea {
+  /* Main editor for the .nexusrules content. Monospace because the
+   * content is rule-like / code-like. Substantial padding for
+   * comfortable typing. */
+  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--nexus-border-default);
+  border-radius: 6px;
+  font-family: var(--vscode-editor-font-family), Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.nexus-skill-view-textarea:focus {
+  border-color: var(--nexus-border-active);
+  box-shadow: 0 0 0 1px var(--nexus-border-active);
+}
+
+.nexus-skill-view-textarea::placeholder {
+  color: var(--nexus-subtext);
+  opacity: 0.65;
+}
+
+.nexus-skill-view-actions {
+  /* Save button row. flex-shrink:0 so it stays visible when the
+   * textarea grows. */
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ─── Map view refinements ──────────────────────────────────────────
+ *
+ * The Map view uses an intentional GitHub-dark palette
+ * (#0d1117 / #30363d / #58a6ff) for data-viz coherence with the
+ * three.js render. We DO NOT migrate it to VS Code theme tokens —
+ * that would break the visual coherence with the WebGL canvas.
+ *
+ * What we DO refine: the 3-button toolbar at the top. Currently each
+ * button has its own copy of inline styles. These classes consolidate
+ * the styling for hover/active states.
+ */
+
+.nexus-map-toggle-group {
+  /* Container for the 3 toggle buttons. Pill-shape background with
+   * the buttons sitting inside as segments. */
+  display: flex;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 4px;
+  border-radius: 6px;
+}
+
+.nexus-map-toggle {
+  /* Individual toggle button. Off-state is transparent; on-state is
+   * the GitHub-blue accent (#58a6ff equivalent — using #007acc here
+   * matches the existing inline styles for compat). */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: transparent;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s ease;
+  font-family: inherit;
+}
+
+.nexus-map-toggle:hover {
+  /* Subtle hover tint that reads in dark backgrounds. */
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.nexus-map-toggle.active {
+  background: #007acc;
+}
+
+.nexus-map-toggle.active:hover {
+  /* Slight brightness on active+hover to keep the affordance visible. */
+  background: #1a8fd9;
+}
+
+.nexus-map-toggle:focus-visible {
+  outline: 1px solid #58a6ff;
+  outline-offset: 1px;
+}
+
+/* ─── Phase 1.9: Spec view chrome ────────────────────────────────────
+ *
+ * The Spec view (the "Spec" tab) is the multi-phase workflow that takes
+ * a raw idea → PRD → design → implementation plan. It has 4 distinct
+ * states the user can be in:
+ *
+ *   1. Empty: no requirements yet → user types an idea, attaches docs,
+ *      clicks "Auto-Generate RAG-Enhanced PRD"
+ *   2. Generating: PRD or design being drafted → log streamer with stop
+ *   3. Requirements drafted: markdown preview + edit + approve/reject
+ *   4. Design drafted: combined preview + tasks-generation
+ *
+ * Most of the inline styling here predates Phase 1's utility classes.
+ * This bundle migrates the remaining ~150 LOC of inline styles into
+ * proper class systems matching the Phase 1.5/1.6 visual language.
+ *
+ * What we DO NOT touch:
+ *   - .nexus-flex-* / .nexus-btn-* / .nexus-textarea-mono / .markdown-body
+ *     (already used correctly throughout the Spec view)
+ *   - .plan-card / .plan-card-header (already styled, used for the
+ *     log streamer card outer chrome)
+ *   - .nexus-action-row (already exists for the approve/reject button rows)
+ */
+
+/* ─── Outer container ─────────────────────────────────────────────── */
+
+.nexus-spec-view {
+  /* Replaces the inline-styled wrapper at line 1660. Same layout, just
+   * extracted into a class. The display:flex|none toggle stays inline
+   * because it's controlled by activeTab state. */
+  flex-direction: column;
+  padding: 20px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ─── Empty-state intro ──────────────────────────────────────────── */
+
+.nexus-spec-intro {
+  /* The "Start a new project" intro when no requirements exist yet.
+   * Single column with consistent gap between elements. */
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.nexus-spec-intro-title {
+  /* Header at 16px / 600 — matches the Skill view header for visual
+   * consistency across the tabs. */
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  letter-spacing: 0.2px;
+}
+
+.nexus-spec-intro-description {
+  /* Helper paragraph below the title. Subtle subtext color, tighter
+   * line-height because it's instructional. */
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--nexus-subtext);
+}
+
+.nexus-spec-attach-row {
+  /* The row containing the "Attach Specs / API Docs" button. */
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.nexus-spec-attach-button {
+  /* Distinctive ghost-style button with the editor-inactive background.
+   * Used only here — not promoted to a generic .nexus-btn variant
+   * because it has a specific role: "open the spec/api docs picker."
+   * The background tint signals "secondary action available" without
+   * competing with the primary auto-generate button below. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  color: var(--vscode-foreground);
+  border: 1px solid var(--nexus-border-default);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.nexus-spec-attach-button:hover {
+  background: var(--nexus-accent-soft);
+  border-color: var(--nexus-border-hover);
+}
+
+.nexus-spec-attach-button:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* ─── Search dropdown panel ─────────────────────────────────────── */
+
+.nexus-spec-search-panel {
+  /* The collapsible search panel for finding spec/API doc files. Matches
+   * the elevation pattern of other interactive cards (input composer,
+   * security card) — subtle shadow signals "active interaction surface." */
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--nexus-border-default);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 10px;
+  box-shadow: var(--nexus-elev-1);
+  /* Animate open so the user can see WHERE the panel came from when
+   * clicking "Attach Specs". */
+  animation: nexus-fadein 200ms ease-out;
+}
+
+.nexus-spec-search-panel-header {
+  /* Title row inside the panel. Small uppercase label + close button. */
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.nexus-spec-search-panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--nexus-subtext);
+}
+
+.nexus-spec-search-close {
+  /* Small "X" close button. Transparent ghost-style. */
+  background: transparent;
+  border: none;
+  color: var(--nexus-subtext);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 3px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.nexus-spec-search-close:hover {
+  background: var(--nexus-overlay-mid);
+  color: var(--vscode-foreground);
+}
+
+.nexus-spec-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.nexus-spec-search-input:focus {
+  border-color: var(--nexus-border-active);
+}
+
+.nexus-spec-search-results {
+  max-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nexus-spec-search-result {
+  /* Individual search result row — clickable button styled as a list
+   * item. Hover-tinted to feel interactive. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  padding: 5px 6px;
+  font-size: 12px;
+  font-family: inherit;
+  border-radius: 3px;
+  transition: background 0.12s ease;
+}
+
+.nexus-spec-search-result:hover {
+  background: var(--nexus-accent-soft);
+}
+
+.nexus-spec-search-empty {
+  /* "No files found" message when search comes up empty. */
+  font-size: 11px;
+  color: var(--nexus-subtext);
+  padding: 4px 6px;
+}
+
+/* ─── Initial idea textarea ─────────────────────────────────────── */
+
+.nexus-spec-textarea {
+  /* The initial 5-row textarea where the user types their raw idea.
+   * Different from .nexus-textarea-mono (used in edit mode for already-
+   * drafted PRDs) — this one uses the editor font for prose, not mono. */
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--nexus-border-default);
+  border-radius: 6px;
+  font-family: var(--vscode-editor-font-family), Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.nexus-spec-textarea:focus {
+  border-color: var(--nexus-border-active);
+  box-shadow: 0 0 0 1px var(--nexus-border-active);
+}
+
+.nexus-spec-textarea::placeholder {
+  color: var(--nexus-subtext);
+  opacity: 0.65;
+}
+
+/* ─── Primary CTA button ────────────────────────────────────────── */
+
+.nexus-spec-cta {
+  /* The big primary button on the Spec view: "Auto-Generate RAG-
+   * Enhanced PRD", "Generate Architecture Design", etc. Bigger than
+   * .nexus-btn-primary because it's the focal action of the screen. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--nexus-accent);
+  color: var(--vscode-editor-background);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  letter-spacing: 0.2px;
+  transition: background 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.nexus-spec-cta:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--nexus-accent) 85%, white);
+  box-shadow: var(--nexus-elev-1);
+}
+
+.nexus-spec-cta:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.nexus-spec-cta:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: var(--nexus-accent);
+}
+
+/* ─── Log streamer (during PRD/design generation) ──────────────── */
+
+.nexus-spec-progress {
+  /* The streaming log body of the .plan-card during generation. Was
+   * inline-styled with hard-coded background and font. This class
+   * preserves the monospace-terminal feel but uses theme tokens. */
+  padding: 14px 16px;
+  flex: 1;
+  overflow-y: auto;
+  background: var(--vscode-input-background);
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family), Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  /* Inherit border-radius from the parent .plan-card so the bottom
+   * corners match the card's outer shape. */
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
+}
+
+.nexus-spec-progress-line {
+  /* Each log line. Default color is inherit (descriptionForeground from
+   * the parent). Specific log types get tinted via data-kind attribute,
+   * removing the inline-style ternary that was matching log content
+   * in JSX. */
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.nexus-spec-progress-line[data-kind="header"] {
+  /* Lines containing "━━━" — section dividers in the log stream. */
+  color: var(--vscode-textLink-foreground);
+  font-weight: 600;
+}
+
+.nexus-spec-progress-line[data-kind="error"] {
+  /* Lines containing "❌" or "Error" — surface errors in the log. */
+  color: var(--vscode-errorForeground);
+}
+
+.nexus-spec-progress-line[data-kind="property"] {
+  /* Lines with "Domain:" or "Product Type:" — semantic property
+   * declarations in the log stream. */
+  color: var(--vscode-symbolIcon-propertyForeground);
+}
+
+.nexus-spec-progress-stop {
+  /* The "Stop" button in the log streamer header. Small + danger-tinted
+   * to match the cancel action's destructive nature. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--vscode-testing-iconFailed);
+  border: 1px solid var(--vscode-testing-iconFailed);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 0.15s ease;
+}
+
+.nexus-spec-progress-stop:hover {
+  background: color-mix(in srgb, var(--vscode-testing-iconFailed) 12%, transparent);
+}
+
+/* ─── Tasks-generation loading bar ──────────────────────────────── */
+
+.nexus-spec-tasks-loader {
+  /* The "Drafting Master Implementation Plan..." horizontal bar that
+   * appears between design-approved and tasks-generated states. Uses
+   * the accent color to signal "primary action in progress." */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  margin-top: 15px;
+  background: var(--nexus-accent);
+  color: var(--vscode-editor-background);
+  border-radius: 6px;
+  /* Subtle elevation to lift the in-progress bar off the surrounding
+   * preview pane. */
+  box-shadow: var(--nexus-elev-1);
+}
+
+.nexus-spec-tasks-loader-stop {
+  /* Stop button inside the loader bar. White-on-accent ghost style. */
+  background: transparent;
+  border: 1px solid var(--vscode-editor-background);
+  color: var(--vscode-editor-background);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 0.15s ease;
+}
+
+.nexus-spec-tasks-loader-stop:hover {
+  background: color-mix(in srgb, var(--vscode-editor-background) 15%, transparent);
 }

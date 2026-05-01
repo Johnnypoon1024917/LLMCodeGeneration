@@ -280,4 +280,54 @@ describe('generateTasks — retry behavior', () => {
 
         expect(mockProvider.jsonCompletion).toHaveBeenCalledTimes(2);
     });
+
+    // ─── Hotfix (post-2B): tailored corrective for zero-tasks failure ───
+
+    function zeroTasksPlan(): AIPlan {
+        return {
+            folderStructure: [],
+            implementationTasks: []
+        };
+    }
+
+    test('zero-tasks corrective specifically tells the model to produce at least one task', async () => {
+        // First attempt: empty array. Retry should be a corrective
+        // tailored to zero-tasks (the most common W4A8 failure mode).
+        mockProvider.jsonCompletion
+            .mockResolvedValueOnce(zeroTasksPlan())
+            .mockResolvedValueOnce(goodPlan());
+
+        await generateTasks('PRD content', 'Design content', 'src/');
+
+        const secondCallMessages = mockProvider.jsonCompletion.mock.calls[1]![0];
+        const lastMessage = secondCallMessages[secondCallMessages.length - 1];
+        expect(lastMessage.role).toBe('system');
+        // The corrective should mention "at least one" or "empty array" —
+        // NOT just the generic "non-empty values for step/file" message.
+        expect(lastMessage.content as string).toMatch(
+            /at least one task|empty.*invalid|never return an empty/i
+        );
+        // It should explicitly call out the user's empty-array mistake
+        // (rather than a generic field-level message).
+        expect(lastMessage.content as string).toContain('empty implementationTasks array');
+    });
+
+    test('field-level corrective does NOT use the zero-tasks language', async () => {
+        // First attempt: tasks present but with empty fields. The
+        // corrective should be the field-level message, not the
+        // zero-tasks message.
+        mockProvider.jsonCompletion
+            .mockResolvedValueOnce(emptyPlan())
+            .mockResolvedValueOnce(goodPlan());
+
+        await generateTasks('PRD content', 'Design content', 'src/');
+
+        const secondCallMessages = mockProvider.jsonCompletion.mock.calls[1]![0];
+        const lastMessage = secondCallMessages[secondCallMessages.length - 1];
+        expect(lastMessage.role).toBe('system');
+        // Field-level corrective uses "non-empty values".
+        expect(lastMessage.content as string).toContain('non-empty values');
+        // Should NOT contain the zero-tasks specific language.
+        expect(lastMessage.content as string).not.toContain('empty implementationTasks array');
+    });
 });

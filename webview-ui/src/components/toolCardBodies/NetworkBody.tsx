@@ -1,4 +1,3 @@
-
 // webview-ui/src/components/toolCardBodies/NetworkBody.tsx
 //
 // Component 2B-4d: body strategy for "network" tools.
@@ -134,7 +133,10 @@ export function NetworkBody({ state }: NetworkBodyProps): React.ReactElement {
                     </span>
                 )}
                 {parsed.status !== undefined && (
-                    <StatusChip status={parsed.status} statusText={parsed.statusText} />
+                    <StatusChip
+                        status={parsed.status}
+                        {...(parsed.statusText !== undefined ? { statusText: parsed.statusText } : {})}
+                    />
                 )}
                 {parsed.truncated && (
                     <span className="tool-call-info-meta-item tool-call-info-truncated">
@@ -208,10 +210,11 @@ function parseWebFetchPayload(content: string): ParsedWebFetch {
     return {
         url: url!.trim(),
         status,
-        statusText: statusText?.trim(),
+        // exactOptionalPropertyTypes: only include statusText when defined.
+        ...(statusText !== undefined ? { statusText: statusText.trim() } : {}),
         body,
         truncated,
-        parsed: true
+        parsed: true as const
     };
 }
 

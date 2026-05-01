@@ -30,6 +30,21 @@
           "default": "qwen2.5-coder",
           "description": "%configuration.nexuscode.model.description%"
         },
+        "nexuscode.modelPlanner": {
+          "type": "string",
+          "default": "",
+          "description": "Model identifier for the Planner agent. Leave empty to use the global `nexuscode.model`. Set to a stronger reasoning model (e.g. DeepSeek V4 Pro) when you want to upgrade plan quality without paying for it on every Coder invocation."
+        },
+        "nexuscode.modelCoder": {
+          "type": "string",
+          "default": "",
+          "description": "Model identifier for the Coder agent. Leave empty to use the global `nexuscode.model`. Set to a faster/cheaper model (e.g. DeepSeek V4 Flash) for per-step code generation when the global default is reserved for Planner."
+        },
+        "nexuscode.modelVerifier": {
+          "type": "string",
+          "default": "",
+          "description": "Model identifier for the Verifier agent (PRD-review LLM call). Leave empty to use the global `nexuscode.model`. Verification is short, deterministic, and tolerant of smaller/faster models \u2014 useful for cost optimization."
+        },
         "nexuscode.apiKey": {
           "type": "string",
           "default": "",
@@ -41,6 +56,21 @@
           "minimum": 1,
           "maximum": 5,
           "description": "%configuration.nexuscode.maxVerificationRetries.description%"
+        },
+        "nexuscode.rateLimits.maxToolCallsPerTask": {
+          "type": "number",
+          "default": 100,
+          "minimum": 0,
+          "description": "Hard cap on the total number of tool calls (read_file, write_file, bash_exec, etc.) the agent may make within a single task. Subsequent calls are rejected with an error result, preventing runaway agents from hammering the workspace. Set to 0 to reject all tool calls (debugging only). Default 100 — typical tasks complete in 10-30 calls; the cap accommodates complex multi-file edits with headroom."
+        },
+        "nexuscode.rateLimits.perTool": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0
+          },
+          "description": "Per-tool call limits within a single task. Map of tool name (e.g. \"bash_exec\", \"write_file\") to maximum calls. Tools not listed here are governed only by `rateLimits.maxToolCallsPerTask`. Example: {\"bash_exec\": 10, \"write_file\": 30}. Use this to constrain the most dangerous tools more tightly than the overall cap."
         }
       }
     },

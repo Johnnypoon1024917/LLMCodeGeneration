@@ -1,80 +1,145 @@
 {
-  "common": {
-    "appName": "NexusCode",
-    "yes": "Yes",
-    "no": "No",
-    "cancel": "Cancel",
-    "ok": "OK",
-    "send": "Send",
-    "save": "Save",
-    "retry": "Retry"
+  "api_key": {
+    "cleared": "NexusCode: API key cleared.",
+    "saved_securely": "NexusCode: API Key Saved Securely!",
+    "saved_to_secret_storage": "NexusCode: API key saved to SecretStorage."
+  },
+  "build_healer": {
+    "compiler_failed": "❌ Global Compiler Failed. Initializing Build-Healer...",
+    "compiler_passed": "✅ Global Compiler Passed! The app is structurally sound.",
+    "no_safe_patch": "⚠️ Build-Healer could not determine a safe patch. Manual intervention required."
+  },
+  "buttons": {
+    "auto_execute": "Auto-execute task",
+    "auto_run_tests": "Auto-Generate & Run Tests for the currently open file",
+    "clear_chat": "Clear Chat History",
+    "code_ast": "Code AST",
+    "compare_changes": "Compare Changes",
+    "open_in_editor": "Open File in Editor",
+    "refresh_ui": "Refresh UI",
+    "stop_generation": "Stop Generation",
+    "strict_compile": "Run strict project-wide compilation check",
+    "tdd_master_suite": "Generate Master TDD Suite (Markdown Plan + Code) in /nexuscode",
+    "undo_edit": "Undo Edit",
+    "verify_manual": "Verify manual code",
+    "visualize_graph": "Visualize Workspace Context Graph"
   },
   "chat": {
+    "assistant_label": "Nexus",
     "input": {
       "placeholder": "Ask a question or request a build...",
       "placeholder_meta_mode": "Modify source code..."
     },
+    "loading_nexus": "Loading Nexus...",
+    "swarm_execution_logs": "Swarm Execution Logs",
     "user_label": "You",
-    "assistant_label": "Nexus"
-  },
-  "commands": {
-    "open_sidebar_first": "Please open the NexusCode sidebar first.",
-    "highlight_code_to_review": "Please highlight some code to review.",
-    "command_blocked_by_user": "Command execution blocked by user.",
-    "switched_mode": "Switched to: {{mode}}"
-  },
-  "api_key": {
-    "cleared": "NexusCode: API key cleared.",
-    "saved_to_secret_storage": "NexusCode: API key saved to SecretStorage.",
-    "saved_securely": "NexusCode: API Key Saved Securely!"
+    "view_prompt_instructions": "View Prompt Instructions",
+    "working": "Working..."
   },
   "codelens": {
     "manually_refreshed": "NexusCode: CodeLens manually refreshed!"
   },
-  "ui_evolution": {
-    "ui_rebuilt": "🎨 UI Rebuilt! Refreshing Webview...",
-    "ui_build_failed": "💥 UI Build Failed! Check Output.",
-    "evolution_applied": "🧬 Evolution Applied. Reload window to see changes.",
-    "build_failed": "💥 Build Failed! Check Output."
+  "commands": {
+    "command_blocked_by_user": "Command execution blocked by user.",
+    "highlight_code_to_review": "Please highlight some code to review.",
+    "open_sidebar_first": "Please open the NexusCode sidebar first.",
+    "switched_mode": "Switched to: {{mode}}"
+  },
+  "common": {
+    "appName": "NexusCode",
+    "cancel": "Cancel",
+    "loading": "Loading...",
+    "no": "No",
+    "ok": "OK",
+    "retry": "Retry",
+    "save": "Save",
+    "send": "Send",
+    "yes": "Yes"
+  },
+  "errors": {
+    "spec_not_found": "Spec '{{name}}' not found"
+  },
+  "hooks": {
+    "no_hooks_defined": "NexusCode: no hooks defined yet. Create .nexus/hooks/<n>.md to add one."
+  },
+  "mention": {
+    "attach_file_context": "Attach File Context"
+  },
+  "meta_context": {
+    "no_backup": "No backup found to restore!",
+    "restore_failed": "CRITICAL: Restore failed. You may need to manually fix the source.",
+    "restored_from_backup": "Safety Guardrail: Source code restored from backup."
+  },
+  "node_details": {
+    "classes_label": "Classes:",
+    "exports_label": "Exports:",
+    "functions_label": "Functions:"
+  },
+  "onboarding": {
+    "save_key_button": "Save Key to OS Vault",
+    "save_key_prompt": "To use Enterprise features, please securely store your API Key.",
+    "skip_local_button": "Use Local LLM (Skip)",
+    "welcome_andromeda": "Welcome to Andromeda"
+  },
+  "project": {
+    "describe_idea": "Describe your app idea. Attach API docs or reference files to enforce exact payloads.",
+    "start_new": "Start a New Project"
+  },
+  "search": {
+    "header": "Search Workspace",
+    "no_files_found": "No files found.",
+    "placeholder_files": "Search files by name (e.g., stripe.ts)...",
+    "scanning_workspace": "Scanning workspace geometry..."
+  },
+  "security": {
+    "access_denied_swarm": "🛡️ Nexus Security: Access Denied. Please log in to use the Swarm.",
+    "firewall_blocked": "🚨 Nexus Security Firewall BLOCKED a malicious command: {{command}}"
+  },
+  "skills": {
+    "header": "Agent Skills & Directives"
   },
   "steering": {
     "rules_saved": "✨ NexusCode steering rules saved to .nexus/steering/structure.md",
     "save_failed": "Failed to save steering rules"
   },
-  "undo": {
-    "failed_to_undo": "Failed to undo file edit.",
-    "no_history": "No undo history found for this task."
+  "terminal": {
+    "extension_updated": "Extension updated successfully. Reloading...",
+    "self_evolution_failed": "Self-Evolution Failed: Compilation Error. Check Output for details."
   },
-  "build_healer": {
-    "compiler_passed": "✅ Global Compiler Passed! The app is structurally sound.",
-    "compiler_failed": "❌ Global Compiler Failed. Initializing Build-Healer...",
-    "no_safe_patch": "⚠️ Build-Healer could not determine a safe patch. Manual intervention required."
+  "tests": {
+    "all_passed": "All tests passed on the first try!",
+    "auto_heal_parse_failed": "Auto-heal failed to parse LLM output.",
+    "auto_heal_still_failing": "Auto-Heal attempted, but tests still failing.",
+    "dependency_install_failed": "Dependency installation failed. Aborting tests.",
+    "generation_failed": "Failed to generate or run tests."
+  },
+  "tokens": {
+    "task_input": "Task Input Tokens",
+    "task_output": "Task Output Tokens",
+    "total_input": "Total Input Tokens",
+    "total_output": "Total Output Tokens"
+  },
+  "traceability": {
+    "header": "Traceability Matrix",
+    "matrix_computing": "The graph currently shows physical files. Semantic AI links are being calculated in the background and will appear here shortly.",
+    "matrix_computing_label": "Matrix Computing:",
+    "subheader": "Click a 3D Node to view its structural text data."
   },
   "transactions": {
     "atomic_committed": "Atomic Transaction Committed with AI Metadata."
   },
-  "tests": {
-    "dependency_install_failed": "Dependency installation failed. Aborting tests.",
-    "auto_heal_still_failing": "Auto-Heal attempted, but tests still failing.",
-    "auto_heal_parse_failed": "Auto-heal failed to parse LLM output.",
-    "all_passed": "All tests passed on the first try!",
-    "generation_failed": "Failed to generate or run tests."
+  "ui_evolution": {
+    "build_failed": "💥 Build Failed! Check Output.",
+    "evolution_applied": "🧬 Evolution Applied. Reload window to see changes.",
+    "ui_build_failed": "💥 UI Build Failed! Check Output.",
+    "ui_rebuilt": "🎨 UI Rebuilt! Refreshing Webview..."
   },
-  "hooks": {
-    "no_hooks_defined": "NexusCode: no hooks defined yet. Create .nexus/hooks/<n>.md to add one."
+  "undo": {
+    "failed_to_undo": "Failed to undo file edit.",
+    "no_history": "No undo history found for this task."
   },
-  "security": {
-    "firewall_blocked": "🚨 Nexus Security Firewall BLOCKED a malicious command: {{command}}",
-    "access_denied_swarm": "🛡️ Nexus Security: Access Denied. Please log in to use the Swarm."
-  },
-  "meta_context": {
-    "no_backup": "No backup found to restore!",
-    "restored_from_backup": "Safety Guardrail: Source code restored from backup.",
-    "restore_failed": "CRITICAL: Restore failed. You may need to manually fix the source."
-  },
-  "terminal": {
-    "self_evolution_failed": "Self-Evolution Failed: Compilation Error. Check Output for details.",
-    "extension_updated": "Extension updated successfully. Reloading..."
+  "unknown": {
+    "key": "unknown.key"
   },
   "workspace": {
     "no_folder_open": "Please open a workspace folder first."

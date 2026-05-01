@@ -21,8 +21,14 @@
 //   LM Studio 0.3+, recent Ollama. Hard-requiring it would break older
 //   installs. Probing once per endpoint and caching the result is a small
 //   amount of code that buys universal compatibility.
+//
+// C1 (per-agent model routing) note:
+//   `JsonRequestOptions.role` lets callers route the request to a role-
+//   specific model (nexuscode.modelPlanner / modelCoder / modelVerifier)
+//   with fallback to the global nexuscode.model. When omitted, behavior
+//   matches pre-routing (uses the global default).
 
-import { resilientFetch, getLLMConfig, authHeaders, safeParseJSON } from '../llmService';
+import { resilientFetch, getLLMConfig, authHeaders, safeParseJSON, type AgentRole } from '../llmService';
 import { errorMessage } from '../utilities/errors';
 import type { JsonSchema } from './jsonSchemas';
 import { log } from '../logger';
@@ -34,6 +40,13 @@ import { log } from '../logger';
  *
  * Cache lifetime is the extension's lifetime — restarting VS Code re-probes,
  * which is desirable in case the user upgraded their inference server.
+ *
+ * Note: cache is keyed by endpoint, NOT by role+endpoint+model. Capability
+ * (json_schema vs json_object support) is a property of the inference
+ * server, not of a particular model — different roles routed to the same
+ * endpoint share probe results. If per-role endpoints arrive in v1.1
+ * (currently all roles share `nexuscode.apiEndpoint`), this cache key
+ * may need to expand to include endpoint URL per role.
  */
 const capabilityCache = new Map<string, EndpointCapabilities>();
 
@@ -150,6 +163,16 @@ export interface JsonRequestOptions {
     signal?: AbortSignal;
     /** Optional log callback for streaming progress messages back to the UI. */
     logCallback?: (msg: string) => void;
+    /**
+     * Per-agent role for model routing (C1). When set, the request is
+     * routed to the role-specific model (nexuscode.modelPlanner,
+     * modelCoder, or modelVerifier) with fallback to the global
+     * nexuscode.model. When omitted or 'default', uses the global model.
+     *
+     * Used by: verifyAgainstSpec → 'verifier'. Other JSON-mode call
+     * sites can opt in as needed.
+     */
+    role?: AgentRole;
 }
 
 export interface JsonRequestResult<T> {
@@ -170,7 +193,9 @@ export interface JsonRequestResult<T> {
  * Throws if the response cannot be parsed even with the healer.
  */
 export async function jsonRequest<T>(opts: JsonRequestOptions): Promise<JsonRequestResult<T>> {
-    const { endpoint, model, apiKey } = await getLLMConfig();
+    // C1: route to the role-specific model when opts.role is set.
+    // Falls back to the global default ('default' role) otherwise.
+    const { endpoint, model, apiKey } = await getLLMConfig(opts.role ?? 'default');
     const caps = await getCapabilities(endpoint, model, apiKey);
 
     // Build response_format. json_schema if supported, else json_object.

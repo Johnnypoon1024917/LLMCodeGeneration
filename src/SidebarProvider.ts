@@ -4,8 +4,10 @@ import * as path from 'path';
 import { getDeps } from './container';
 import { originalContentProvider } from './diffProvider';
 import { getSmartASTContext, getGraphJSON, buildWorkspaceGraph } from './context/codeGraph';
-import { SwarmCoordinator } from './agents/Coordinator';
+import { runTask } from './agents/Coordinator';
+import { PlannerAgent } from './agents/PlannerAgent';
 import { ToolEventEmitter } from './agents/toolEventEmitter';
+import { ToolAuditCorrelator } from './audit/toolAuditCorrelator';
 import { SpecManager, type Phase } from './specs/SpecManager';
 import { VSCodeEnvironment } from './adapters/VSCodeEnvironment';
 import { runProjectTestAgent } from './agents/testAgent';
@@ -21,7 +23,6 @@ import {
     generateTests,
     generateAtomicEdits,
     AtomicEdit,
-    runAgenticExploration,
     getAvailableModels,
     determineIntent,
     streamChat,
@@ -117,6 +118,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      * correct behavior — there's no UI to render events to.
      */
     private _toolEventEmitter?: ToolEventEmitter;
+    private _toolAuditCorrelator?: ToolAuditCorrelator;
 
     /**
      * Get (or lazily construct) the per-session tool event emitter.
@@ -126,13 +128,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      */
     public getToolEventEmitter(): ToolEventEmitter {
         if (!this._toolEventEmitter) {
+            // D11: audit log integration. The correlator buffers
+            // started→completed events and emits one ToolCallPayload
+            // per tool invocation via getDeps().audit.logToolCall.
+            // Logic lives in src/audit/toolAuditCorrelator.ts so it's
+            // testable without vscode mocking.
+            this._toolAuditCorrelator = new ToolAuditCorrelator((payload) => {
+                // Fire-and-forget. AuditLog handles its own write
+                // failures with console.warn — the .catch() here is
+                // belt-and-braces in case the helper itself rejects
+                // before reaching the queue.
+                void getDeps().audit.logToolCall(payload).catch((e: unknown) => {
+                    console.warn('[SidebarProvider] audit.logToolCall rejected:', e);
+                });
+            });
+
             this._toolEventEmitter = new ToolEventEmitter((event) => {
-                // Drop events when no view is attached. Webview is the
-                // sole consumer; nothing else listens to these today.
+                // Drop events to webview when no view is attached.
+                // Audit logging still runs — headless / CLI runs need
+                // audit even though no UI is listening.
                 this._view?.webview.postMessage({
                     type: 'toolCallEvent',
                     event
                 });
+
+                // Audit correlation. Started events buffer; completed
+                // events flush. Output events are ignored.
+                this._toolAuditCorrelator!.handleEvent(event);
             });
         }
         return this._toolEventEmitter;
@@ -902,6 +924,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             await indexWorkspace((msg) => this._view?.webview.postMessage({ type: 'statusUpdate', message: msg }));
 
+                            // Hotfix (post-2B): include the directory tree
+                            // alongside the LSP/AST/RAG context. The
+                            // generatePlan system prompt instructs the model
+                            // to "ADAPT to the existing folder structure" and
+                            // its user template labels the second argument
+                            // as "EXISTING DIRECTORY STRUCTURE" — but until
+                            // this fix the SidebarProvider was passing only
+                            // LSP symbols + AST nodes + RAG embeddings, none
+                            // of which look like a folder structure to the
+                            // model. With no concrete file-path anchors to
+                            // populate task.file against, the model would
+                            // return implementationTasks: [] (twice — both
+                            // attempts of validateTasksPlan's retry loop),
+                            // surfacing as "plan has zero tasks" to the user.
+                            //
+                            // Adding getProjectContext gives the model a real
+                            // ASCII tree of the workspace files. The LSP /
+                            // AST / RAG signals stay in the bundle as
+                            // semantic enrichment around the structural
+                            // anchor.
+                            const projectStructure = await getProjectContext(workspacePath);
+
                             const [lspContext, styleGuideMsgs, astContext, hybridContext] = await Promise.all([
                                 getLspContext(data.text),
                                 getProjectStyleGuides(),
@@ -922,7 +966,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 '.nexus/specs/main/design.md'
                             );
 
-                            const finalContext = `${lspContext}\n\n${astContext}\n\n${hybridContext}\n\n${styleGuide}\n\n${requirementInjection}\n\n${designInjection}`;
+                            // Order matters: the directory tree goes FIRST
+                            // because the user message template (in
+                            // generatePlan) prepends a "EXISTING DIRECTORY
+                            // STRUCTURE:" label. The downstream LSP/AST/RAG
+                            // context follows as semantic enrichment.
+                            const finalContext = `${projectStructure}\n\n--- SEMANTIC CONTEXT ---\n${lspContext}\n\n${astContext}\n\n${hybridContext}\n\n${styleGuide}\n\n${requirementInjection}\n\n${designInjection}`;
 
                             const result = await generatePlan(fullPrompt, finalContext);
 
@@ -960,21 +1009,52 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // 🚀 FAST-TRACK: Pre-fetch the AST so the AI doesn't have to guess!
                             const projectContext = await getProjectContext(workspacePath);
 
-                            // 🤖 THE CLAUDE CODE LOOP: Now augmented with pre-fetched knowledge!
-                            const explorationContext = await runAgenticExploration(
-                                data.text,
-                                projectContext, // 🚀 Inject the AST map here!
-                                workspacePath,
-                                (stepType, desc, details) => {
+                            // Coordinator rewrite C-3: explore intent now goes
+                            // through PlannerAgent.run({mode: 'explore'})
+                            // instead of the legacy runAgenticExploration.
+                            // This unifies the explore and build planner code
+                            // paths under a single ReAct engine, eliminates
+                            // the legacy `agentStep` log lines (which were
+                            // dead UI for the explore intent — they only
+                            // rendered inside plan task cards, and explore
+                            // doesn't have a plan), and surfaces tool calls
+                            // through the rich-card UI via toolEventEmitter
+                            // — same as the build flow.
+                            //
+                            // The "Initializing Dynamic Search" status that
+                            // used to fire from runAgenticExploration's
+                            // statusCallback is gone. Users now see the
+                            // "🔍 Agentic Exploration: Investigating..."
+                            // header above + rich tool-call cards in the
+                            // global cards region as the planner explores.
+                            const exploreResult = await PlannerAgent.run({
+                                mode: 'explore',
+                                task: data.text,
+                                workspaceRoot: workspacePath,
+                                initialContext: projectContext,
+                                log: (msg, stepType, details) => {
+                                    // Bridge planner log lines (e.g., when no
+                                    // emitter is wired and the legacy log
+                                    // surface is the only feedback) into the
+                                    // legacy agentStep stream so any future
+                                    // explore-task UI continues to receive them.
                                     this._view?.webview.postMessage({
                                         type: 'agentStep',
                                         task: exploreTaskId,
-                                        stepType: stepType,
-                                        description: desc,
-                                        details: details
+                                        stepType: stepType ?? 'analyze',
+                                        description: msg,
+                                        details: details ?? ''
                                     });
-                                }
-                            );
+                                },
+                                toolEventEmitter: this.getToolEventEmitter(),
+                                abortSignal: this._activeTaskController.signal
+                            });
+
+                            // The explore-mode result exposes the accumulated
+                            // tool results as `gatheredContext`. The legacy
+                            // function returned them directly; the new field
+                            // makes the contract explicit.
+                            const explorationContext = exploreResult.gatheredContext ?? "";
 
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing evidence..." });
                             this._view?.webview.postMessage({ type: 'startChatStream' });
@@ -1105,22 +1185,52 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     const swarmSpecs = new SpecManager(rootUri);
                                     const previousFailures = await swarmSpecs.readFailures();
 
-                                    const lspBlastRadiusContext = "LSP Context dynamic fetch handled by Swarm.";
                                     const env = new VSCodeEnvironment();
 
                                     const globalRules = (await swarmSpecs.readSteering()).combined;
 
-                                    //  THE SWARM ORCHESTRATOR (PHASE 4: Array of Diffs)
-                                    const finalDiffs = await SwarmCoordinator.executeTask(
+                                    // Coordinator rewrite C-5: SwarmCoordinator
+                                    // class wrapper deleted. The orchestrator
+                                    // is now a free function `runTask` taking
+                                    // a named-params options object. Eliminates
+                                    // the 13-positional-arg call site that
+                                    // had been a recurring regression vector.
+                                    //
+                                    // Also: the previous call passed
+                                    // `lspBlastRadiusContext = "LSP Context
+                                    // dynamic fetch handled by Swarm."` as a
+                                    // dead positional argument (the
+                                    // Coordinator's `_lspContext` parameter
+                                    // was never read). Both ends of that dead
+                                    // pipe are gone.
+                                    //
+                                    // Per-task tool-card affinity (Phase 1):
+                                    // the backend uses the raw approach prompt
+                                    // (`currentApproachPrompt`) as the taskId
+                                    // it stamps onto every lifecycle event.
+                                    // The webview tracks state by `data.task`
+                                    // (a positional key like "task-3"). They
+                                    // don't naturally match. Send an explicit
+                                    // mapping so the webview can group
+                                    // incoming `toolCallEvent` messages under
+                                    // the right task expansion. Sent BEFORE
+                                    // runTask so the map is populated before
+                                    // any events arrive.
+                                    this._view?.webview.postMessage({
+                                        type: 'taskExecutionStarted',
+                                        taskKey: data.task,
+                                        backendTaskId: currentApproachPrompt,
+                                    });
+
+                                    const finalDiffs = await runTask({
                                         env,
-                                        currentApproachPrompt,
-                                        rootUri.fsPath,
-                                        lspBlastRadiusContext,
-                                        this._activeRequirements,
-                                        this._activeDesign,
+                                        task: currentApproachPrompt,
+                                        workspaceRoot: rootUri.fsPath,
+                                        activeRequirements: this._activeRequirements,
+                                        activeDesign: this._activeDesign,
                                         previousFailures,
                                         globalRules,
-                                        (msg, stepType, details) => {
+                                        log: (msg: string, stepType?: string, details?: string) => {
                                             this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
                                             if (stepType && details) {
                                                 this._view?.webview.postMessage({
@@ -1132,19 +1242,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                                 });
                                             }
                                         },
-                                        (streamToken) => {
+                                        streamCallback: (streamToken: string) => {
                                             this._view?.webview.postMessage({ type: 'streamReasoning', task: data.task, token: streamToken });
                                         },
-                                        this._activeTaskController?.signal,
-                                        (usage) => {
+                                        ...(this._activeTaskController?.signal ? { abortSignal: this._activeTaskController.signal } : {}),
+                                        usageCallback: (usage: unknown) => {
                                             this._view?.webview.postMessage({ type: 'tokenUsage', task: data.task, usage });
                                         },
-                                        // Component 2B-3c: lifecycle event emitter for tool
-                                        // calls. Lazily-constructed; sink is webview postMessage.
-                                        // The 'toolCallEvent' messages will be consumed by 2B-4
-                                        // UI cards.
-                                        this.getToolEventEmitter()
-                                    );
+                                        // Lifecycle event emitter for tool calls.
+                                        // Lazily-constructed; sink is webview
+                                        // postMessage. The 'toolCallEvent'
+                                        // messages are consumed by the rich
+                                        // tool-call cards in the webview.
+                                        toolEventEmitter: this.getToolEventEmitter(),
+                                    });
 
                                     if (!finalDiffs || finalDiffs.length === 0) throw new Error("Swarm failed to generate verified code.");
 
@@ -1159,14 +1270,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                             fileContent = new TextDecoder().decode(fileData);
                                         } catch { await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0)); }
 
-                                        // Component 2B-3c: when swarmDraftCode used the
-                                        // tool-call path (Option C stepping-stone), the file
-                                        // is already modified on disk and finalDiff.finalContent
-                                        // holds the verifier-approved post-mod content. Use
-                                        // that directly. Legacy SEARCH/REPLACE callers (planner
-                                        // narrative output, verifier-synthesized diffs) leave
-                                        // finalContent undefined and fall through to the
-                                        // applySearchReplace path.
+                                        // Component 2B-3c: when CoderAgent used the
+                                        // tool-call path, the file is already modified
+                                        // on disk and finalDiff.finalContent holds the
+                                        // verifier-approved post-mod content. Use that
+                                        // directly. Legacy SEARCH/REPLACE callers (planner
+                                        // narrative output, verifier-synthesized diffs)
+                                        // leave finalContent undefined and fall through to
+                                        // the applySearchReplace path.
                                         const finalPerfectCode = finalDiff.finalContent !== undefined
                                             ? finalDiff.finalContent
                                             : applySearchReplace(fileContent, finalDiff.searchBlock, finalDiff.replaceBlock, finalDiff.fullOutputBuffer);

@@ -56,7 +56,9 @@ let lastChatUpdate = Date.now();
 let reasoningTokenBuffer = "";
 let lastReasoningUpdate = Date.now();
 
-const cleanTraceabilityTags = (text: string) => {
+// Exported for unit testing. Used internally by App() but the function
+// is pure and string-shaped so it's testable in isolation.
+export const cleanTraceabilityTags = (text: string) => {
     if (!text) return '';
 
     let cleaned = text;
@@ -204,6 +206,17 @@ export default function App() {
     // carries one). The reducer in toolEvents.ts handles created/updated
     // semantics. Cards are filtered + rendered by taskId matching.
     const [toolCallState, setToolCallState] = useState<Map<string, ToolCallState>>(new Map());
+    // Per-task tool-card affinity (Phase 1): maps the backend's taskId
+    // (the raw approach prompt sent into runTask) to the webview's
+    // taskKey ("task-3" style). Populated by the `taskExecutionStarted`
+    // message that fires before each runTask invocation. Used to filter
+    // cards into per-task expansion regions instead of one global list.
+    //
+    // Why a separate map rather than walking taskKeys: backend taskIds
+    // can be very long (whole approach prompts) and contain task-
+    // descriptor text. A direct hash lookup is much cheaper than scanning
+    // taskKeys for each event during render.
+    const [taskBackendIdToKey, setTaskBackendIdToKey] = useState<Record<string, string>>({});
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
     const [hasKey, setHasKey] = useState<boolean>(true);
@@ -262,7 +275,11 @@ export default function App() {
     const [activePlan, setActivePlan] = useState<AIPlan | null>(null);
 
     const [showGraph, setShowGraph] = useState(false);
-    const [graphData, setGraphData] = useState<Record<string, any> | null>(null);
+    // Tightened type: nodes/edges are known properties (not index-signature
+    // access), so noPropertyAccessFromIndexSignature is satisfied. The
+    // remaining filename keys (e.g. "src/foo.ts") still go through the
+    // index signature for older payload shapes.
+    const [graphData, setGraphData] = useState<{ nodes?: any[]; edges?: any[]; [k: string]: any } | null>(null);
 
     const graphContainerRef = useRef<HTMLDivElement>(null);
     const [graphDims, setGraphDims] = useState({ width: 800, height: 600 });
@@ -345,7 +362,7 @@ export default function App() {
         Object.entries(graphData).forEach(([filepath, node]: [string, any]) => {
             if (filepath === 'nodes' || filepath === 'edges') return; // Guard clause
 
-            const folder = filepath.split('/')[0] || 'root';
+            // (folder variable removed in tsconfig hardening — was declared but never read.)
             const filename = filepath.split('/').pop() || '';
 
             nodes.push({ id: filepath, name: `📄 ${filename}`, group: 'file', val: 5 });
@@ -538,6 +555,22 @@ export default function App() {
             // event types, so newer events don't crash an older bundle.
             if (data.type === 'toolCallEvent') {
                 setToolCallState(prev => applyToolEvent(prev, data.event as ToolLifecycleEvent));
+            }
+
+            // Per-task affinity: when SidebarProvider kicks off runTask,
+            // it sends this message so the webview learns the backend's
+            // taskId (the raw approach prompt) and can map it to the
+            // webview's taskKey for grouping incoming card events.
+            if (data.type === 'taskExecutionStarted') {
+                const { taskKey, backendTaskId } = data as { taskKey: string; backendTaskId: string };
+                if (typeof taskKey === 'string' && typeof backendTaskId === 'string') {
+                    setTaskBackendIdToKey(prev => {
+                        // Idempotent: re-execution of the same task uses
+                        // the same mapping.
+                        if (prev[backendTaskId] === taskKey) return prev;
+                        return { ...prev, [backendTaskId]: taskKey };
+                    });
+                }
             }
 
             if (data.type === 'searchResults') {
@@ -742,21 +775,80 @@ export default function App() {
         }
     }, [messages, taskStatuses, taskSummaries, taskFiles, hasKey, isLoaded]);
 
+    // ─── Per-task tool-card grouping (Phase 1 affinity) ──────────────
+    //
+    // CRITICAL: this useMemo MUST live before the early returns below
+    // (`if (!isLoaded) return ...`, `if (!hasKey) return ...`). React's
+    // Rules of Hooks require all hooks to be called in the same order
+    // every render — placing this useMemo after the early returns would
+    // cause it to be skipped on first render (when isLoaded=false) and
+    // called on subsequent renders, triggering React error #310 and a
+    // blank screen. The Phase 1 hotfix corrected this placement.
+    //
+    // resolveTaskKey is a plain helper (no hooks of its own), but it's
+    // declared here so it stays adjacent to its sole consumer below.
+    const resolveTaskKey = (backendTaskId: string): string | null => {
+        const baseTaskId = backendTaskId.split('::')[0] ?? backendTaskId;
+        return taskBackendIdToKey[baseTaskId] ?? null;
+    };
+
+    const cardsByTaskKey = useMemo(() => {
+        const groups: Record<string, ToolCallState[]> = {};
+        const unscoped: ToolCallState[] = [];
+        for (const card of toolCallState.values()) {
+            const key = resolveTaskKey(card.taskId);
+            if (key === null) {
+                unscoped.push(card);
+            } else {
+                if (!groups[key]) groups[key] = [];
+                groups[key]!.push(card);
+            }
+        }
+        // Sort each group's cards by start order (deterministic render).
+        for (const key of Object.keys(groups)) {
+            groups[key]!.sort((a, b) => a.startSeq - b.startSeq);
+        }
+        unscoped.sort((a, b) => a.startSeq - b.startSeq);
+        return { groups, unscoped };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [toolCallState, taskBackendIdToKey]);
+
     if (!isLoaded) return <div style={{ padding: '20px', textAlign: 'center', color: 'var(--nexus-subtext)' }}>{t("chat.loading_nexus")}</div>;
 
     if (!hasKey) {
         return (
             <div className="auth-screen">
-                <h2>{t("onboarding.welcome_andromeda")}</h2>
-                <p>{t("onboarding.save_key_prompt")}</p>
-                <input type="password" id="api-key-input" placeholder="sk-proj-..." />
-                <button className="auth-btn primary" onClick={() => {
-                    const val = (document.getElementById('api-key-input') as HTMLInputElement).value;
-                    if (val) vscode.postMessage({ type: 'saveApiKey', value: val });
-                }}>{t("onboarding.save_key_button")}</button>
-                <button className="auth-btn secondary" onClick={() => {
-                    vscode.postMessage({ type: 'saveApiKey', value: 'lm-studio' });
-                }}>{t("onboarding.skip_local_button")}</button>
+                <div className="auth-screen-card">
+                    <span className="auth-screen-brand">{Icons.Nexus} NexusCode</span>
+                    <h2 className="auth-screen-title">{t("onboarding.welcome_andromeda")}</h2>
+                    <p className="auth-screen-subtitle">{t("onboarding.save_key_prompt")}</p>
+                    <input
+                        className="auth-screen-input"
+                        type="password"
+                        id="api-key-input"
+                        placeholder="sk-proj-..."
+                        autoFocus
+                    />
+                    <button
+                        className="nexus-btn-primary nexus-btn--equal"
+                        onClick={() => {
+                            const val = (document.getElementById('api-key-input') as HTMLInputElement).value;
+                            if (val) vscode.postMessage({ type: 'saveApiKey', value: val });
+                        }}
+                    >
+                        {t("onboarding.save_key_button")}
+                    </button>
+                    <div className="auth-screen-divider" />
+                    <button
+                        className="nexus-btn-ghost"
+                        style={{ alignSelf: 'center' }}
+                        onClick={() => {
+                            vscode.postMessage({ type: 'saveApiKey', value: 'lm-studio' });
+                        }}
+                    >
+                        {t("onboarding.skip_local_button")}
+                    </button>
+                </div>
             </div>
         );
     }
@@ -799,7 +891,7 @@ export default function App() {
         const cursorPosition = e.target.selectionStart;
         const textBeforeCursor = val.substring(0, cursorPosition);
         const words = textBeforeCursor.split(/\s/);
-        const lastWord = words[words.length - 1];
+        const lastWord = words[words.length - 1] ?? '';
 
         if (lastWord.startsWith('@')) {
             setShowMentionMenu(true);
@@ -854,40 +946,62 @@ export default function App() {
 
     return (
         <div className="app-wrapper" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
-            <div className="tiny-header" style={{ color: metaMode ? 'var(--nexus-error)' : 'var(--nexus-subtext)', flexShrink: 0 }}>
-                {metaMode
-                    ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Warning} SELF-EVOLUTION ACTIVE</span>
-                    : 'Andromeda'}
+            {/* App header — Phase 1.7 product identity. Replaces the plain
+                tiny-header text with a proper brand + status layout. The
+                meta-mode indicator (when active) is shown in the right
+                status area instead of replacing the brand. */}
+            <div className="nexus-app-header">
+                <div className="nexus-app-header-brand">
+                    <span className="nexus-app-header-brand-icon">{Icons.Nexus}</span>
+                    <span className="nexus-app-header-wordmark">NexusCode</span>
+                </div>
+                <div className={`nexus-app-header-status${metaMode ? ' meta-active' : ''}`}>
+                    {metaMode ? (
+                        <>
+                            {Icons.Warning}
+                            <span>SELF-EVOLUTION ACTIVE</span>
+                        </>
+                    ) : (
+                        <>
+                            <span className="nexus-app-header-status-dot" />
+                            <span>Ready</span>
+                        </>
+                    )}
+                </div>
             </div>
 
             {/*  TABS HEADER */}
-            <div className="tabs-header" style={{ display: 'flex', borderBottom: '1px solid var(--vscode-widget-border)', flexShrink: 0, marginTop: '5px' }}>
+            {/* Tab bar — Phase 1.5 chrome redesign. Replaced 4 inline-styled
+                tab buttons (each with its own copy of the active-state
+                ternary) with .nexus-tabs / .nexus-tab classes. Active state
+                is purely accent-colored bottom border + foreground shift, no
+                background change — matches Kiro's restrained tab treatment. */}
+            <div className="nexus-tabs">
                 <button
-                    style={{ flex: 1, padding: '8px', background: activeTab === 'coder' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'coder' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'coder' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'coder' ? 'bold' : 'normal' }}
+                    className={`nexus-tab${activeTab === 'coder' ? ' active' : ''}`}
                     onClick={() => setActiveTab('coder')}
                 >
                     Vibe
                 </button>
                 <button
-                    style={{ flex: 1, padding: '8px', background: activeTab === 'builder' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'builder' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'builder' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'builder' ? 'bold' : 'normal' }}
+                    className={`nexus-tab${activeTab === 'builder' ? ' active' : ''}`}
                     onClick={() => setActiveTab('builder')}
                 >
                     Spec
                 </button>
                 <button
-                    style={{ flex: 1, padding: '8px', background: activeTab === 'rules' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'rules' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'rules' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'rules' ? 'bold' : 'normal' }}
+                    className={`nexus-tab${activeTab === 'rules' ? ' active' : ''}`}
                     onClick={() => setActiveTab('rules')}
                 >
                     Skills
                 </button>
-
                 <button
-                    style={{ flex: 1, padding: '8px', background: activeTab === 'Map' ? 'var(--vscode-editor-inactiveSelectionBackground)' : 'transparent', border: 'none', borderBottom: activeTab === 'Map' ? '2px solid var(--vscode-button-background)' : 'none', color: activeTab === 'Map' ? 'var(--vscode-button-background)' : 'var(--vscode-foreground)', cursor: 'pointer', fontWeight: activeTab === 'Map' ? 'bold' : 'normal' }}
+                    className={`nexus-tab${activeTab === 'Map' ? ' active' : ''}`}
                     onClick={() => {
                         setActiveTab('Map');
-
-                        //  THE FIX: Only auto-fetch if we have NEVER loaded the map before!
-                        // Otherwise, rely purely on the user clicking the manual Refresh button.
+                        // Only auto-fetch if we have NEVER loaded the map before;
+                        // otherwise rely on the manual Refresh button. Preserves
+                        // pre-Phase-1.5 behavior to avoid surprising re-fetches.
                         if (!graphPayload) {
                             vscode.postMessage({ type: 'requestWorkspaceGraph' });
                         }
@@ -902,27 +1016,20 @@ export default function App() {
             {/* 💻 TAB 1: THE CODER (Chat & Execution)                      */}
             {/* ========================================================= */}
             <div style={{ display: activeTab === 'coder' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
-                <div style={{ display: 'flex', background: 'var(--vscode-editorGroupHeader-tabsBackground)', overflowX: 'auto', padding: '4px 8px 0 8px', gap: '2px', flexShrink: 0 }}>
+                <div className="nexus-session-tabs">
                     {sessions.map(s => (
                         <div
                             key={s.id}
-                            style={{
-                                padding: '6px 12px',
-                                background: s.id === activeSessionId ? 'var(--vscode-editor-background)' : 'transparent',
-                                color: s.id === activeSessionId ? 'var(--vscode-tab-activeForeground)' : 'var(--vscode-tab-inactiveForeground)',
-                                borderTop: s.id === activeSessionId ? '2px solid var(--vscode-tab-activeBorderTop)' : '2px solid transparent',
-                                borderTopLeftRadius: '4px', borderTopRightRadius: '4px',
-                                fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer',
-                                minWidth: '100px', justifyContent: 'space-between'
-                            }}
+                            className={`nexus-session-tab${s.id === activeSessionId ? ' active' : ''}`}
                             onClick={() => switchSession(s.id)}
                         >
-                            <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--vscode-terminal-ansiMagenta)' }}></div>
+                            <span className="nexus-session-tab-name">
+                                <span className="nexus-session-tab-dot" aria-hidden="true"></span>
                                 {s.name}
                             </span>
-                            <span
-                                style={{ opacity: 0.6, cursor: 'pointer' }}
+                            <button
+                                className="nexus-session-tab-close"
+                                aria-label="Close session"
                                 onClick={(e) => {
                                     e.stopPropagation();
                                     if (sessions.length > 1) {
@@ -930,15 +1037,19 @@ export default function App() {
                                         setSessions(newSessions);
                                         delete sessionStoreRef.current[s.id];
                                         if (activeSessionId === s.id) {
-                                            switchSession(newSessions[newSessions.length - 1].id);
+                                            const lastSession = newSessions[newSessions.length - 1];
+                                            if (lastSession) {
+                                                switchSession(lastSession.id);
+                                            }
                                         }
                                     }
                                 }}
-                            >×</span>
+                            >×</button>
                         </div>
                     ))}
                     <button
-                        style={{ background: 'transparent', border: 'none', color: 'var(--vscode-tab-inactiveForeground)', cursor: 'pointer', padding: '0 8px', fontSize: '14px' }}
+                        className="nexus-btn-icon"
+                        title="New session"
                         onClick={() => {
                             const newId = Date.now().toString();
                             setSessions([...sessions, { id: newId, name: `Session ${sessions.length + 1}` }]);
@@ -949,46 +1060,45 @@ export default function App() {
 
                 <div className="chat-container" style={{ flex: 1, overflowY: 'auto' }}>
                     {messages.length === 0 && (
-                        <div className="message" style={{ color: 'var(--nexus-subtext)', textAlign: 'center', marginTop: '20px' }}>
-                            How can I help you build today?
+                        <div className="nexus-chat-empty">
+                            <div className="nexus-chat-empty-icon">
+                                {Icons.Nexus}
+                            </div>
+                            <h3 className="nexus-chat-empty-title">How can I help you build today?</h3>
+                            <p className="nexus-chat-empty-hint">
+                                Describe what you want to build, ask a question about your codebase, or paste an error you're investigating.
+                            </p>
+                            <div className="nexus-chat-empty-shortcuts">
+                                <span className="nexus-chat-empty-shortcut">@ to attach files</span>
+                                <span className="nexus-chat-empty-shortcut">Enter to send</span>
+                                <span className="nexus-chat-empty-shortcut">Shift+Enter for newline</span>
+                            </div>
                         </div>
                     )}
 
                     {messages.map((msg, idx) => {
                         if (msg.isCompacted) {
                             return (
-                                <div key={idx} style={{
-                                    margin: '16px 8px',
-                                    padding: '8px 12px',
-                                    backgroundColor: 'var(--vscode-badge-background)',
-                                    color: 'var(--vscode-badge-foreground)',
-                                    borderRadius: '6px',
-                                    fontSize: '11px',
-                                    border: '1px solid var(--vscode-widget-border)',
-                                    cursor: 'pointer',
-                                    opacity: 0.8
-                                }}>
-                                    <details>
-                                        <summary style={{ fontWeight: 'bold', outline: 'none', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                                            {Icons.Archive} Context Compacted (Old messages summarized to save tokens)
-                                        </summary>
-                                        <div style={{ marginTop: '8px', padding: '8px', backgroundColor: 'var(--vscode-editor-background)', borderRadius: '4px', border: '1px solid var(--vscode-widget-border)' }}>
-                                            <ReactMarkdown>{msg.content || ''}</ReactMarkdown>
-                                        </div>
-                                    </details>
-                                </div>
+                                <details key={idx} className="nexus-message-compacted">
+                                    <summary>
+                                        {Icons.Archive} Context Compacted (Old messages summarized to save tokens)
+                                    </summary>
+                                    <div className="nexus-message-compacted-body">
+                                        <ReactMarkdown>{msg.content || ''}</ReactMarkdown>
+                                    </div>
+                                </details>
                             );
                         }
 
                         return (
-                            <div key={idx} className="message">
-                                <div className={`message-header ${msg.role}`}>
+                            <div key={idx} className={`nexus-message ${msg.role}`}>
+                                <div className={`nexus-message-header ${msg.role}`}>
                                     {msg.role === 'user' ? Icons.User : Icons.Nexus}
                                     {msg.role === 'user' ? 'YOU' : 'NEXUS'}
                                 </div>
 
                                 {msg.content && (
-                                    <div className="message-content markdown-body">
+                                    <div className="nexus-message-content markdown-body">
                                         <ReactMarkdown>{msg.content}</ReactMarkdown>
                                     </div>
                                 )}
@@ -997,7 +1107,7 @@ export default function App() {
                                     <div className="message-attachments">
                                         {msg.attachments.map((att, i) => (
                                             <details key={i} className="attachment-details">
-                                                <summary style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.File} {att.file}</summary>
+                                                <summary className="nexus-flex-row">{Icons.File} {att.file}</summary>
                                                 <div className="markdown-body">
                                                     <pre><code className={`language-${att.language}`}>{att.code}</code></pre>
                                                 </div>
@@ -1033,7 +1143,7 @@ export default function App() {
                                                 borderBottom: '1px solid var(--vscode-widget-border)'
                                             }}
                                         >
-                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Clipboard} Master Implementation Plan</span>
+                                            <span className="nexus-flex-row">{Icons.Clipboard} Master Implementation Plan</span>
                                             <span style={{ fontSize: '11px', color: 'var(--nexus-subtext)', fontWeight: 'normal' }}>
                                                 {msg.plan.implementationTasks.length} Tasks (Click to fold)
                                             </span>
@@ -1076,40 +1186,64 @@ export default function App() {
                                                 return (
                                                     <details
                                                         key={tIdx}
-                                                        className="task-item-accordion"
-                                                        //  THE UX MAGIC: Auto-open if it hasn't started or is currently running!
+                                                        className="nexus-task-card"
+                                                        // Auto-open if not yet started or currently running.
+                                                        // Behavior preserved from pre-Phase-1.5 code.
                                                         open={!status || status === 'reviewing' || status === 'error'}
-                                                        style={{
-                                                            marginBottom: '8px',
-                                                            border: '1px solid var(--vscode-widget-border)',
-                                                            borderRadius: '6px',
-                                                            background: 'var(--vscode-editor-background)',
-                                                            overflow: 'hidden'
-                                                        }}
                                                     >
-                                                        {/* THE HEADER ROW (Always Visible) */}
-                                                        <summary style={{
-                                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                                            padding: '10px 12px', cursor: 'pointer', outline: 'none', userSelect: 'none',
-                                                            background: 'var(--vscode-editorGroupHeader-tabsBackground)',
-                                                            borderBottom: (!status || status === 'reviewing' || status === 'error') ? '1px solid var(--vscode-widget-border)' : 'none'
-                                                        }}>
-                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 'bold', fontSize: '13px', color: 'var(--vscode-foreground)' }}>
-                                                                <span>{tIdx + 1}. {taskTitle}</span>
+                                                        {/* Header (always visible). Number + title on the left,
+                                                            activity badge + status pill on the right. */}
+                                                        <summary className="nexus-task-card-summary">
+                                                            <div className="nexus-task-card-title">
+                                                                <span className="nexus-task-card-number">{tIdx + 1}.</span>
+                                                                <span className="nexus-task-card-title-text">{taskTitle}</span>
                                                             </div>
 
-                                                            {/* Compact Status Badges for the Header */}
-                                                            <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                {status === 'reviewing' && <span style={{ color: 'var(--vscode-charts-orange)', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}><span className="spin">{Icons.Loader}</span> {t("chat.working")}</span>}
-                                                                {status === 'approved' && <span style={{ color: 'var(--vscode-testing-iconPassed)', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.CheckCircle} Approved</span>}
-                                                                {status === 'rejected' && <span style={{ color: 'var(--vscode-testing-iconFailed)', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.XCircle} Rejected</span>}
-                                                                {status === 'error' && <span style={{ color: 'var(--vscode-testing-iconFailed)', fontSize: '11px', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.Warning} Error</span>}
-                                                                {status === 'undone' && <span style={{ color: 'var(--vscode-descriptionForeground)', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{Icons.Undo} Reverted</span>}
+                                                            <div className="nexus-task-card-actions">
+                                                                {/* Live activity count: shows N cards when this
+                                                                    task has tool activity. Useful when the task
+                                                                    is collapsed — user can see at-a-glance
+                                                                    activity to look at. */}
+                                                                {cardsByTaskKey.groups[taskKey] && cardsByTaskKey.groups[taskKey]!.length > 0 && (
+                                                                    <span className="task-activity-badge" title={t("chat.tool_activity_count_tooltip") || "Tool calls"}>
+                                                                        {cardsByTaskKey.groups[taskKey]!.length} {(cardsByTaskKey.groups[taskKey]!.length === 1) ? 'call' : 'calls'}
+                                                                    </span>
+                                                                )}
+                                                                {/* Status pills — Phase 1.5 unifies all 5 status
+                                                                    states into a single .nexus-status-pill
+                                                                    vocabulary with semantic variants. Replaces
+                                                                    the previous 5 distinct inline-style patterns. */}
+                                                                {status === 'reviewing' && (
+                                                                    <span className="nexus-status-pill reviewing">
+                                                                        <span className="spin">{Icons.Loader}</span>
+                                                                        {t("chat.working")}
+                                                                    </span>
+                                                                )}
+                                                                {status === 'approved' && (
+                                                                    <span className="nexus-status-pill approved">
+                                                                        {Icons.CheckCircle} Approved
+                                                                    </span>
+                                                                )}
+                                                                {status === 'rejected' && (
+                                                                    <span className="nexus-status-pill rejected">
+                                                                        {Icons.XCircle} Rejected
+                                                                    </span>
+                                                                )}
+                                                                {status === 'error' && (
+                                                                    <span className="nexus-status-pill error">
+                                                                        {Icons.Warning} Error
+                                                                    </span>
+                                                                )}
+                                                                {status === 'undone' && (
+                                                                    <span className="nexus-status-pill reverted">
+                                                                        {Icons.Undo} Reverted
+                                                                    </span>
+                                                                )}
                                                             </div>
                                                         </summary>
 
-                                                        {/* THE COLLAPSIBLE BODY (Logs, Reasoning, Actions) */}
-                                                        <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                                        {/* Body (collapsible). */}
+                                                        <div className="nexus-task-card-body">
 
                                                             {/* Context & Prompts */}
                                                             <div>
@@ -1169,6 +1303,21 @@ export default function App() {
                                                                 </details>
                                                             )}
 
+                                                            {/* Per-task tool cards (Phase 1 affinity).
+                                                                Renders the cards that resolve to this
+                                                                taskKey via the backend→webview taskId
+                                                                mapping. Only shown when there's at
+                                                                least one card; structurally identical
+                                                                to the global-region rendering pre-
+                                                                affinity. */}
+                                                            {cardsByTaskKey.groups[taskKey] && cardsByTaskKey.groups[taskKey]!.length > 0 && (
+                                                                <div className="tool-call-cards-region per-task" data-task-key={taskKey}>
+                                                                    {cardsByTaskKey.groups[taskKey]!.map(state => (
+                                                                        <ToolCallCard key={state.callId} state={state} />
+                                                                    ))}
+                                                                </div>
+                                                            )}
+
                                                             {terminalStreams[taskKey] && (
                                                                 <div style={{ marginTop: '8px' }}>
                                                                     <CommandCard
@@ -1197,7 +1346,7 @@ export default function App() {
                                                                     </div>
                                                                 )}
 
-                                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                                <div className="nexus-flex-block-gap-2">
                                                                     {/* 1. Approved State: Diff and Undo */}
                                                                     {status === 'approved' && taskFiles[taskKey] && (
                                                                         <>
@@ -1242,8 +1391,8 @@ export default function App() {
                     {Object.entries(terminalStreams).map(([key, stream]) => {
                         if (key.startsWith("Auto-Test") && stream.trim().length > 0) {
                             return (
-                                <div key={key} className="message" style={{ marginBottom: '15px' }}>
-                                    <div className="message-header assistant" style={{ marginBottom: '8px' }}>
+                                <div key={key} className="nexus-message assistant" style={{ marginBottom: '15px' }}>
+                                    <div className="nexus-message-header assistant" style={{ marginBottom: '8px' }}>
                                         {Icons.Nexus} NEXUS TERMINAL: {key}
                                     </div>
                                     <div style={{
@@ -1267,31 +1416,31 @@ export default function App() {
                     })}
 
                     {/*
-                      Component 2B-4: Tool-call cards.
-                      Renders all tool calls received in this session, sorted by
-                      start order (per ToolCallState.startSeq). Per-task affinity
-                      is a deferred refinement — for 2B-4a we render flat in the
-                      chat flow so the user can see the agent's tool activity
-                      in real time. A future patch can group by taskId once the
-                      Coordinator's taskId scheme is reconciled with the
-                      webview's taskKey scheme.
+                      Per-task tool-card affinity (Phase 1):
+                      Cards now render INSIDE each task's expansion via the
+                      `cardsByTaskKey.groups[taskKey]` lookup. This region
+                      is the FALLBACK that catches "unscoped" cards — events
+                      that arrived before the `taskExecutionStarted` mapping
+                      was processed (rare race condition), or cards from
+                      code paths that don't go through executeTask.
 
-                      Hidden when no tool calls yet (avoids empty section).
+                      Hidden when there are no unscoped cards.
                     */}
-                    {toolCallState.size > 0 && (
-                        <div className="tool-call-cards-region">
-                            {Array.from(toolCallState.values())
-                                .sort((a, b) => a.startSeq - b.startSeq)
-                                .map(state => (
-                                    <ToolCallCard key={state.callId} state={state} />
-                                ))}
+                    {cardsByTaskKey.unscoped.length > 0 && (
+                        <div className="tool-call-cards-region unscoped" aria-label="Unscoped tool activity">
+                            <div className="tool-cards-region-label">
+                                {t("chat.tool_activity_unscoped") || "Tool activity"}
+                            </div>
+                            {cardsByTaskKey.unscoped.map(state => (
+                                <ToolCallCard key={state.callId} state={state} />
+                            ))}
                         </div>
                     )}
 
                     {loading && !agentStatus && (
-                        <div className="message">
-                            <div className="message-header assistant">{Icons.Nexus} NEXUS</div>
-                            <div className="message-content" style={{ display: 'flex', gap: '8px', color: 'var(--nexus-subtext)' }}>
+                        <div className="nexus-message assistant">
+                            <div className="nexus-message-header assistant">{Icons.Nexus} NEXUS</div>
+                            <div className="nexus-message-content" style={{ display: 'flex', gap: '8px', color: 'var(--nexus-subtext)' }}>
                                 {Icons.Loader} Thinking...
                             </div>
                         </div>
@@ -1321,23 +1470,23 @@ export default function App() {
                     )}
 
                     {pendingCommand && (
-                        <div className="message" style={{ margin: '10px 16px', border: '1px solid var(--nexus-warning)', borderRadius: '6px', overflow: 'hidden' }}>
-                            <div style={{ background: 'rgba(204, 167, 0, 0.1)', padding: '10px', fontSize: '11px', fontWeight: 'bold', color: 'var(--nexus-warning)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                {Icons.Alert} SECURITY INTERCEPTOR: ACTION REQUIRED
+                        <div className="nexus-security-card">
+                            <div className="nexus-security-card-header">
+                                {Icons.Alert} Security Interceptor: Action Required
                             </div>
-                            <div style={{ padding: '12px', background: 'var(--nexus-card-bg)' }}>
-                                <div style={{ fontSize: '12px', marginBottom: '8px' }}>{pendingCommand.message}</div>
-                                <code style={{ display: 'block', padding: '8px', background: 'black', borderRadius: '4px', marginBottom: '12px', color: '#73c991' }}>
+                            <div className="nexus-security-card-body">
+                                <div className="nexus-security-card-message">{pendingCommand.message}</div>
+                                <code className="nexus-security-card-command">
                                     $ {pendingCommand.command}
                                 </code>
-                                <div style={{ display: 'flex', gap: '8px' }}>
-                                    <button className="btn-primary" style={{ flex: 1 }} onClick={() => {
+                                <div className="nexus-security-card-actions">
+                                    <button className="nexus-btn-primary nexus-btn--equal" onClick={() => {
                                         // 🔥 UX FIX: Wipe all old terminal streams so the new execution starts on a clean slate!
                                         setTerminalStreams({});
                                         vscode.postMessage({ type: 'approveCommand', command: pendingCommand.command });
                                         setPendingCommand(null);
                                     }}>Allow</button>
-                                    <button className="btn-secondary" style={{ flex: 1, borderColor: 'var(--nexus-error)', color: 'var(--nexus-error)' }} onClick={() => {
+                                    <button className="nexus-btn-secondary nexus-btn--equal nexus-btn--danger" onClick={() => {
                                         setPendingCommand(null);
                                         setAgentStatus("🛑 Command blocked by user.");
                                         vscode.postMessage({ type: 'rejectCommand' });
@@ -1360,28 +1509,28 @@ export default function App() {
                 )}
 
                 {pendingEdits && (
-                    <div className="review-dock" style={{ flexShrink: 0 }}>
+                    <div className="review-dock nexus-flex-shrink-0">
                         <div className="review-header">
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Warning} Review Proposed Edits</span>
+                            <span className="nexus-flex-row">{Icons.Warning} Review Proposed Edits</span>
                             <span style={{ cursor: 'pointer', color: 'var(--nexus-subtext)' }} onClick={() => setPendingEdits(null)}>×</span>
                         </div>
                         <div style={{ maxHeight: '80px', overflowY: 'auto' }}>
                             {pendingEdits.map((edit, i) => (
                                 <div key={i} className="review-file">
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.File} {edit.filepath}</span>
+                                    <span className="nexus-flex-row">{Icons.File} {edit.filepath}</span>
                                     <span style={{ color: 'var(--nexus-border)' }}>({edit.action})</span>
                                 </div>
                             ))}
                         </div>
                         <div className="review-actions">
-                            <button className="btn-primary" onClick={() => { setLoading(true); setAgentStatus("Committing..."); vscode.postMessage({ type: 'commitAtomicEdits', edits: pendingEdits }); }}>✅ Commit All</button>
-                            <button className="btn-secondary" onClick={() => setPendingEdits(null)}>{t("common.cancel")}</button>
+                            <button className="nexus-btn-primary nexus-btn--compact" onClick={() => { setLoading(true); setAgentStatus("Committing..."); vscode.postMessage({ type: 'commitAtomicEdits', edits: pendingEdits }); }}>✅ Commit All</button>
+                            <button className="nexus-btn-secondary nexus-btn--compact" onClick={() => setPendingEdits(null)}>{t("common.cancel")}</button>
                         </div>
                     </div>
                 )}
 
-                <div className="bottom-area" style={{ flexShrink: 0 }}>
-                    <div className="input-wrapper" style={{ borderColor: metaMode ? 'var(--nexus-error)' : '' }}>
+                <div className="nexus-input-shell">
+                    <div className={`nexus-input-composer${metaMode ? ' meta-active' : ''}`}>
                         {attachedContexts.length > 0 && (
                             <div className="context-chips">
                                 {attachedContexts.map((ctx, idx) => (
@@ -1408,22 +1557,32 @@ export default function App() {
                                         setInput(words.join(' ') + (words.length > 0 ? ' ' : ''));
                                         document.getElementById('chat-input')?.focus();
                                     }}>
-                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.File} {res}</span>
+                                        <span className="nexus-flex-row">{Icons.File} {res}</span>
                                     </div>
                                 ))}
                             </div>
                         )}
 
                         <textarea
+                            className="nexus-input-textarea"
                             id="chat-input" value={input} onChange={handleInput} onKeyDown={handleKeyDown}
                             placeholder={metaMode ? t("chat.input.placeholder_meta_mode") : t("chat.input.placeholder")}
                             rows={1}
                         />
 
                         {loading ? (
-                            <button className="send-btn stop-btn" onClick={() => { setLoading(false); vscode.postMessage({ type: 'cancelTask' }); }} title={t("buttons.stop_generation")}>■</button>
+                            <button
+                                className="nexus-send-button stop"
+                                onClick={() => { setLoading(false); vscode.postMessage({ type: 'cancelTask' }); }}
+                                title={t("buttons.stop_generation")}
+                            >■</button>
                         ) : (
-                            <button className="send-btn" onClick={() => handleSubmit()} disabled={!input.trim() && attachedContexts.length === 0}>{Icons.UpArrow}</button>
+                            <button
+                                className="nexus-send-button"
+                                onClick={() => handleSubmit()}
+                                disabled={!input.trim() && attachedContexts.length === 0}
+                                title="Send"
+                            >{Icons.UpArrow}</button>
                         )}
                     </div>
 
@@ -1498,11 +1657,11 @@ export default function App() {
             {/* ========================================================= */}
             {/* 📋 TAB 2: THE REQUIREMENT HUB (BUILDER)                   */}
             {/* ========================================================= */}
-            <div style={{ display: activeTab === 'builder' ? 'flex' : 'none', flexDirection: 'column', padding: '20px', flex: 1, overflowY: 'auto' }}>
+            <div className="nexus-spec-view" style={{ display: activeTab === 'builder' ? 'flex' : 'none' }}>
                 {(!requirements || requirements.trim() === '') && !isGeneratingReqs && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        <h3 style={{ margin: 0, color: 'var(--vscode-foreground)' }}>{t("project.start_new")}</h3>
-                        <p style={{ margin: 0, fontSize: '12px', color: 'var(--nexus-subtext)' }}>{t("project.describe_idea")}</p>
+                    <div className="nexus-spec-intro">
+                        <h3 className="nexus-spec-intro-title">{t("project.start_new")}</h3>
+                        <p className="nexus-spec-intro-description">{t("project.describe_idea")}</p>
 
                         {builderContexts.length > 0 && (
                             <div className="context-chips" style={{ marginBottom: '5px' }}>
@@ -1518,9 +1677,9 @@ export default function App() {
                             </div>
                         )}
 
-                        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        <div className="nexus-spec-attach-row">
                             <button
-                                style={{ padding: '6px 12px', background: 'var(--vscode-editor-inactiveSelectionBackground)', color: 'var(--vscode-foreground)', border: '1px solid var(--nexus-border)', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                                className="nexus-spec-attach-button"
                                 onClick={() => { searchTargetRef.current = 'builder'; setIsSearching(true); }}
                             >
                                 {Icons.Plus} Attach Specs / API Docs
@@ -1528,10 +1687,10 @@ export default function App() {
                         </div>
 
                         {isSearching && (
-                            <div style={{ background: 'var(--vscode-editor-background)', border: '1px solid var(--nexus-border)', borderRadius: '6px', padding: '10px', marginBottom: '10px', boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                    <span style={{ fontSize: '11px', fontWeight: 'bold' }}>{t("search.header")}</span>
-                                    <button style={{ background: 'none', border: 'none', color: 'var(--nexus-subtext)', cursor: 'pointer' }} onClick={() => setIsSearching(false)}>✖</button>
+                            <div className="nexus-spec-search-panel">
+                                <div className="nexus-spec-search-panel-header">
+                                    <span className="nexus-spec-search-panel-title">{t("search.header")}</span>
+                                    <button className="nexus-spec-search-close" onClick={() => setIsSearching(false)} title="Close">✖</button>
                                 </div>
                                 <input
                                     autoFocus
@@ -1543,29 +1702,29 @@ export default function App() {
                                         else setSearchResults([]);
                                     }}
                                     placeholder={t("search.placeholder_files")}
-                                    style={{ width: '100%', boxSizing: 'border-box', padding: '6px', marginBottom: '8px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '4px' }}
+                                    className="nexus-spec-search-input"
                                 />
-                                <div style={{ maxHeight: '120px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div className="nexus-spec-search-results">
                                     {searchResults.map(res => (
-                                        <button key={res} style={{ textAlign: 'left', background: 'transparent', border: 'none', color: 'var(--vscode-textLink-foreground)', cursor: 'pointer', padding: '4px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                                        <button key={res} className="nexus-spec-search-result"
                                             onClick={() => vscode.postMessage({ type: 'readFileContext', file: res })}>
                                             {Icons.File} {res}
                                         </button>
                                     ))}
-                                    {searchQuery.length > 2 && searchResults.length === 0 && <div style={{ fontSize: '11px', color: 'var(--nexus-subtext)' }}>{t("search.no_files_found")}</div>}
+                                    {searchQuery.length > 2 && searchResults.length === 0 && <div className="nexus-spec-search-empty">{t("search.no_files_found")}</div>}
                                 </div>
                             </div>
                         )}
 
                         <textarea
+                            className="nexus-spec-textarea"
                             value={rawIdea}
                             onChange={(e) => setRawIdea(e.target.value)}
                             placeholder="e.g. Build a checkout system. Use the attached Stripe API docs for the exact JSON payloads..."
                             rows={5}
-                            style={{ width: '100%', boxSizing: 'border-box', padding: '10px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '4px', fontFamily: 'var(--vscode-editor-font-family)' }}
                         />
                         <button
-                            style={{ padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                            className="nexus-spec-cta"
                             onClick={() => {
                                 if (!rawIdea.trim()) return;
                                 setReqLogs([]);
@@ -1579,7 +1738,7 @@ export default function App() {
                                 vscode.postMessage({ type: 'generateRequirements', text: rawIdea, context: contextStr });
                             }}
                         >
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Wand} Auto-Generate RAG-Enhanced PRD</span>
+                            {Icons.Wand} Auto-Generate RAG-Enhanced PRD
                         </button>
                     </div>
                 )}
@@ -1587,7 +1746,7 @@ export default function App() {
                 {(isGeneratingReqs || isGeneratingDesign) && (
                     <div className="plan-card" style={{ flex: 1, display: 'flex', flexDirection: 'column', marginTop: '10px' }}>
                         <div className="plan-card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 15px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <div className="nexus-flex-block-row-gap-3">
                                 <div style={{ color: 'var(--vscode-button-background)' }}>{Icons.Loader}</div>
                                 <span style={{ fontWeight: 'bold' }}>
                                     {isGeneratingReqs ? 'Drafting PRD...' : 'Architecting System Design...'}
@@ -1595,42 +1754,44 @@ export default function App() {
                                 </span>
                             </div>
                             <button
-                                className="micro-btn"
-                                style={{ border: '1px solid var(--nexus-error)', color: 'var(--nexus-error)', padding: '4px 8px' }}
+                                className="nexus-spec-progress-stop"
                                 onClick={() => {
                                     vscode.postMessage({ type: 'cancelTask' });
                                     setIsGeneratingReqs(false);
                                     setIsGeneratingDesign(false);
                                 }}
                             >
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Stop} Stop</span>
+                                {Icons.Stop} Stop
                             </button>
                         </div>
-                        <div style={{ padding: '15px', flex: 1, overflowY: 'auto', background: 'var(--vscode-input-background)', color: 'var(--vscode-descriptionForeground)', fontFamily: 'monospace', fontSize: '12px', borderBottomLeftRadius: '6px', borderBottomRightRadius: '6px' }}>
+                        <div className="nexus-spec-progress">
                             {reqLogs.map((log, i) => {
-                                let logColor = 'inherit';
-                                if (log.includes('━━━')) logColor = 'var(--vscode-textLink-foreground)';
-                                else if (log.includes('❌') || log.includes('Error')) logColor = 'var(--vscode-errorForeground)';
-                                else if (log.includes('Domain:') || log.includes('Product Type:')) logColor = 'var(--vscode-symbolIcon-propertyForeground)';
-                                return <div key={i} style={{ marginBottom: '6px', color: logColor, whiteSpace: 'pre-wrap', lineHeight: '1.4' }}>{log}</div>;
+                                /* Phase 1.9: log-line semantic kind moved from inline-style ternary
+                                   to a data-attribute. CSS owns the colors via [data-kind] selectors,
+                                   keeping the JSX clean. */
+                                let kind: 'header' | 'error' | 'property' | 'default' = 'default';
+                                if (log.includes('━━━')) kind = 'header';
+                                else if (log.includes('❌') || log.includes('Error')) kind = 'error';
+                                else if (log.includes('Domain:') || log.includes('Product Type:')) kind = 'property';
+                                return <div key={i} className="nexus-spec-progress-line" data-kind={kind}>{log}</div>;
                             })}
                         </div>
                     </div>
                 )}
 
                 {(requirements && requirements.trim() !== '') && !design && !isGeneratingReqs && !isGeneratingDesign && (
-                    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
-                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                    <div className="nexus-flex-col">
+                        <div className="nexus-flex-between-shrink">
+                            <span className="nexus-flex-row nexus-text-success-bold">
                                 {phaseState?.requirements === 'approved'
                                     ? <>{Icons.CheckCircle} PRD approved · .nexus/specs/main/requirements.md</>
                                     : <>{Icons.FilePen} PRD draft · .nexus/specs/main/requirements.md</>}
                             </span>
-                            <div style={{ display: 'flex', gap: '10px' }}>
-                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }} onClick={() => setIsEditingReqs(!isEditingReqs)}>
+                            <div className="nexus-flex-block-gap-3">
+                                <button className="nexus-btn-ghost" onClick={() => setIsEditingReqs(!isEditingReqs)}>
                                     {isEditingReqs ? <>{Icons.Eye} Preview</> : <>{Icons.Edit} Edit</>}
                                 </button>
-                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                                <button className="nexus-btn-ghost"
                                     onClick={() => {
                                         setRequirements(''); setRawIdea(''); setReqLogs([]); setIsEditingReqs(false);
                                         vscode.postMessage({ type: 'updateRequirements', text: '' });
@@ -1641,12 +1802,12 @@ export default function App() {
                         </div>
 
                         {!isEditingReqs ? (
-                            <div className="markdown-body" style={{ flex: 1, overflowY: 'auto', padding: '15px', background: 'var(--vscode-editor-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', marginBottom: '15px' }}>
+                            <div className="markdown-body nexus-scroll-preview">
                                 <ReactMarkdown>{cleanTraceabilityTags(requirements)}</ReactMarkdown>
                             </div>
                         ) : (
                             <textarea
-                                style={{ flex: 1, resize: 'none', padding: '12px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', fontFamily: 'monospace', marginBottom: '15px', lineHeight: '1.5' }}
+                                className="nexus-textarea-mono"
                                 value={requirements}
                                 onChange={(e) => { setRequirements(e.target.value); vscode.postMessage({ type: 'updateRequirements', text: e.target.value }); }}
                             />
@@ -1656,46 +1817,47 @@ export default function App() {
                         {phaseState?.requirements !== 'approved' ? (
                             <div style={{ display: 'flex', gap: '10px', flexShrink: 0 }}>
                                 <button
-                                    style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                    className="nexus-btn-secondary"
                                     onClick={() => vscode.postMessage({ type: 'rejectPhase', phase: 'requirements' })}
                                 >
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Restart} Reject &amp; Regenerate</span>
+                                    <span className="nexus-flex-row">{Icons.Restart} Reject &amp; Regenerate</span>
                                 </button>
                                 <button
-                                    style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                    className="nexus-btn-primary"
                                     onClick={() => vscode.postMessage({ type: 'approvePhase', phase: 'requirements' })}
                                 >
-                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Check} Approve PRD</span>
+                                    <span className="nexus-flex-row">{Icons.Check} Approve PRD</span>
                                 </button>
                             </div>
                         ) : (
                             <button
-                                style={{ padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold', flexShrink: 0 }}
+                                className="nexus-spec-cta"
+                                style={{ flexShrink: 0 }}
                                 onClick={() => {
                                     setIsGeneratingDesign(true);
                                     setReqLogs([]);
                                     vscode.postMessage({ type: 'generateDesign', requirements });
                                 }}
                             >
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Sparkles} Generate Architecture Design</span>
+                                {Icons.Sparkles} Generate Architecture Design
                             </button>
                         )}
                     </div>
                 )}
 
                 {(requirements && design) && !isGeneratingDesign && (
-                    <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
-                            <span style={{ fontSize: '12px', color: '#51cf66', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                    <div className="nexus-flex-col">
+                        <div className="nexus-flex-between-shrink">
+                            <span className="nexus-flex-row nexus-text-success-bold">
                                 {phaseState?.design === 'approved'
                                     ? <>{Icons.CheckCircle} Design approved · .nexus/specs/main/</>
                                     : <>{Icons.FilePen} Design draft · .nexus/specs/main/</>}
                             </span>
-                            <div style={{ display: 'flex', gap: '10px' }}>
-                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }} onClick={() => setIsEditingDesign(!isEditingDesign)}>
+                            <div className="nexus-flex-block-gap-3">
+                                <button className="nexus-btn-ghost" onClick={() => setIsEditingDesign(!isEditingDesign)}>
                                     {isEditingDesign ? <>{Icons.Eye} Preview</> : <>{Icons.Edit} Edit Design</>}
                                 </button>
-                                <button style={{ background: 'transparent', color: 'var(--vscode-textLink-foreground)', border: 'none', cursor: 'pointer', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                                <button className="nexus-btn-ghost"
                                     onClick={() => {
                                         setRequirements(''); setDesign(''); setRawIdea(''); setReqLogs([]); setIsEditingReqs(false); setIsEditingDesign(false);
                                         vscode.postMessage({ type: 'updateRequirements', text: '' });
@@ -1706,7 +1868,7 @@ export default function App() {
                         </div>
 
                         {!isEditingDesign ? (
-                            <div className="markdown-body" style={{ flex: 1, overflowY: 'auto', padding: '15px', background: 'var(--vscode-editor-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', marginBottom: '15px' }}>
+                            <div className="markdown-body nexus-scroll-preview">
                                 <h2>1. Product Requirements</h2>
                                 <ReactMarkdown>{cleanTraceabilityTags(requirements)}</ReactMarkdown>
                                 <hr />
@@ -1715,19 +1877,19 @@ export default function App() {
                             </div>
                         ) : (
                             <textarea
-                                style={{ flex: 1, resize: 'none', padding: '12px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', fontFamily: 'monospace', marginBottom: '15px', lineHeight: '1.5' }}
+                                className="nexus-textarea-mono"
                                 value={design}
                                 onChange={(e) => { setDesign(e.target.value); vscode.postMessage({ type: 'updateDesign', text: e.target.value }); }}
                             />
                         )}
 
                         {isGeneratingTasks ? (
-                            <div style={{ padding: '10px', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '15px' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <div className="nexus-spec-tasks-loader">
+                                <div className="nexus-flex-block-row-gap-3">
                                     {Icons.Loader} Drafting Master Implementation Plan... <span style={{ fontFamily: 'monospace' }}>[{formatTime(specTimer)}]</span>
                                 </div>
                                 <button
-                                    style={{ background: 'transparent', border: '1px solid white', color: 'white', borderRadius: '4px', cursor: 'pointer', padding: '2px 8px' }}
+                                    className="nexus-spec-tasks-loader-stop"
                                     onClick={() => { vscode.postMessage({ type: 'cancelTask' }); setIsGeneratingTasks(false); }}
                                 >
                                     Stop
@@ -1736,40 +1898,40 @@ export default function App() {
                         ) : (
                             // Phase-gate UX for the design → tasks transition. See audit §11.
                             phaseState?.design !== 'approved' ? (
-                                <div style={{ display: 'flex', gap: '10px', marginTop: '15px', flexShrink: 0 }}>
+                                <div className="nexus-action-row">
                                     <button
-                                        style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                        className="nexus-btn-secondary"
                                         onClick={() => vscode.postMessage({ type: 'rejectPhase', phase: 'design' })}
                                     >
-                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Restart} Reject &amp; Regenerate</span>
+                                        <span className="nexus-flex-row">{Icons.Restart} Reject &amp; Regenerate</span>
                                     </button>
                                     <button
-                                        style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                        className="nexus-btn-primary"
                                         onClick={() => vscode.postMessage({ type: 'approvePhase', phase: 'design' })}
                                     >
-                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Check} Approve Design</span>
+                                        <span className="nexus-flex-row">{Icons.Check} Approve Design</span>
                                     </button>
                                 </div>
                             ) : (
-                                <div style={{ display: 'flex', gap: '10px', marginTop: '15px', flexShrink: 0 }}>
+                                <div className="nexus-action-row">
                                     <button
-                                        style={{ flex: 1, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-secondaryBackground)', color: 'var(--vscode-button-secondaryForeground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                        className="nexus-btn-secondary"
                                         onClick={() => {
                                             vscode.postMessage({ type: 'updateRequirements', text: requirements });
                                             vscode.postMessage({ type: 'updateDesign', text: design });
                                             setActiveTab('coder');
                                         }}
                                     >
-                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Save} Just Save</span>
+                                        <span className="nexus-flex-row">{Icons.Save} Just Save</span>
                                     </button>
                                     <button
-                                        style={{ flex: 2, padding: '10px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}
+                                        className="nexus-btn-primary"
                                         onClick={() => {
                                             setIsGeneratingTasks(true);
                                             vscode.postMessage({ type: 'generateProjectTasks' });
                                         }}
                                     >
-                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Zap} Generate Implementation Plan</span>
+                                        <span className="nexus-flex-row">{Icons.Zap} Generate Implementation Plan</span>
                                     </button>
                                 </div>
                             )
@@ -1781,26 +1943,28 @@ export default function App() {
             {/* ========================================================= */}
             {/* ✨ TAB 3: AGENT SKILLS & RULES (.nexusrules)              */}
             {/* ========================================================= */}
-            <div style={{ display: activeTab === 'rules' ? 'flex' : 'none', flexDirection: 'column', padding: '20px', flex: 1, overflowY: 'auto' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                    <h3 style={{ margin: '0 0 5px 0', color: 'var(--vscode-foreground)' }}>{t("skills.header")}</h3>
-                    <p style={{ margin: '0 0 15px 0', fontSize: '12px', color: 'var(--nexus-subtext)' }}>
+            <div className="nexus-skill-view" style={{ display: activeTab === 'rules' ? 'flex' : 'none' }}>
+                <div className="nexus-skill-view-inner">
+                    <h3 className="nexus-skill-view-header">{t("skills.header")}</h3>
+                    <p className="nexus-skill-view-description">
                         Define custom behaviors, preferred libraries, and architectural rules. The AI will strictly follow these instructions when writing code. Saves to <code>.nexusrules</code>.
                     </p>
 
                     <textarea
+                        className="nexus-skill-view-textarea"
                         value={nexusRules}
                         onChange={(e) => setNexusRules(e.target.value)}
                         placeholder="e.g., Always use Tailwind CSS. Never use class components. Prefer Axios over fetch. All functions must include JSDoc comments."
-                        style={{ flex: 1, width: '100%', boxSizing: 'border-box', padding: '15px', background: 'var(--vscode-input-background)', color: 'var(--vscode-input-foreground)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', fontFamily: 'monospace', fontSize: '13px', lineHeight: '1.5', resize: 'none', marginBottom: '15px' }}
                     />
 
-                    <button
-                        style={{ padding: '12px', cursor: 'pointer', background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)', border: 'none', borderRadius: '4px', fontWeight: 'bold', flexShrink: 0 }}
-                        onClick={() => vscode.postMessage({ type: 'saveNexusRules', text: nexusRules })}
-                    >
-                        Save Agent Skills
-                    </button>
+                    <div className="nexus-skill-view-actions">
+                        <button
+                            className="nexus-btn-primary"
+                            onClick={() => vscode.postMessage({ type: 'saveNexusRules', text: nexusRules })}
+                        >
+                            Save Agent Skills
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -1817,28 +1981,28 @@ export default function App() {
                     </div>
 
                     {/*  TRACEABILITY TOGGLES */}
-                    <div style={{ display: 'flex', gap: '8px', background: 'rgba(0,0,0,0.3)', padding: '4px', borderRadius: '6px' }}>
+                    <div className="nexus-map-toggle-group">
                         <button
-                            style={{ padding: '6px 12px', background: activeMapType === 'codeMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}
+                            className={`nexus-map-toggle${activeMapType === 'codeMap' ? ' active' : ''}`}
                             onClick={() => setActiveMapType('codeMap')}
                         >{t("buttons.code_ast")}</button>
 
                         <button
-                            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: activeMapType === 'reqMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}
+                            className={`nexus-map-toggle${activeMapType === 'reqMap' ? ' active' : ''}`}
                             onClick={() => setActiveMapType('reqMap')}
                         >
                             Requirements {(isGraphLoading && activeMapType === 'reqMap') && <span className="spin">{Icons.Loader}</span>}
                         </button>
 
                         <button
-                            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: activeMapType === 'combinedMap' ? '#007acc' : 'transparent', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', transition: '0.2s' }}
+                            className={`nexus-map-toggle${activeMapType === 'combinedMap' ? ' active' : ''}`}
                             onClick={() => setActiveMapType('combinedMap')}
                         >
                             Combined Traceability {(isGraphLoading && activeMapType === 'combinedMap') && <span className="spin">{Icons.Loader}</span>}
                         </button>
                     </div>
 
-                    <div style={{ display: 'flex', gap: '8px' }}>
+                    <div className="nexus-flex-block-gap-2">
                         <button style={{ background: 'transparent', border: '1px solid #58a6ff', color: '#58a6ff', cursor: 'pointer', fontSize: '12px', padding: '6px 12px', borderRadius: '6px' }} onClick={() => vscode.postMessage({ type: 'requestWorkspaceGraph' })}>↻ Refresh</button>
                     </div>
                 </div>
@@ -1868,7 +2032,7 @@ export default function App() {
                                 gap: '8px',
                                 minWidth: '320px'
                             }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <div className="nexus-flex-block-row-gap-3">
                                     <div style={{ color: '#58a6ff' }} className="spin">{Icons.Loader}</div>
                                     <span style={{ color: 'white', fontWeight: 'bold', fontSize: '13px', textTransform: 'uppercase', letterSpacing: '1px' }}>AI Matrix Synthesis</span>
                                 </div>
@@ -1950,7 +2114,7 @@ export default function App() {
                                     boxShadow: '0 2px 5px rgba(0,0,0,0.2)'
                                 }}
                             >
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>{Icons.Flask} Generate Project TDD</span>
+                                <span className="nexus-flex-row">{Icons.Flask} Generate Project TDD</span>
                             </button>
                         </div>
 
@@ -1982,7 +2146,7 @@ export default function App() {
                                         });
 
                                         return (
-                                            <div key={node.id} id={`node-card-${node.id.replace(/[^a-zA-Z0-9-]/g, '-')}`} style={{ background: 'var(--vscode-input-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', padding: '12px', transition: 'border-color 0.3s', boxShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+                                            <div key={node.id} id={`node-card-${node.id.replace(/[^a-zA-Z0-9-]/g, '-')}`} className="nexus-input-panel">
 
                                                 {/* Header with Badge */}
                                                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
@@ -2054,7 +2218,7 @@ export default function App() {
                                     const dirName = parts.length > 0 ? parts.join(isWindows ? '\\' : '/') : '';
 
                                     return (
-                                        <div id={safeId} key={filepath} style={{ background: 'var(--vscode-input-background)', border: '1px solid var(--vscode-input-border)', borderRadius: '6px', padding: '12px', transition: 'border-color 0.3s', boxShadow: '0 2px 8px rgba(0,0,0,0.2)' }}>
+                                        <div id={safeId} key={filepath} className="nexus-input-panel">
 
                                             {/* Beautiful Header Layout */}
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>

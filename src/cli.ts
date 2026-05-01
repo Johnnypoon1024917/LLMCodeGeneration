@@ -21,7 +21,7 @@
 //     rendering is its own design surface that deserves a dedicated
 //     session.
 //   - `nexuscode ci`: reads .nexus/specs/main/tasks.md and lists pending
-//     tasks but cannot execute them. Wiring up SwarmCoordinator from
+//     tasks but cannot execute them. Wiring up runTask from
 //     CLI is "Session C" work — exit codes, progress display, diff
 //     handling, all need explicit decisions.
 //
@@ -30,7 +30,7 @@
 // ============================================================
 
 import { Command } from 'commander';
-import * as readline from 'readline';98
+import * as readline from 'readline';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { errorMessage } from './utilities/errors';
@@ -40,7 +40,7 @@ import { initI18n } from './i18n';
 import { AuditLog } from './audit/AuditLog';
 import { runExport as runAuditExport, runVerify as runAuditVerify } from './audit/exportCli';
 // import { CIEnvironment } from './adapters/CIEnvironment';
-// import { SwarmCoordinator } from './agents/Coordinator';
+// import { runTask } from './agents/Coordinator';
 // ^ NOTE: importing these brings in llmService.ts which transitively
 // imports vscode. The skeleton doesn't actually call them yet — see §22 B+C work.
 
@@ -215,10 +215,10 @@ async function cmdCi(flags: CiFlags): Promise<void> {
 
     process.stdout.write(`Found ${pending.length} pending task(s) in ${specSlug}/tasks.md\n`);
 
-    // TODO(C): Run each task through SwarmCoordinator.
+    // TODO(C): Run each task through runTask.
     //
     // The blocker after §23 hybrid landed:
-    //   SwarmCoordinator.executeTask → eventually getLLMConfig() in
+    //   runTask → eventually getLLMConfig() in
     //   llmService.ts, which still reads vscode.workspace.getConfiguration
     //   directly. The hybrid Container introduced in §23 made `state`,
     //   `secrets`, and `extensionUri` swappable, but `vscode.workspace`

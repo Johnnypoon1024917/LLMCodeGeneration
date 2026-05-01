@@ -170,7 +170,11 @@ export function ExecutableBody({ state }: ExecutableBodyProps): React.ReactEleme
                 <div className="tool-call-exec-meta" data-status={state.status}>
                     <ExitCodeChip
                         status={state.status}
-                        exitCode={bashPayload?.exitCode}
+                        // exactOptionalPropertyTypes: spread only when defined.
+                        // bashPayload?.exitCode is `number | undefined`; spreading
+                        // an empty object when undefined matches the optional
+                        // prop type (`exitCode?: number`).
+                        {...(bashPayload?.exitCode !== undefined ? { exitCode: bashPayload.exitCode } : {})}
                     />
                     {(state.durationMs ?? bashPayload?.durationMs) !== undefined && (
                         <span className="tool-call-info-meta-item tool-call-exec-duration">

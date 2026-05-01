@@ -175,4 +175,55 @@ describe('generatePlan — post-2B audit fix', () => {
         // but the function should still return without crashing.
         expect(result.plan.implementationTasks).toHaveLength(1);
     });
+
+    // ─── Hotfix (post-2B): tailored corrective for zero-tasks failure ──
+
+    function zeroTasksPlan(): AIPlan {
+        return {
+            folderStructure: [],
+            implementationTasks: []
+        };
+    }
+
+    test('corrects zero-tasks failures with a targeted retry message', async () => {
+        // The W4A8 quantized endpoint returned implementationTasks: []
+        // (empty array satisfies the schema since xgrammar doesn't
+        // enforce minItems). The retry should specifically tell the
+        // model to produce at least one task — NOT just a generic
+        // "non-empty fields" message.
+        mockJsonRequestData
+            .mockResolvedValueOnce({ explanation: 'broken', plan: zeroTasksPlan() })
+            .mockResolvedValueOnce({ explanation: 'fixed', plan: goodPlan() });
+
+        await generatePlan('Create a trip.com website', 'EMPTY DIRECTORY');
+
+        expect(mockJsonRequestData).toHaveBeenCalledTimes(2);
+
+        // Second call's messages should include a corrective system
+        // message tailored to the zero-tasks failure.
+        const secondCallArg = mockJsonRequestData.mock.calls[1]![0];
+        const messages = secondCallArg.messages;
+        const correctiveMsg = messages[messages.length - 1];
+        expect(correctiveMsg.role).toBe('system');
+        expect(correctiveMsg.content as string).toMatch(
+            /at least one task|empty.*invalid|never return an empty/i
+        );
+        // Must call out the empty-array problem specifically.
+        expect(correctiveMsg.content as string).toContain('empty implementationTasks array');
+    });
+
+    test('field-level failure uses field-level corrective (not zero-tasks language)', async () => {
+        mockJsonRequestData
+            .mockResolvedValueOnce({ explanation: 'broken fields', plan: emptyTasksPlan() })
+            .mockResolvedValueOnce({ explanation: 'fixed', plan: goodPlan() });
+
+        await generatePlan('Modify nav', 'src/components');
+
+        const secondCallArg = mockJsonRequestData.mock.calls[1]![0];
+        const messages = secondCallArg.messages;
+        const correctiveMsg = messages[messages.length - 1];
+        expect(correctiveMsg.role).toBe('system');
+        expect(correctiveMsg.content as string).toContain('non-empty values');
+        expect(correctiveMsg.content as string).not.toContain('empty implementationTasks array');
+    });
 });
