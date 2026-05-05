@@ -328,18 +328,18 @@ async function runGrepSearch(pattern: string): Promise<{ llmContent: string }> {
         );
 
         await Promise.all(files.map(async (file) => {
-            if (matchCount >= MAX_MATCHES) return;
+            if (matchCount >= MAX_MATCHES) { return; }
             try {
                 const fileData = await vscode.workspace.fs.readFile(file);
-                if (fileData.byteLength === 0 || fileData.byteLength > MAX_FILE_SIZE) return;
+                if (fileData.byteLength === 0 || fileData.byteLength > MAX_FILE_SIZE) { return; }
 
                 const content = new TextDecoder('utf8').decode(fileData);
                 const lines = content.split('\n');
 
                 for (let i = 0; i < lines.length; i++) {
-                    if (matchCount >= MAX_MATCHES) return;
+                    if (matchCount >= MAX_MATCHES) { return; }
                     const line = lines[i];
-                    if (line === undefined || !regex.test(line)) continue;
+                    if (line === undefined || !regex.test(line)) { continue; }
 
                     const relativePath = vscode.workspace.asRelativePath(file);
                     results += `${relativePath}:${i + 1}: ${line.trim().substring(0, 100)}\n`;

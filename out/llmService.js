@@ -33,8 +33,10 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.DEFAULT_ENDPOINT = void 0;
 exports.resilientFetch = resilientFetch;
 exports.getLLMConfig = getLLMConfig;
+exports.getThinkingProfile = getThinkingProfile;
 exports.authHeaders = authHeaders;
 exports.safeParseJSON = safeParseJSON;
 exports.determineIntent = determineIntent;
@@ -53,6 +55,7 @@ exports.verifyAgainstSpec = verifyAgainstSpec;
 exports.updateLivingPRD = updateLivingPRD;
 exports.reviewCodeCompleteness = reviewCodeCompleteness;
 exports.healGlobalBuild = healGlobalBuild;
+exports.askSecurityMonitorVerbose = askSecurityMonitorVerbose;
 exports.askSecurityMonitor = askSecurityMonitor;
 exports.generateAdversarialTest = generateAdversarialTest;
 exports.compactConversationHistory = compactConversationHistory;
@@ -70,6 +73,38 @@ const llm_1 = require("./llm");
 const jsonSchemas_1 = require("./llm/jsonSchemas");
 const logger_1 = require("./logger");
 let _apiKeyMigrated = false;
+/**
+ * Default model identifier when neither the user's `nexuscode.model`
+ * setting nor any role-specific override is set, and when the
+ * VS Code config layer can't be reached at all (CLI runtime with no
+ * config file, fresh first-launch before settings are written, etc).
+ *
+ * IMPORTANT: this must match `package.json` → contributes →
+ * configuration → `nexuscode.model`.default. Drifting between the two
+ * causes "the setting says X but the runtime uses Y" support tickets.
+ *
+ * Migration history:
+ *   - v1.x  → 'qwen2.5-coder' (default before V2.0)
+ *   - V2.0+ → 'qwen3.6-27b'   (thinking-mode capable, native tool calls)
+ *
+ * If you change this, also update:
+ *   - package.json (contributes.configuration.nexuscode.model.default)
+ *   - tests under src/test/unit/perAgentRouting.test.ts
+ *   - tests under src/test/unit/provider.test.ts (model-name string)
+ *   - tests under src/test/unit/sessionDiagnostics.test.ts
+ */
+const DEFAULT_MODEL = 'qwen3.6-27b';
+/**
+ * Last-resort endpoint default. Reached only when the user has
+ * neither configured `nexuscode.apiEndpoint` nor set the
+ * `NEXUSCODE_API_ENDPOINT` env var. Pre-marketplace, this points at
+ * the lab inference cluster; v1 marketplace launch should change
+ * this to either a 127.0.0.1 placeholder (forcing first-run setup)
+ * or remove the fallback entirely with an explicit "configure your
+ * endpoint" onboarding flow. Tracked as a v1 polish item — do NOT
+ * ship this address to the public marketplace.
+ */
+exports.DEFAULT_ENDPOINT = 'http://192.168.191.41:8000/v1/chat/completions';
 function decodeHTMLEntities(text) {
     const entities = {
         '&amp;': '&',
@@ -112,10 +147,12 @@ async function resilientFetch(url, options, logCallback) {
         }
     }, 3, 1000, (attempt, delay, error) => {
         const msg = `⚠️ Nexus API Hiccup (${(0, errors_1.errorMessage)(error)}). Retrying in ${delay / 1000}s (Attempt ${attempt}/3)...`;
-        if (logCallback)
+        if (logCallback) {
             logCallback(msg);
-        else
+        }
+        else {
             logger_1.log.warn(msg);
+        }
     });
 }
 async function getLLMConfig(role = 'default') {
@@ -154,12 +191,12 @@ async function getLLMConfig(role = 'default') {
     //   1. `nexuscode.modelPlanner` / `modelCoder` / `modelVerifier`
     //      (matching the role parameter)
     //   2. `nexuscode.model` (global default)
-    //   3. hardcoded fallback ('qwen2.5-coder')
+    //   3. hardcoded fallback (DEFAULT_MODEL — see top of file)
     //
     // The 'default' role skips step 1 and goes straight to the global,
     // which matches old behavior — useful for code paths that aren't
     // role-tagged yet.
-    const globalModel = config.get('model') || 'qwen2.5-coder';
+    const globalModel = config.get('model') || DEFAULT_MODEL;
     let resolvedModel = globalModel;
     if (role === 'planner') {
         resolvedModel = config.get('modelPlanner') || globalModel;
@@ -176,6 +213,72 @@ async function getLLMConfig(role = 'default') {
         apiKey: secureKey || undefined, // <-- no placeholder
         enableTools: config.get('enableTools') ?? true
     };
+}
+async function getThinkingProfile(role = 'default') {
+    // Defensive: if getDeps() throws (pre-activation import paths or
+    // unit tests that haven't called setDeps) OR if config.get itself
+    // throws (a misbehaving config source), fall back to thinking-ON
+    // Qwen 3.6 defaults. The thinking flags ride in extra_body and are
+    // silently ignored by non-thinking endpoints, so the worst case
+    // is "request body has a few extra fields the server ignores" —
+    // never a crash. The whole-function try/catch ensures one bad
+    // config-source read can't kill an agent run.
+    try {
+        const config = (0, container_1.getDeps)().config;
+        // Per-role thinking flag. Default true for the three agent roles
+        // (planner / coder / verifier); 'default' role inherits the planner
+        // setting since it's the most reasoning-heavy fallback.
+        const enableThinkingDefault = true;
+        let configKey = null;
+        if (role === 'planner') {
+            configKey = 'thinkingPlanner';
+        }
+        else if (role === 'coder') {
+            configKey = 'thinkingCoder';
+        }
+        else if (role === 'verifier') {
+            configKey = 'thinkingVerifier';
+        }
+        // 'default' role: no per-role key; falls through to global default.
+        const enableThinking = configKey
+            ? (config.get(configKey) ?? enableThinkingDefault)
+            : enableThinkingDefault;
+        // preserve_thinking is on by default whenever thinking is on. The
+        // efficiency win documented by Qwen (KV cache reuse, redundant-
+        // reasoning reduction) is exactly what long autonomous sessions
+        // need. Power users can override via nexuscode.preserveThinking.
+        const preserveThinking = enableThinking
+            ? (config.get('preserveThinking') ?? true)
+            : false;
+        if (enableThinking) {
+            return {
+                enableThinking: true,
+                preserveThinking,
+                temperature: 0.6,
+                topP: 0.95,
+                topK: 20,
+                presencePenalty: 0.0,
+            };
+        }
+        return {
+            enableThinking: false,
+            preserveThinking: false,
+            temperature: 0.7,
+            topP: 0.8,
+            topK: 20,
+            presencePenalty: 1.5,
+        };
+    }
+    catch {
+        return {
+            enableThinking: true,
+            preserveThinking: true,
+            temperature: 0.6,
+            topP: 0.95,
+            topK: 20,
+            presencePenalty: 0.0,
+        };
+    }
 }
 function authHeaders(apiKey) {
     const headers = { 'Content-Type': 'application/json' };
@@ -254,8 +357,9 @@ function safeParseJSON(jsonString) {
                                 k++;
                                 while (k < extract.length) {
                                     const ck = extract[k];
-                                    if (ck === undefined || !/[ \n\r\t]/.test(ck))
+                                    if (ck === undefined || !/[ \n\r\t]/.test(ck)) {
                                         break;
+                                    }
                                     k++;
                                 }
                                 if (extract[k] === ':') {
@@ -535,10 +639,12 @@ function validateTasksPlan(plan) {
         // `relatedRequirement` may be empty without breaking anything.
         const t = task;
         const missing = [];
-        if (!t.step || !String(t.step).trim())
+        if (!t.step || !String(t.step).trim()) {
             missing.push('step');
-        if (!t.file || !String(t.file).trim())
+        }
+        if (!t.file || !String(t.file).trim()) {
             missing.push('file');
+        }
         if (!t.detailedInstructions || !String(t.detailedInstructions).trim()) {
             missing.push('detailedInstructions');
         }
@@ -546,15 +652,17 @@ function validateTasksPlan(plan) {
             issues.push(`task[${idx}] is missing or empty: ${missing.join(', ')}`);
         }
     });
-    if (issues.length === 0)
+    if (issues.length === 0) {
         return null;
+    }
     // Cap the issue list at 5 entries so error messages stay readable
     // when the model returns 17 empty tasks. The first few are enough
     // to communicate the failure mode; the user doesn't need to scroll.
     const head = issues.slice(0, 5);
     const remaining = issues.length - head.length;
-    if (remaining > 0)
+    if (remaining > 0) {
         head.push(`(+${remaining} more)`);
+    }
     return head.join('; ');
 }
 /**
@@ -788,8 +896,10 @@ async function generateAtomicEdits(tasks, projectContext, _codingStyle) {
     return result.edits;
 }
 async function getAvailableModels() {
-    const config = vscode.workspace.getConfiguration('nexuscode');
-    const fixedModel = config.get('model') || 'qwen2.5-coder';
+    // Use deps.config so this works in both IDE and CLI runtimes. The
+    // CLI uses CliConfigSource (env/flags/cli.json); the IDE uses
+    // VSCodeConfigSource (vscode.workspace.getConfiguration).
+    const fixedModel = (0, container_1.getDeps)().config.get('model') || DEFAULT_MODEL;
     return [fixedModel];
 }
 async function generateDesign(requirements, abortSignal) {
@@ -850,15 +960,26 @@ Example:
     const completionOptions = {
         temperature: 0.2
     };
-    if (abortSignal)
+    if (abortSignal) {
         completionOptions.signal = abortSignal;
+    }
     const fullDesign = await provider.completion([
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `Requirements:\n${requirements}` }
     ], completionOptions);
     return fullDesign.trim();
 }
-async function generateTasks(requirements, design, existingStructure, abortSignal) {
+async function generateTasks(requirements, design, existingStructure, abortSignal, 
+/** P1.2: project-specific steering rules injected into the planner's
+ *  context. When non-empty, the planner sees this AFTER its
+ *  generic engineering rules so steering can ADD constraints
+ *  (e.g. "always use Result<T,E> instead of throw") without
+ *  overriding the core planning behavior.
+ *
+ *  Build this via SteeringManager.buildSteeringPromptBlock(). Pass
+ *  empty string when steering should be ignored (CLI flag, test
+ *  fixtures, etc.). */
+steeringBlock = '') {
     const systemPrompt = `You are the Principal Orchestrator Agent.
     The user has provided a PRD, a Technical Design Document, and the existing Directory Structure.
     YOU DO NOT WRITE CODE. Break the project down into an actionable, exhaustive implementation plan.
@@ -923,12 +1044,26 @@ async function generateTasks(requirements, design, existingStructure, abortSigna
     const completionOptions = {
         temperature: 0.1
     };
-    if (abortSignal)
+    if (abortSignal) {
         completionOptions.signal = abortSignal;
-    const baseMessages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
-    ];
+    }
+    const baseMessages = steeringBlock
+        ? [
+            { role: 'system', content: systemPrompt },
+            // P1.2: steering as a second system message — placed AFTER
+            // the planner's engineering rules so steering ADDS
+            // constraints rather than overriding the core planning
+            // behavior. The header inside steeringBlock makes its
+            // role explicit ("# Steering: project conventions") so
+            // the model treats it as authoritative on what to apply,
+            // not on how to plan.
+            { role: 'system', content: steeringBlock },
+            { role: 'user', content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
+        ]
+        : [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
+        ];
     let parsedPlan = await provider.jsonCompletion(baseMessages, jsonSchemas_1.tasksPlanSchema, completionOptions);
     let issues = validateTasksPlan(parsedPlan);
     if (issues) {
@@ -1108,8 +1243,22 @@ async function healGlobalBuild(buildErrors, filesContext, _codingStyle) {
     }
 }
 //  PHASE 4: ZERO-TRUST SECURITY FIREWALL
-async function askSecurityMonitor(command) {
-    const systemPrompt = `You are an elite Security Monitor for an autonomous coding agent.
+//
+// Two entry points:
+//   - askSecurityMonitor: legacy boolean contract (true = block).
+//     Catches all errors and fails CLOSED. Stable public API used by
+//     pre-existing callers and tests.
+//   - askSecurityMonitorVerbose: returns a discriminated verdict
+//     ({ kind: 'allow' } | { kind: 'deny'; reason: string }) and
+//     PROPAGATES errors. Used by the security hook's actionable-banner
+//     path (M-8) — letting infra failures throw lets the caller
+//     distinguish "monitor said no" from "monitor crashed", which
+//     drives different UX (block-pill vs retry-banner).
+//
+// Both functions share the same prompt + schema. askSecurityMonitor is
+// a thin error-swallowing wrapper around askSecurityMonitorVerbose to
+// keep the LLM call defined exactly once.
+const SECURITY_MONITOR_SYSTEM_PROMPT = `You are an elite Security Monitor for an autonomous coding agent.
     Your ONLY job is to evaluate bash/terminal commands before they are executed.
 
     THREAT MODEL:
@@ -1121,19 +1270,47 @@ async function askSecurityMonitor(command) {
 
     Return JSON: { "allowed": true|false, "reason": "<one-sentence justification>" }
     Set "allowed" to false to BLOCK the command, true to ALLOW.`;
+/**
+ * Verbose-verdict version of the security monitor. Throws on
+ * infrastructure failure (LLM provider crash, malformed response,
+ * timeout). Returns a discriminated union on success.
+ *
+ * Callers should wrap in try/catch; thrown errors mean "monitor
+ * unreachable" not "monitor declined". The securityHook factory uses
+ * this distinction to render the M-8 actionable banner.
+ */
+async function askSecurityMonitorVerbose(command) {
+    const result = await (0, jsonRequest_1.jsonRequestData)({
+        messages: [
+            { role: "system", content: SECURITY_MONITOR_SYSTEM_PROMPT },
+            { role: "user", content: `Command to evaluate: ${command}` }
+        ],
+        schema: jsonSchemas_1.securityDecisionSchema,
+        temperature: 0.0
+    });
+    if (result.allowed) {
+        return { kind: 'allow' };
+    }
+    return {
+        kind: 'deny',
+        reason: typeof result.reason === 'string' && result.reason.trim()
+            ? result.reason
+            : 'Security Monitor declined the command.'
+    };
+}
+/**
+ * Legacy boolean contract. Returns true to BLOCK, false to ALLOW.
+ * Fails closed: any error (provider down, malformed response) returns
+ * true so the command is blocked. Stable public API — do not change
+ * the signature without updating call sites.
+ */
+async function askSecurityMonitor(command) {
     try {
-        const result = await (0, jsonRequest_1.jsonRequestData)({
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `Command to evaluate: ${command}` }
-            ],
-            schema: jsonSchemas_1.securityDecisionSchema,
-            temperature: 0.0
-        });
-        return !result.allowed; // returns true if it should be blocked
+        const verdict = await askSecurityMonitorVerbose(command);
+        return verdict.kind === 'deny'; // true means block
     }
     catch (e) {
-        return true; // Fail-safe: If the security monitor crashes, BLOCK the command!
+        return true; // Fail-safe: monitor crash = block.
     }
 }
 //  PHASE 4: ADVERSARIAL VERIFICATION SPECIALIST

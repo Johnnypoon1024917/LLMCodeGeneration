@@ -11,22 +11,27 @@
 //
 // Body strategies (one per archetype):
 //   - InformationalBody: read_file / list_directory / search_codebase
-//     (this session)
-//   - DiffBody: write_file / edit_file (deferred to 2B-4b)
+//   - DiffBody: write_file / edit_file
 //   - ExecutableBody: bash_exec / run_tests / install_package /
-//     git_commit (deferred to 2B-4c — likely reuses existing CommandCard)
-//   - NetworkBody: web_fetch (deferred to 2B-4d)
+//     git_commit
+//   - NetworkBody: web_fetch
 //
 // State source: webview-ui/src/toolEvents.ts ToolCallState. The card
 // is purely presentational — all state mutation happens in App.tsx's
 // reducer when toolCallEvent messages arrive.
 //
 // Lifecycle visuals:
-//   - status='running' → spinner icon, "running..." status, body shows
-//     output buffer if any (for streaming tools)
-//   - status='success' → green check, duration, body shows final result
+//   - status='running' → spinner icon, body shows output buffer if any
+//   - status='success' → green check, duration in header, body shows result
 //   - status='error' → red X, body shows error message
 //   - status='cancelled' → grey slash, "cancelled" label
+//
+// PR 2.2 (Sprint 2): visual overhaul. Shell rewritten using the
+// Card primitive + Pill for status + design tokens. Logic preserved
+// verbatim — iconForTool, summarizeArgs, STATUS_CONFIG, formatDuration,
+// bodyForTool, GenericFallbackBody all unchanged. The applyToolEvent
+// state reducer (in toolEvents.ts) is untouched, so the
+// applyToolEvent.test.ts suite continues to pass without changes.
 
 import React, { useState } from 'react';
 import {
@@ -49,10 +54,12 @@ import {
     ChevronRight as IconChevronRight
 } from 'lucide-react';
 import type { ToolCallState } from '../toolEvents';
+import { cn } from './ui/cn';
 import { InformationalBody } from './toolCardBodies/InformationalBody';
 import { DiffBody } from './toolCardBodies/DiffBody';
 import { ExecutableBody } from './toolCardBodies/ExecutableBody';
 import { NetworkBody } from './toolCardBodies/NetworkBody';
+import { BodyEmpty, BodyFallbackPre } from './toolCardBodies/shared';
 
 export interface ToolCallCardProps {
     state: ToolCallState;
@@ -114,11 +121,14 @@ function summarizeArgs(name: string, args: Record<string, unknown>): string {
     }
 }
 
+/** Status configuration: status text, the icon, and a Pill variant
+ *  matching our design-token color ramp. The variant maps directly
+ *  onto --nx-status-* so the colors align with the security strip. */
 const STATUS_CONFIG = {
-    running:   { color: 'var(--vscode-charts-orange, #cca700)', Icon: IconLoader,     label: 'running' },
-    success:   { color: 'var(--nexus-success)',                Icon: IconCheck,      label: 'done' },
-    error:     { color: 'var(--nexus-error)',                  Icon: IconError,      label: 'error' },
-    cancelled: { color: 'var(--nexus-text-muted, #8b949e)',    Icon: IconCancelled,  label: 'cancelled' }
+    running:   { Icon: IconLoader,    label: 'running',   pill: 'running' as const,  color: 'text-status-running' },
+    success:   { Icon: IconCheck,     label: 'done',      pill: 'secure'  as const,  color: 'text-status-secure'  },
+    error:     { Icon: IconError,     label: 'error',     pill: 'blocked' as const,  color: 'text-status-blocked' },
+    cancelled: { Icon: IconCancelled, label: 'cancelled', pill: 'neutral' as const,  color: 'text-text-tertiary'  }
 } as const;
 
 /**
@@ -128,12 +138,22 @@ const STATUS_CONFIG = {
  *   else       → "1m 23s"
  */
 function formatDuration(ms: number): string {
-    if (ms < 1000) return `${ms}ms`;
-    if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+    if (ms < 1000) { return `${ms}ms`; }
+    if (ms < 60_000) { return `${(ms / 1000).toFixed(1)}s`; }
     const m = Math.floor(ms / 60_000);
     const s = Math.floor((ms % 60_000) / 1000);
     return `${m}m ${s}s`;
 }
+
+/** Border-color class per status. Applied as a left border on the
+ *  card to give a quick at-a-glance status indicator without needing
+ *  to read the pill text. */
+const STATUS_BORDER: Record<ToolCallState['status'], string> = {
+    running:   'border-l-2 border-l-status-running',
+    success:   'border-l-2 border-l-status-secure',
+    error:     'border-l-2 border-l-status-blocked',
+    cancelled: 'border-l-2 border-l-text-tertiary/40'
+};
 
 export function ToolCallCard({ state, defaultExpanded }: ToolCallCardProps): React.ReactElement {
     // Default expansion: running and errored cards expanded so the user
@@ -155,46 +175,72 @@ export function ToolCallCard({ state, defaultExpanded }: ToolCallCardProps): Rea
         : null;
 
     return (
-        <div className="tool-call-card" data-status={state.status}>
+        <div
+            data-status={state.status}
+            className={cn(
+                'mt-2 rounded-md',
+                'bg-surface-raised border border-border-subtle',
+                'overflow-hidden',
+                STATUS_BORDER[state.status]
+            )}
+        >
             <div
-                className="tool-call-card-header"
-                onClick={() => setExpanded(e => !e)}
                 role="button"
                 tabIndex={0}
+                aria-expanded={expanded}
+                onClick={() => setExpanded(e => !e)}
                 onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
                         setExpanded(x => !x);
                     }
                 }}
-                aria-expanded={expanded}
+                className={cn(
+                    'flex items-center gap-2',
+                    'px-3 py-2',
+                    'cursor-pointer select-none',
+                    'transition-colors duration-(--animate-duration-fast)',
+                    'hover:bg-surface-sunken',
+                    'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border-focus focus-visible:ring-inset'
+                )}
             >
-                <span className="tool-call-card-chev" aria-hidden="true">
+                <span aria-hidden="true" className="shrink-0 text-text-tertiary">
                     {expanded
                         ? <IconChevronDown size={12} />
                         : <IconChevronRight size={12} />}
                 </span>
-                <span className="tool-call-card-tool-icon" aria-hidden="true">
+                <span aria-hidden="true" className="shrink-0 text-text-primary">
                     <ToolIcon size={14} />
                 </span>
-                <span className="tool-call-card-name">
+                <span className="font-mono text-sm text-text-primary truncate min-w-0 flex-1">
                     {state.name}
-                    {argSummary && <span className="tool-call-card-args">({argSummary})</span>}
+                    {argSummary && (
+                        <span className="text-text-secondary ml-0.5">
+                            ({argSummary})
+                        </span>
+                    )}
                 </span>
                 {durationLabel && (
-                    <span className="tool-call-card-duration" title="Duration">
+                    <span
+                        title="Duration"
+                        className="shrink-0 font-mono text-xs text-text-tertiary tabular-nums"
+                    >
                         {durationLabel}
                     </span>
                 )}
-                <span className="tool-call-card-status" style={{ color: cfg.color }} title={cfg.label}>
+                <span
+                    title={cfg.label}
+                    className={cn('shrink-0 inline-flex items-center', cfg.color)}
+                >
                     <StatusIcon size={14} className={isSpinner ? 'spin' : undefined} />
                 </span>
             </div>
 
             {expanded && (
-                <div className="tool-call-card-body">
-                    {/* Body strategy dispatch. As more archetypes ship in
-                        2B-4c/d, add cases to bodyForTool() below. */}
+                <div className="border-t border-border-subtle bg-surface-base/40">
+                    {/* Body strategy dispatch. Each archetype has its own
+                        body component; they all consume the same
+                        ToolCallState shape. */}
                     {bodyForTool(state)}
                 </div>
             )}
@@ -204,7 +250,7 @@ export function ToolCallCard({ state, defaultExpanded }: ToolCallCardProps): Rea
 
 /**
  * Pick the body component for a tool call based on its name. Each
- * tool maps to one of four archetypes (all four shipped as of 2B-4d):
+ * tool maps to one of four archetypes:
  *
  *   - Informational: read_file / list_directory / search_codebase
  *     → InformationalBody (file_contents / directory / search_matches payloads)
@@ -236,10 +282,6 @@ function bodyForTool(state: ToolCallState): React.ReactElement {
             return <ExecutableBody state={state} />;
         case 'web_fetch':
             return <NetworkBody state={state} />;
-        // All 10 tools in the Q1=1C catalog are covered by an archetype
-        // as of 2B-4d. The default branch handles unknown tool names —
-        // kept for forward-compat in case an audit-log replay or a
-        // newer extension ships a tool the webview doesn't recognize.
         default:
             return <GenericFallbackBody state={state} />;
     }
@@ -259,14 +301,10 @@ function GenericFallbackBody({ state }: { state: ToolCallState }): React.ReactEl
     const content = state.result?.llmContent ?? state.outputBuffer ?? '';
     if (!content) {
         return (
-            <div className="tool-call-card-empty">
+            <BodyEmpty>
                 {state.status === 'running' ? '(running…)' : '(no output)'}
-            </div>
+            </BodyEmpty>
         );
     }
-    return (
-        <pre className="tool-call-card-fallback-output" tabIndex={0}>
-            {content}
-        </pre>
-    );
+    return <BodyFallbackPre>{content}</BodyFallbackPre>;
 }

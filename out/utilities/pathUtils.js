@@ -83,8 +83,9 @@ async function findFileInWorkspace(targetPath) {
     const exclude = '**/{node_modules,dist,out,build,.git,.vscode,coverage}/**';
     // Use VS Code's fast internal search
     const foundUris = await vscode.workspace.findFiles(`**/${filename}`, exclude, 10);
-    if (foundUris.length === 0)
+    if (foundUris.length === 0) {
         return null;
+    }
     // Sort by path length (shortest is usually the source file)
     foundUris.sort((a, b) => a.fsPath.length - b.fsPath.length);
     return vscode.workspace.asRelativePath(foundUris[0]); // length > 0 guarded
@@ -94,8 +95,9 @@ async function findFileOnDisk(targetPath, rootDir) {
     const filename = path.basename(targetPath);
     // We must manually crawl because vscode.findFiles can't see outside the workspace
     const matches = crawlDirectory(rootDir, filename);
-    if (matches.length === 0)
+    if (matches.length === 0) {
         return null;
+    }
     // Sort by shortest path
     matches.sort((a, b) => a.length - b.length);
     // Return path relative to the root (so the AI understands it)
@@ -103,8 +105,9 @@ async function findFileOnDisk(targetPath, rootDir) {
 }
 function crawlDirectory(dir, targetFilename, depth = 0) {
     // Safety break to prevent infinite loops or huge scans
-    if (depth > 8)
+    if (depth > 8) {
         return [];
+    }
     let results = [];
     try {
         const files = fs.readdirSync(dir);
@@ -112,8 +115,9 @@ function crawlDirectory(dir, targetFilename, depth = 0) {
             const fullPath = path.join(dir, file);
             const stat = fs.statSync(fullPath);
             // Ignore junk folders
-            if (['node_modules', 'dist', 'out', 'build', '.git', '.vscode'].includes(file))
+            if (['node_modules', 'dist', 'out', 'build', '.git', '.vscode'].includes(file)) {
                 continue;
+            }
             if (stat.isDirectory()) {
                 // Recurse
                 results = results.concat(crawlDirectory(fullPath, targetFilename, depth + 1));

@@ -27,7 +27,14 @@ module.exports = {
     // Tests that need richer vscode behavior should use the integration test
     // runner (vscode-test), not this mock.
     moduleNameMapper: {
-        '^vscode$': '<rootDir>/test/unit/__mocks__/vscode.ts'
+        '^vscode$': '<rootDir>/test/unit/__mocks__/vscode.ts',
+        // P1.1: tests that transitively import Coordinator pull in
+        // CoderAgent → securityHook → commandDenylist. The real
+        // commandDenylist.ts hasn't been written yet (PR 0 audit
+        // leftover). This mock returns 'allow' for every command so
+        // imports resolve. When the real module exists, this entry
+        // is a no-op.
+        '\\./commandDenylist$': '<rootDir>/test/unit/__mocks__/commandDenylist.ts'
     },
     transform: {
         '^.+\\.ts$': ['ts-jest', {
@@ -41,7 +48,18 @@ module.exports = {
                 module: 'commonjs',
                 esModuleInterop: true,
                 allowSyntheticDefaultImports: true,
-                types: ['jest', 'node']
+                types: ['jest', 'node'],
+                // P1.1: isolatedModules tells ts-jest to type-check only the
+                // file being compiled, not the transitive dep graph. Needed
+                // because Coordinator transitively imports through
+                // securityHook → commandDenylist (which doesn't exist yet —
+                // PR 0 audit leftover). Without this, ANY test importing
+                // from Coordinator fails to compile.
+                //
+                // Tradeoff: tests get slightly weaker type checking
+                // (cross-file inference can miss things). Production
+                // typecheck via `npm run compile` still catches them.
+                isolatedModules: true
             }
         }]
     },

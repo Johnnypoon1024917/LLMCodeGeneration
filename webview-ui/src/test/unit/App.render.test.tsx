@@ -26,9 +26,16 @@
 //
 // They are deliberately shallow. The point is to catch crashes.
 
-import { describe, test, expect } from 'vitest';
-import { render, act } from '@testing-library/react';
+import { afterEach, describe, test, expect } from 'vitest';
+import { cleanup, render, act } from '@testing-library/react';
 import App from '../../App';
+
+// File-local cleanup — registers in this file's lifecycle so it can't
+// be defeated by setup.ts loading-order issues on Windows. See
+// bashApprovalCard.test.tsx header comment for context.
+afterEach(() => {
+    cleanup();
+});
 
 describe('App component — render smoke (Phase 1 hooks regression guard)', () => {
     test('renders without crashing on initial mount (isLoaded=false path)', () => {

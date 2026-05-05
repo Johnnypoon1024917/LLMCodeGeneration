@@ -232,7 +232,7 @@ export function toolCallsForTask(
 ): ToolCallState[] {
     const out: ToolCallState[] = [];
     for (const tc of state.values()) {
-        if (tc.taskId === taskId) out.push(tc);
+        if (tc.taskId === taskId) { out.push(tc); }
     }
     out.sort((a, b) => a.startSeq - b.startSeq);
     return out;

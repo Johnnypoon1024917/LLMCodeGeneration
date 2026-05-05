@@ -53,8 +53,8 @@ export interface WorkingBarProps {
 
 function autoIndicator(status: string): 'spinner' | 'warning' | 'stopped' {
     const s = status.toLowerCase();
-    if (status.includes('⚠️') || s.includes('warning')) return 'warning';
-    if (status.includes('🛑') || s.includes('stopped') || s.includes('blocked')) return 'stopped';
+    if (status.includes('⚠️') || s.includes('warning')) { return 'warning'; }
+    if (status.includes('🛑') || s.includes('stopped') || s.includes('blocked')) { return 'stopped'; }
     return 'spinner';
 }
 
@@ -63,7 +63,7 @@ export function WorkingBar({
     onCancel,
     indicator
 }: WorkingBarProps): React.ReactElement | null {
-    if (!status) return null;
+    if (!status) { return null; }
     const ind = indicator ?? autoIndicator(status);
 
     let iconNode: React.ReactNode = null;

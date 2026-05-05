@@ -10,7 +10,8 @@ import * as vscode from 'vscode';
 import { PlannerAgent } from './PlannerAgent';
 import { CoderAgent } from './CoderAgent';
 import { getProjectContext } from '../projectContext';
-import { VerifierAgent } from './VerifierAgent';
+import { getDeps } from '../container';
+import { VerifierAgent, type VerificationResult, type VerifierFailure } from './VerifierAgent';
 import { IEnvironment } from '../interfaces/IEnvironment';
 import { errorMessage, isAbortError } from '../utilities/errors';
 import type { ToolEventEmitter } from './toolEventEmitter';
@@ -61,15 +62,116 @@ export interface CodeDiff {
  */
 function readMaxRetries(defaultValue: number = 2): number {
     try {
-        const cfg = vscode.workspace.getConfiguration('nexuscode');
-        const v = cfg.get<number>('maxVerificationRetries');
+        const v = getDeps().config.get<number>('maxVerificationRetries');
         if (typeof v === 'number' && v >= 1 && v <= 5) {
             return v;
         }
     } catch {
-        // Headless / CLI mode — vscode may be undefined
+        // Deps not yet bootstrapped (very early startup or unit test)
     }
     return defaultValue;
+}
+
+/**
+ * P1.1: build the user-message that goes back to the Coder on retry.
+ *
+ * Two paths:
+ *
+ *   1. Structured failures present (typical compile/test failure):
+ *      enumerate them as "Failure 1: ...", each with file:line:code:
+ *      message. The Coder reads this as a checklist and can address
+ *      each one individually. Single-shot self-heal candidates
+ *      (severity='unambiguous_typo') are flagged so the Coder knows
+ *      these are routine fixes, not architectural problems.
+ *
+ *   2. No structured failures (LLM PRD review failed, parse error,
+ *      etc.): fall back to the legacy prose critique. We keep the
+ *      revert-notice and phantom-import warnings because those are
+ *      historically-known failure modes the model needs reminding of.
+ *
+ * Either way, the message is wrapped with consistent "your code was
+ * NOT saved, file is REVERTED" framing so the next attempt's
+ * SEARCH/REPLACE blocks target the original file content.
+ */
+export function buildRetryMessage(verification: VerificationResult): string {
+    const failures = verification.failures ?? [];
+    const REVERT_NOTICE =
+        `\n\nCRITICAL REVERT NOTICE: Because your code was rejected, it was NOT saved. ` +
+        `The file has been REVERTED to its original state. If using <<<<SEARCH, it MUST ` +
+        `target the original file content, NOT your failed code.\n\n` +
+        `PHANTOM IMPORT WARNING: If you received a "Cannot find module" or "is not a module" error, ` +
+        `you hallucinated an import. Do NOT try to create the missing file via markdown. ` +
+        `Either fix the import or write the logic INLINE in this current file.\n\n` +
+        `You MUST fix the errors in your next attempt.`;
+
+    if (failures.length === 0) {
+        // Path 2: prose-only fallback. Same as the pre-P1.1 message.
+        return `🚨 VERIFIER REJECTED YOUR CODE 🚨\n\nCritique:\n${verification.critique}${REVERT_NOTICE}`;
+    }
+
+    // Path 1: structured. Enumerate failures with focused detail.
+    const lines: string[] = [];
+    lines.push(`🚨 VERIFIER REJECTED YOUR CODE — ${failures.length} issue(s) to fix 🚨`);
+    lines.push('');
+
+    // Group by kind so the Coder sees compile errors before test
+    // failures (compile failures usually need fixing first; tests
+    // are downstream).
+    const compileFailures = failures.filter((f) => f.kind === 'compile');
+    const testFailures = failures.filter((f) => f.kind === 'test');
+    const reviewFailures = failures.filter((f) => f.kind === 'review');
+
+    if (compileFailures.length > 0) {
+        lines.push(`### Compile errors (${compileFailures.length})`);
+        lines.push('');
+        for (let i = 0; i < compileFailures.length; i++) {
+            lines.push(formatFailure(i + 1, compileFailures[i]!));
+        }
+        lines.push('');
+    }
+    if (testFailures.length > 0) {
+        lines.push(`### Test failures (${testFailures.length})`);
+        lines.push('');
+        for (let i = 0; i < testFailures.length; i++) {
+            lines.push(formatFailure(i + 1, testFailures[i]!));
+        }
+        lines.push('');
+    }
+    if (reviewFailures.length > 0) {
+        lines.push(`### Spec/PRD review failures (${reviewFailures.length})`);
+        lines.push('');
+        for (let i = 0; i < reviewFailures.length; i++) {
+            lines.push(formatFailure(i + 1, reviewFailures[i]!));
+        }
+        lines.push('');
+    }
+
+    // Hint when self-heal is expected. If ALL failures are unambiguous
+    // typos, signal that explicitly — the Coder should produce a
+    // small focused fix, not rewrite the whole file.
+    const allUnambiguous = failures.every((f) => f.severity === 'unambiguous_typo');
+    if (allUnambiguous) {
+        lines.push(
+            `**Note:** All failures above are routine syntax/import issues. ` +
+            `Apply minimal targeted fixes; do not rewrite the file.`
+        );
+        lines.push('');
+    }
+
+    return lines.join('\n') + REVERT_NOTICE;
+}
+
+function formatFailure(index: number, f: VerifierFailure): string {
+    const location = f.file
+        ? (f.line !== undefined
+            ? `${f.file}:${f.line}${f.column !== undefined ? `:${f.column}` : ''}`
+            : f.file)
+        : '(project-wide)';
+    const codeTag = f.code
+        ? ` [${f.kind === 'compile' ? 'TS' : ''}${f.code}]`
+        : '';
+    const severityTag = f.severity === 'unambiguous_typo' ? ' [routine fix]' : '';
+    return `${index}. **${location}**${codeTag}${severityTag}\n   ${f.message}`;
 }
 
 /**
@@ -112,8 +214,25 @@ export interface RunTaskOptions {
     /** Verifier critique from previous attempts (retry-with-context). */
     previousFailures: string;
 
-    /** Steering rules from .nexusrules / .nexus/steering. */
+    /** Steering rules from .nexusrules / .nexus/steering. This is
+     *  the "global" rule string shared with the planner and used as
+     *  a fallback for the coder. P2.2 callers should ALSO supply
+     *  `perFileSteering` to get scope-filtered, custom-file-aware
+     *  steering at the Coder level. */
     globalRules: string;
+
+    /** P2.2: per-file steering callback. When provided, the Coordinator
+     *  invokes this with each Coder's target filepath to obtain a
+     *  file-scoped steering block. The block REPLACES `globalRules`
+     *  for that Coder invocation — it should already incorporate any
+     *  global-scope steering that's still relevant for the file.
+     *  (`SteeringManager.buildSteeringPromptBlock({ targetFilepath })`
+     *  does this naturally.)
+     *
+     *  When omitted, the legacy `globalRules` string is passed
+     *  verbatim to every Coder — no scope filtering. Existing
+     *  callers (fixtures, headless runs) get unchanged behavior. */
+    perFileSteering?: (filepath: string) => Promise<string>;
 
     /** High-level status messages from the Coordinator. The planner
      *  and coder use their own log surfaces; this is for top-level
@@ -139,6 +258,31 @@ export interface RunTaskOptions {
      *  for the rich-card UI. When absent, dispatch is silent — used
      *  for headless invocations (CLI runtime, tests). */
     toolEventEmitter?: ToolEventEmitter;
+
+    /** P1.1: opt-in callback for verifier failures. Fires once per
+     *  verifier rejection, with the structured failure list and the
+     *  attempt number (1-indexed). Use cases:
+     *
+     *    - Fixture harness: count interventions, distinguish self-heal
+     *      from final-failure, surface unambiguous-typo rate
+     *    - Telemetry: track which error codes are most common
+     *    - UI: render structured failure cards (P1.1c — UI work)
+     *
+     *  The callback receives `selfHealed=true` when the next attempt
+     *  succeeded — it fires AFTER that next attempt completes, not
+     *  immediately on rejection. This is the metric that proves the
+     *  retry actually fixed the problem.
+     *
+     *  Existing callers ignore this field; behavior unchanged. */
+    verifierFailureCallback?: (event: {
+        attempt: number;
+        failures: VerifierFailure[];
+        critique: string;
+        /** True if a subsequent attempt passed verification. False if
+         *  this was the final failure (max retries exhausted) or if
+         *  the next attempt is yet to run. */
+        selfHealed: boolean;
+    }) => void;
 }
 
 /**
@@ -161,11 +305,13 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
         activeDesign,
         previousFailures,
         globalRules,
+        perFileSteering,
         log: logCallback,
         streamCallback,
         abortSignal: signal,
         usageCallback,
         toolEventEmitter,
+        verifierFailureCallback,
     } = opts;
 
     logCallback("Coordinator: Task received. Initiating Swarm Orchestration...", "analyze", "Booting Swarm Agents");
@@ -225,7 +371,7 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                 const fileRegex = /<file>([^<]+)<\/file>/g;
                 let match: RegExpExecArray | null;
                 while ((match = fileRegex.exec(filesMatch[1])) !== null) {
-                    if (match[1] !== undefined) filesToModify.push(match[1].trim());
+                    if (match[1] !== undefined) { filesToModify.push(match[1].trim()); }
                 }
             }
         }
@@ -261,6 +407,41 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
             let finalDiff: CodeDiff | null = null;
             const chatHistory: { role: string; content: string }[] = [];
 
+            // P2.2: resolve file-scoped steering ONCE before the retry
+            // loop. Steering is a function of (filepath, steering-files-
+            // on-disk) — it doesn't change between attempts on the same
+            // file, so reading it once saves redundant FS work on retry.
+            //
+            // When perFileSteering isn't provided (legacy callers,
+            // fixtures, headless runs), fall back to the static
+            // globalRules string.
+            let coderSteering = globalRules;
+            if (perFileSteering) {
+                try {
+                    coderSteering = await perFileSteering(filepath);
+                } catch (e) {
+                    logCallback(
+                        `Coordinator: per-file steering lookup failed for ${filepath}, falling back to globalRules: ${e}`,
+                        "analyze"
+                    );
+                    // coderSteering stays as globalRules — best effort
+                }
+            }
+
+            // P1.1: track the previous attempt's verifier failure so we
+            // can fire verifierFailureCallback with selfHealed=true if
+            // the next attempt passes. This is the metric that tells us
+            // whether single-shot self-heal is working in practice.
+            //
+            // Set to non-null at the end of each rejected attempt; reset
+            // to null after the callback fires (whether self-healed or
+            // exhausted retries).
+            let pendingFailure: {
+                attempt: number;
+                failures: VerifierFailure[];
+                critique: string;
+            } | null = null;
+
             while (attempts < MAX_RETRIES) {
                 attempts++;
                 logCallback(
@@ -281,7 +462,7 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                     filepath,
                     fileContent: fileContentStr,
                     chatHistory,
-                    globalRules,
+                    globalRules: coderSteering,
                     workspaceRoot,
                     // taskId for lifecycle event seq stamping. The
                     // task descriptor `task` is already a unique
@@ -361,6 +542,24 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                 if (verification.passed) {
                     finalDiff = draftDiff;
 
+                    // P1.1: if the previous attempt failed and this one
+                    // passed, that's a self-heal. Fire the callback with
+                    // selfHealed=true so the harness/telemetry can count it.
+                    if (pendingFailure && verifierFailureCallback) {
+                        try {
+                            verifierFailureCallback({
+                                attempt: pendingFailure.attempt,
+                                failures: pendingFailure.failures,
+                                critique: pendingFailure.critique,
+                                selfHealed: true
+                            });
+                        } catch {
+                            // Telemetry callbacks are observers, not gates —
+                            // never let them crash the dispatch path.
+                        }
+                    }
+                    pendingFailure = null;
+
                     if (streamCallback) {
                         streamCallback(`\n\n✅ **Verification Passed!** Code approved for deployment.\n`);
                     }
@@ -387,11 +586,54 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                 // content before the ReAct loop), so the "REVERTED"
                 // claim in the next user turn remains truthful.
                 chatHistory.push({ role: "assistant", content: draftDiff.fullOutputBuffer });
-                chatHistory.push({
-                    role: "user",
-                    content: `🚨 VERIFIER REJECTED YOUR CODE 🚨\n\nCritique:\n${verification.critique}\n\nCRITICAL REVERT NOTICE: Because your code was rejected, it was NOT saved. The file has been REVERTED to its original state. If using <<<<SEARCH, it MUST target the original file content, NOT your failed code.\n\nPHANTOM IMPORT WARNING: If you received a "Cannot find module" or "is not a module" error, you hallucinated an import. Do NOT try to create the missing file via markdown. Either fix the import or write the logic INLINE in this current file.\n\nYou MUST fix the errors in your next attempt.`
-                });
+
+                // P1.1: prefer structured failures over prose critique
+                // when the verifier returned them. The structured form
+                // is far easier for the Coder to parse than a prose
+                // blob with embedded error text.
+                //
+                // Why this matters: with structured failures, the Coder
+                // sees an enumerated list of file:line:code:message that
+                // it can address one-by-one. With the prose critique,
+                // it has to extract the same information from a string
+                // that includes formatting decoration ("🚨 COMPILER ERROR
+                // DETECTED 🚨") and instructions ("You MUST fix...").
+                // The structured version typically wins on cleaner code
+                // generation.
+                //
+                // Fallback: when verification.failures is absent or
+                // empty (LLM PRD review path, parser-failure path),
+                // we use the legacy prose critique. Same retry semantics,
+                // less focused signal.
+                const retryMessage = buildRetryMessage(verification);
+                chatHistory.push({ role: "user", content: retryMessage });
+
+                // P1.1: stash the failure so we can fire the callback
+                // when we know whether the next attempt fixes it.
+                pendingFailure = {
+                    attempt: attempts,
+                    failures: verification.failures ?? [],
+                    critique: verification.critique
+                };
             }
+
+            // P1.1: the loop exited without `break` (which only happens
+            // on verifier-passed). If we have a pending failure, that
+            // means the LAST attempt failed too — fire the callback
+            // with selfHealed=false so the harness/telemetry knows.
+            if (pendingFailure && !finalDiff && verifierFailureCallback) {
+                try {
+                    verifierFailureCallback({
+                        attempt: pendingFailure.attempt,
+                        failures: pendingFailure.failures,
+                        critique: pendingFailure.critique,
+                        selfHealed: false
+                    });
+                } catch {
+                    // Same observer-not-gate principle as the success path.
+                }
+            }
+            pendingFailure = null;
 
             if (finalDiff) {
                 allDiffs.push(finalDiff);

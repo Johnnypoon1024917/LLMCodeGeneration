@@ -45,18 +45,23 @@ const diffProvider_1 = require("./diffProvider");
 const terminalInterceptor_1 = require("./terminalInterceptor");
 const astParser_1 = require("./utilities/astParser");
 const HookManager_1 = require("./hooks/HookManager");
+const mcpManager_1 = require("./mcp/mcpManager");
 const logger_1 = require("./logger");
 const container_1 = require("./container");
 const VSCodeConfigSource_1 = require("./adapters/VSCodeConfigSource");
 const i18n_1 = require("./i18n");
 const AuditLog_1 = require("./audit/AuditLog");
+const startupTiming_1 = require("./diagnostics/startupTiming");
 async function activate(context) {
+    (0, startupTiming_1.mark)('activate.start');
     logger_1.log.info('LLMCodeGeneration is now active!');
     // Initialize the AST Parser on startup
     await astParser_1.ASTParser.init(context);
+    (0, startupTiming_1.mark)('activate.astParser.done');
     // Initialize i18n. Default to English; future versions may read this
     // from `nexuscode.locale` config and switch on activation.
     await (0, i18n_1.initI18n)('en');
+    (0, startupTiming_1.mark)('activate.i18n.done');
     // Initialize the audit logger for the active workspace, or a fallback
     // location (extension dir) if no workspace is open. Audit init reads
     // existing chain hash; failures here log a warning and start fresh.
@@ -64,6 +69,7 @@ async function activate(context) {
         ?? context.extensionUri.fsPath;
     const audit = new AuditLog_1.AuditLog(auditRoot);
     await audit.init();
+    (0, startupTiming_1.mark)('activate.audit.done');
     // Install runtime deps for the typed container. This must run BEFORE
     // any consumer code that calls getDeps() — at the start of activate().
     (0, container_1.setDeps)({
@@ -74,6 +80,7 @@ async function activate(context) {
         config: new VSCodeConfigSource_1.VSCodeConfigSource('nexuscode'),
         audit
     });
+    (0, startupTiming_1.mark)('activate.deps.done');
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     context.subscriptions.push(watcher.onDidCreate(() => (0, projectContext_1.invalidateProjectContext)()), watcher.onDidDelete(() => (0, projectContext_1.invalidateProjectContext)()), 
     // Note: We don't track onDidChange because changing a file's contents doesn't change the Directory Tree structure.
@@ -118,8 +125,9 @@ async function activate(context) {
             placeHolder: placeholder
         });
         // showInputBox returns undefined when the user presses Esc
-        if (key === undefined)
+        if (key === undefined) {
             return;
+        }
         if (key === '') {
             await context.secrets.delete('nexuscode_apikey');
             vscode.window.showInformationMessage((0, i18n_1.t)("api_key.cleared"));
@@ -137,16 +145,18 @@ async function activate(context) {
         await provenanceTracker.handleReject(taskId, uri);
     }), vscode.commands.registerCommand('nexuscode.inlineEdit', async () => {
         const editor = vscode.window.activeTextEditor;
-        if (!editor)
+        if (!editor) {
             return;
+        }
         const selection = editor.document.getText(editor.selection);
         const filename = vscode.workspace.asRelativePath(editor.document.uri);
         const userInput = await vscode.window.showInputBox({
             prompt: "NexusCode: What do you want to generate or modify?",
             placeHolder: "e.g., Extract this logic into a separate React component..."
         });
-        if (!userInput)
+        if (!userInput) {
             return;
+        }
         const contextStr = selection ? `\n\`\`\`${editor.document.languageId} title="${filename}"\n${selection}\n\`\`\`\n` : "";
         sidebarProvider.sendMessageToWebview({
             type: 'addUserMessageAndSubmit',
@@ -166,8 +176,9 @@ async function activate(context) {
     // --- HIGHLIGHT / REVIEW COMMANDS ---
     vscode.commands.registerCommand('nexuscode.reviewCode', async () => {
         const editor = vscode.window.activeTextEditor;
-        if (!editor)
+        if (!editor) {
             return;
+        }
         const selectedText = editor.document.getText(editor.selection);
         if (!selectedText) {
             vscode.window.showWarningMessage((0, i18n_1.t)("commands.highlight_code_to_review"));
@@ -177,8 +188,9 @@ async function activate(context) {
         await vscode.commands.executeCommand('nexuscode.sidebar.focus');
     }), vscode.commands.registerCommand('nexuscode.optimizeSelection', async () => {
         const editor = vscode.window.activeTextEditor;
-        if (!editor)
+        if (!editor) {
             return;
+        }
         const selection = editor.document.getText(editor.selection);
         sidebarProvider._view?.webview.postMessage({ type: 'requestReview', code: selection });
         await vscode.commands.executeCommand('nexuscode.sidebar.focus');
@@ -227,12 +239,34 @@ async function activate(context) {
     // We don't fail activation if no workspace is open — hooks just won't run.
     const folders = vscode.workspace.workspaceFolders;
     if (folders && folders.length > 0) {
-        HookManager_1.HookManager.getInstance().start(context, folders[0].uri).catch(e => {
+        const hm = HookManager_1.HookManager.getInstance();
+        // P1.4: wire the audit log so every fire is recorded. The
+        // emitter for chat-thread cards is wired later, in
+        // SidebarProvider, because the emitter's sink (postMessage)
+        // only exists once the webview is mounted.
+        hm.setAuditLog(audit);
+        hm.start(context, folders[0].uri).catch(e => {
             logger_1.log.error('HookManager failed to start:', e);
         });
+        // P2.1: start the MCP manager. Loads .nexus/mcp-servers.json
+        // (if present), watches for changes, surfaces config errors
+        // and per-server status to the webview.
+        //
+        // Deliberately fire-and-forget — the initial config load is
+        // async and we don't want to delay extension activation. UI
+        // shows "loading" state until the manager fires its first
+        // notification.
+        try {
+            mcpManager_1.McpManager.getInstance().start(folders[0].uri);
+        }
+        catch (e) {
+            logger_1.log.error('McpManager failed to start:', e);
+        }
     }
+    (0, startupTiming_1.mark)('activate.done');
 }
 function deactivate() {
     HookManager_1.HookManager.getInstance().stop();
+    mcpManager_1.McpManager.getInstance().dispose();
 }
 //# sourceMappingURL=extension.js.map

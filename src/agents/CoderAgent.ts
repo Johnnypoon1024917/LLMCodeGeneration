@@ -44,6 +44,9 @@ import { RateLimiter, type RateLimiterConfig } from './rateLimiter';
 import { buildRateLimitHook, composeHooks } from './rateLimitHook';
 import type { ToolEventEmitter } from './toolEventEmitter';
 import type { CodeDiff } from './Coordinator';
+import { getDeps } from '../container';
+// V2.0: per-role thinking-mode profile.
+import { getThinkingProfile } from '../llmService';
 // Trigger registration of all tools by importing the barrel.
 import './tools';
 
@@ -131,10 +134,31 @@ You have tools available:
   - write_file: replace the entire content of a file (preferred for new files or major changes)
   - edit_file: surgical edit of a specific block (preferred for small targeted changes)
 
+TOOL CALL FORMAT — follow this exactly:
+When you decide to call a tool, emit a structured tool call. Your inference server may parse one of these formats. EITHER:
+
+Format A (OpenAI native, preferred when supported):
+The tool call is structured into the response automatically — just decide to call the tool and the runtime handles the wire format.
+
+Format B (text-based, for endpoints without native tool-call parsing):
+\`\`\`
+<tool_call>
+{"name": "write_file", "arguments": {"path": "src/example.ts", "content": "console.log('hello');\\n"}}
+</tool_call>
+\`\`\`
+
+The JSON inside <tool_call>...</tool_call> MUST be a complete, valid object with "name" (the tool to call) and "arguments" (an object containing the tool's parameters as documented). Use real newlines INSIDE the JSON string values (not literal \\n unless the string already contains them).
+
+Example — to write a Hello World C program:
+<tool_call>
+{"name": "write_file", "arguments": {"path": "main.c", "content": "#include <stdio.h>\\n\\nint main() {\\n    printf(\\"Hello, World!\\\\n\\");\\n    return 0;\\n}\\n"}}
+</tool_call>
+
 CRITICAL RULES:
 1. ALWAYS use write_file or edit_file to make your changes — do NOT emit code in chat or markdown blocks. The chat output is for your reasoning only.
-2. NO PHANTOM IMPORTS: You are in SINGLE-FILE MODE. Modify only ${filepath}. Do NOT refactor logic into other files that don't exist yet. Write or keep the logic INLINE.
-3. When you finish, end with a brief one-line summary of what you changed. Do NOT keep calling tools after the file is written.`;
+2. ALWAYS emit a COMPLETE tool call. The opening tag, the full JSON, and the closing tag MUST all appear in your response. Do not stop after just the opening tag.
+3. NO PHANTOM IMPORTS: You are in SINGLE-FILE MODE. Modify only ${filepath}. Do NOT refactor logic into other files that don't exist yet. Write or keep the logic INLINE.
+4. When you finish, end with a brief one-line summary of what you changed. Do NOT keep calling tools after the file is written.`;
 
 /**
  * Restore pre-modification content to disk so each retry attempt
@@ -162,7 +186,7 @@ CRITICAL RULES:
 function readRateLimitConfig(): RateLimiterConfig {
     const config: RateLimiterConfig = {};
     try {
-        const cfg = vscode.workspace.getConfiguration('nexuscode');
+        const cfg = getDeps().config;
 
         const maxTotalRaw = cfg.get<number>('rateLimits.maxToolCallsPerTask');
         // Accept any non-negative integer. 0 is valid (effectively
@@ -198,7 +222,7 @@ async function restorePreModContent(
     filepath: string,
     fileContent: string
 ): Promise<vscode.Uri | null> {
-    if (filepath === 'unknown') return null;
+    if (filepath === 'unknown') { return null; }
     const targetUri = vscode.Uri.file(path.join(workspaceRoot, filepath));
     try {
         await vscode.workspace.fs.writeFile(
@@ -221,7 +245,7 @@ async function restorePreModContent(
  * verifier critique path.
  */
 async function readPostModContent(targetUri: vscode.Uri | null): Promise<string> {
-    if (!targetUri) return '';
+    if (!targetUri) { return ''; }
     try {
         const fileData = await vscode.workspace.fs.readFile(targetUri);
         return new TextDecoder().decode(fileData);
@@ -295,7 +319,7 @@ export class CoderAgent {
         let outputBuffer = '';
         const accumulatingStreamCallback = (token: string): void => {
             outputBuffer += token;
-            if (opts.streamCallback) opts.streamCallback(token);
+            if (opts.streamCallback) { opts.streamCallback(token); }
         };
 
         // didModifyingToolCall tracks whether the model ever
@@ -310,20 +334,34 @@ export class CoderAgent {
         let didModifyingToolCall = false;
 
         // ─── Engine config ────────────────────────────────────────────
+        // V2.0: fetch the thinking-mode profile for the Coder role.
+        // Reads nexuscode.thinkingCoder + nexuscode.preserveThinking
+        // from config; defaults to thinking ON for Qwen 3.6. When the
+        // endpoint is non-thinking, extra_body is treated as opaque
+        // pass-through and the request still succeeds.
+        const thinkingProfile = await getThinkingProfile('coder');
+
         const config: ReActConfig = {
             systemPrompt,
             userPrompt,
-            // Per-agent routing: Coder uses 'coder' role so the model
-            // can be tuned independently from Planner. Falls back to
-            // the global default when `nexuscode.modelCoder` unset.
-            role: 'coder',
+            // Per-agent model routing for the Coder role happens at the
+            // provider layer via getLLMConfig('coder'), not via this
+            // config. V2.0's thinkingProfile (set below) is the new
+            // engine-level mechanism for per-role tuning of sampling
+            // parameters and thinking-mode toggles.
             chatHistory: normalizedHistory,
             tools,
             workspaceRoot: opts.workspaceRoot,
             // Same 6-step ceiling as legacy swarmDraftCode.
             maxSteps: 6,
-            // Same 0.1 temperature as legacy swarmDraftCode.
+            // Same 0.1 temperature as legacy swarmDraftCode. Intentional
+            // override of the V2.0 thinking-profile default of 0.6 —
+            // the Coder values determinism more than the planner. The
+            // engine picks config.temperature first, then the profile.
             temperature: 0.1,
+            // V2.0: forward enableThinking/preserveThinking + sampling
+            // params (top_p, top_k, presence_penalty) to chatCompletion.
+            thinkingProfile,
 
             // No specific termination string — the Coder is "done" when
             // it stops calling tools. With no `repromptOnNonDone`, the

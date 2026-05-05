@@ -164,6 +164,27 @@ export interface ReActConfig {
     /** Sampling temperature for chatCompletion. */
     temperature?: number;
 
+    /**
+     * V2.0: per-role thinking-mode + sampling profile. When provided,
+     * the ReAct loop forwards `enableThinking` / `preserveThinking` /
+     * `topP` / `topK` / `presencePenalty` into every chatCompletion
+     * call, and uses `temperature` from the profile if no explicit
+     * `temperature` field is set above.
+     *
+     * Construct via `getThinkingProfile(role)` from llmService.ts.
+     * Optional — when absent the loop behaves as in V1 (no thinking
+     * extras emitted). Older endpoints that don't speak `extra_body`
+     * ignore the parameters silently.
+     */
+    thinkingProfile?: {
+        enableThinking: boolean;
+        preserveThinking: boolean;
+        temperature: number;
+        topP: number;
+        topK: number;
+        presencePenalty: number;
+    };
+
     /** Termination predicate — when content satisfies this, loop ends. */
     isDone: ReActTerminationCheck;
 

@@ -46,6 +46,9 @@ import type {
 } from './Provider';
 import type { JsonSchema } from './jsonSchemas';
 import { log } from '../logger';
+import { extractThinkingFromContent } from './thinkingParser';
+import { extractFallbackToolCalls } from './toolCallFallback';
+import { appendToolSchemasToSystemPrompt } from './toolSchemaInjection';
 
 export interface OpenAICompatibleProviderConfig {
     endpoint: string;
@@ -167,7 +170,7 @@ export class OpenAICompatibleProvider implements Provider {
             schema: effectiveSchema,
             temperature: options?.temperature ?? 0.3
         };
-        if (options?.signal !== undefined) args.signal = options.signal;
+        if (options?.signal !== undefined) { args.signal = options.signal; }
         return jsonRequestData<T>(args);
     }
 
@@ -203,18 +206,32 @@ export class OpenAICompatibleProvider implements Provider {
 
         // Path 1: tools weren't requested OR cache says endpoint can't do tools
         if (!wantsTools || cap === 'unsupported') {
-            return this.requestNonStreaming(messages, options, /*includeTools*/ false);
+            return this.requestNonStreaming(messages, options, /*includeTools*/ false, /*injectSchemasAsText*/ false);
         }
 
-        // Path 2: cache says endpoint supports tools — send with tools, no probe
+        // Path 2a: cache says endpoint supports tools — send with native tools, no probe
         if (cap === 'supported') {
-            return this.requestNonStreaming(messages, options, /*includeTools*/ true);
+            return this.requestNonStreaming(messages, options, /*includeTools*/ true, /*injectSchemasAsText*/ false);
+        }
+
+        // Path 2b: degraded — endpoint accepts tools field but model
+        // doesn't use it. Skip the wire field (avoids wasted bytes)
+        // and inject schemas into the system prompt as text. The
+        // response-side fallback parser (extractFallbackToolCalls in
+        // requestNonStreaming) handles `<tool_call>...</tool_call>`
+        // text-mode responses.
+        if (cap === 'degraded') {
+            return this.requestNonStreaming(messages, options, /*includeTools*/ false, /*injectSchemasAsText*/ true);
         }
 
         // Path 3: capability unknown — try with tools, fall back on capability error
         try {
-            const result = await this.requestNonStreaming(messages, options, /*includeTools*/ true);
-            // Success: mark endpoint capable
+            const result = await this.requestNonStreaming(messages, options, /*includeTools*/ true, /*injectSchemasAsText*/ false);
+            // Success: mark endpoint capable. (requestNonStreaming
+            // also records the native tool-call result for capability
+            // tracking — one nuance: the very first probe-via-real-
+            // -request response counts toward the degraded threshold
+            // if it came back empty, which is what we want.)
             toolCapabilityCache.set(this.endpoint, 'supported');
             log.info(`[Provider] Endpoint ${this.endpoint} supports native tool-calling.`);
             return result;
@@ -222,7 +239,7 @@ export class OpenAICompatibleProvider implements Provider {
             if (isToolCapabilityError(e)) {
                 log.warn(`[Provider] Endpoint ${this.endpoint} rejected tool-calling — falling back to text-only mode for this and future requests.`);
                 toolCapabilityCache.set(this.endpoint, 'unsupported');
-                return this.requestNonStreaming(messages, options, /*includeTools*/ false);
+                return this.requestNonStreaming(messages, options, /*includeTools*/ false, /*injectSchemasAsText*/ false);
             }
             throw e;
         }
@@ -281,7 +298,8 @@ export class OpenAICompatibleProvider implements Provider {
                 await this.requestNonStreaming(
                     [{ role: 'user', content: 'probe' }],
                     probeOptions,
-                    /*includeTools*/ true
+                    /*includeTools*/ true,
+                    /*injectSchemasAsText*/ false
                 );
                 toolCapabilityCache.set(this.endpoint, 'supported');
                 cap = 'supported';
@@ -301,7 +319,49 @@ export class OpenAICompatibleProvider implements Provider {
         }
 
         const includeTools = wantsTools && cap === 'supported';
-        return this.requestStreaming(messages, options, includeTools);
+        const injectSchemasAsText = wantsTools && cap === 'degraded';
+        return this.requestStreaming(messages, options, includeTools, injectSchemasAsText);
+    }
+
+    /**
+     * Apply tool-schema text injection to the messages array if enabled.
+     * Returns a new array (does not mutate the caller's). When the
+     * messages already contain a system message, the schemas are
+     * appended to its content. When there's no system message, a new
+     * one is prepended carrying just the schemas.
+     *
+     * Pure function (well, allocates arrays — pure semantically): the
+     * caller passes messages in, gets a transformed copy back. No
+     * side effects on the cache or the network.
+     */
+    private maybeInjectToolSchemas(
+        messages: ChatMessage[],
+        options: CompletionOptions | undefined,
+        injectSchemasAsText: boolean
+    ): ChatMessage[] {
+        if (!injectSchemasAsText) { return messages; }
+        if (!options?.tools || options.tools.length === 0) { return messages; }
+
+        // Find the existing system message (if any). The OpenAI spec
+        // doesn't require a system message at index 0 specifically, but
+        // it's the universal convention; we walk to find it just to
+        // be defensive.
+        const systemIndex = messages.findIndex((m) => m.role === 'system');
+        if (systemIndex >= 0) {
+            const existing = messages[systemIndex]!;
+            const updatedContent = appendToolSchemasToSystemPrompt(
+                typeof existing.content === 'string' ? existing.content : '',
+                options.tools
+            );
+            const out = messages.slice();
+            out[systemIndex] = { ...existing, content: updatedContent };
+            return out;
+        }
+
+        // No system message → prepend one carrying just the schemas.
+        const rendered = appendToolSchemasToSystemPrompt('', options.tools);
+        if (rendered.length === 0) { return messages; }
+        return [{ role: 'system', content: rendered }, ...messages];
     }
 
     /**
@@ -318,20 +378,67 @@ export class OpenAICompatibleProvider implements Provider {
     private async requestStreaming(
         messages: ChatMessage[],
         options: CompletionOptions | undefined,
-        includeTools: boolean
+        includeTools: boolean,
+        injectSchemasAsText: boolean
     ): Promise<ChatCompletionStream> {
+        const effectiveMessages = this.maybeInjectToolSchemas(messages, options, injectSchemasAsText);
         const body: Record<string, unknown> = {
             model: this.model,
-            messages,
+            messages: effectiveMessages,
             temperature: options?.temperature ?? 0.3,
             stream: true
         };
         if (options?.maxTokens !== undefined) {
             body['max_tokens'] = options.maxTokens;
+        } else if (includeTools || injectSchemasAsText) {
+            // When tools are in play and the caller didn't specify a
+            // limit, force a sensible floor. Some inference servers
+            // (vLLM in some configs, llama.cpp under default settings)
+            // apply tiny defaults like 16 or 256 tokens when the
+            // request omits max_tokens. That cap deterministically
+            // truncates write_file calls mid-arguments JSON, producing
+            // "[Provider] Dropped incomplete tool call write_file at
+            // index 0: args=..." warnings even when the model and
+            // chat template are otherwise fine. 4096 is generous
+            // enough for write_file with ~3KB content plus reasoning,
+            // and small enough to not bump model context limits.
+            body['max_tokens'] = DEFAULT_MAX_TOKENS_WITH_TOOLS;
+        }
+        if (options?.topP !== undefined) {
+            body['top_p'] = options.topP;
+        }
+        if (options?.presencePenalty !== undefined) {
+            body['presence_penalty'] = options.presencePenalty;
         }
         if (includeTools && options?.tools && options.tools.length > 0) {
             body['tools'] = options.tools;
             body['tool_choice'] = options.toolChoice ?? 'auto';
+        }
+
+        // V2.0: forward extra_body to streaming requests too, mirroring
+        // requestNonStreaming. Note that the SSE parser (parseSseToolStream
+        // below) doesn't currently surface `delta.reasoning_content` to
+        // consumers — when enableThinking is true the model may emit
+        // reasoning that's silently dropped from the stream. The visible
+        // text in `delta.content` still arrives intact; thinking-mode
+        // streaming display is a separate PR. Sending the flags is safe
+        // because non-Qwen servers ignore extra_body.
+        const extraBody: Record<string, unknown> = {};
+        if (options?.topK !== undefined) {
+            extraBody['top_k'] = options.topK;
+        }
+        const chatTemplateKwargs: Record<string, unknown> = {};
+        if (options?.enableThinking !== undefined) {
+            chatTemplateKwargs['enable_thinking'] = options.enableThinking;
+        }
+        if (options?.preserveThinking !== undefined) {
+            chatTemplateKwargs['preserve_thinking'] = options.preserveThinking;
+        }
+        if (Object.keys(chatTemplateKwargs).length > 0) {
+            extraBody['chat_template_kwargs'] = chatTemplateKwargs;
+        }
+        if (Object.keys(extraBody).length > 0) {
+            body['extra_body'] = extraBody;
         }
 
         const fetchOptions: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal } = {
@@ -368,19 +475,55 @@ export class OpenAICompatibleProvider implements Provider {
     private async requestNonStreaming(
         messages: ChatMessage[],
         options: CompletionOptions | undefined,
-        includeTools: boolean
+        includeTools: boolean,
+        injectSchemasAsText: boolean
     ): Promise<AssistantMessage> {
+        const effectiveMessages = this.maybeInjectToolSchemas(messages, options, injectSchemasAsText);
         const body: Record<string, unknown> = {
             model: this.model,
-            messages,
+            messages: effectiveMessages,
             temperature: options?.temperature ?? 0.3
         };
         if (options?.maxTokens !== undefined) {
             body['max_tokens'] = options.maxTokens;
+        } else if (includeTools || injectSchemasAsText) {
+            // See requestStreaming for the rationale — same truncation
+            // failure mode applies to non-streaming tool-using requests.
+            body['max_tokens'] = DEFAULT_MAX_TOKENS_WITH_TOOLS;
+        }
+        if (options?.topP !== undefined) {
+            body['top_p'] = options.topP;
+        }
+        if (options?.presencePenalty !== undefined) {
+            body['presence_penalty'] = options.presencePenalty;
         }
         if (includeTools && options?.tools && options.tools.length > 0) {
             body['tools'] = options.tools;
             body['tool_choice'] = options.toolChoice ?? 'auto';
+        }
+
+        // V2.0: extra_body carries Qwen 3.6 / DeepSeek R1 thinking-mode
+        // controls + top_k. The shape exactly matches what's documented
+        // in the Qwen 3.6 README (see HF model card). Non-Qwen servers
+        // (vLLM, SGLang, LM Studio) treat extra_body as opaque pass-
+        // through; OpenAI's spec calls it "additional fields ignored
+        // by unknown servers." Either way it's safe to send.
+        const extraBody: Record<string, unknown> = {};
+        if (options?.topK !== undefined) {
+            extraBody['top_k'] = options.topK;
+        }
+        const chatTemplateKwargs: Record<string, unknown> = {};
+        if (options?.enableThinking !== undefined) {
+            chatTemplateKwargs['enable_thinking'] = options.enableThinking;
+        }
+        if (options?.preserveThinking !== undefined) {
+            chatTemplateKwargs['preserve_thinking'] = options.preserveThinking;
+        }
+        if (Object.keys(chatTemplateKwargs).length > 0) {
+            extraBody['chat_template_kwargs'] = chatTemplateKwargs;
+        }
+        if (Object.keys(extraBody).length > 0) {
+            body['extra_body'] = extraBody;
         }
 
         const fetchOptions: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal } = {
@@ -400,7 +543,17 @@ export class OpenAICompatibleProvider implements Provider {
 
         const data = await response.json() as {
             error?: { message: string };
-            choices?: Array<{ message?: AssistantMessage }>;
+            choices?: Array<{ message?: AssistantMessage & {
+                reasoning_content?: string;
+                /**
+                 * Qwen 3.6 native field name. Per the ASL Lab Qwen 3.6
+                 * deployment, the response uses `reasoning` rather than
+                 * `reasoning_content`, and the value may include literal
+                 * `<think>...</think>` tags inline. We accept both
+                 * field names and strip the tags defensively.
+                 */
+                reasoning?: string;
+            } }>;
         };
         if (data.error) {
             throw new Error(data.error.message);
@@ -415,12 +568,106 @@ export class OpenAICompatibleProvider implements Provider {
         // wire format uses null for content when tool_calls are present;
         // some providers emit empty string instead — normalize to null
         // so the caller's `content ?? ''` pattern works either way.
+        let rawContent: string | null = msg.content === undefined
+            ? null
+            : (msg.content === '' && msg.tool_calls ? null : msg.content);
+
+        // V2.0: defensively strip thinking-block leaks from content
+        // AND from the reasoning field. Two known endpoint variants:
+        //
+        //   1. vLLM with `--reasoning-parser qwen3`:
+        //      emits `reasoning_content` cleanly (no tags inside).
+        //
+        //   2. ASL Lab Qwen 3.6 deployment (this codebase's V2.0
+        //      target): emits `reasoning` with literal `<think>...</think>`
+        //      tags inline. We strip the tags before surfacing.
+        //
+        // Plus the leak case (Qwen issue #26 / #89): when reasoning_content
+        // isn't echoed back in history or when tools are active, the
+        // model can leak `<think>...</think>` blocks into `content`. We
+        // strip those and merge into the reasoning surface so downstream
+        // JSON parsers don't choke on stray tags.
+        const rawReasoning: string | undefined =
+            (typeof msg.reasoning === 'string' && msg.reasoning !== '')
+                ? msg.reasoning
+                : (typeof msg.reasoning_content === 'string' && msg.reasoning_content !== ''
+                    ? msg.reasoning_content
+                    : undefined);
+        let surfacedReasoning: string | undefined;
+        if (rawReasoning !== undefined) {
+            // The reasoning field may contain inline <think>...</think>
+            // tags (Qwen 3.6 ASL Lab variant). Run it through the same
+            // extractor we use for content — if tags are found, the
+            // extracted text is the actual reasoning; if no tags, the
+            // whole field is the reasoning.
+            const parsed = extractThinkingFromContent(rawReasoning);
+            surfacedReasoning = parsed.extracted !== '' ? parsed.extracted : rawReasoning;
+        }
+        if (rawContent !== null && rawContent.length > 0) {
+            const parsed = extractThinkingFromContent(rawContent);
+            if (parsed.extracted !== '') {
+                if (surfacedReasoning === undefined) {
+                    surfacedReasoning = parsed.extracted;
+                } else {
+                    // Both present — keep the explicit one but log so
+                    // we can see how often the leak happens
+                    log.warn('[Provider] reasoning field present AND <think> leaked into content; using explicit reasoning field.');
+                }
+                rawContent = parsed.clean.length > 0 ? parsed.clean : null;
+            }
+        }
+
         const normalized: AssistantMessage = {
             role: 'assistant',
-            content: msg.content === undefined ? null : (msg.content === '' && msg.tool_calls ? null : msg.content)
+            content: rawContent
         };
+        // Track whether the SERVER's native tool-calling channel
+        // produced calls. We record this BEFORE the fallback parser
+        // runs, because fallback recovery is itself a sign the
+        // endpoint is degraded — counting it as success would mask
+        // the problem.
+        const nativeToolCallCount = (msg.tool_calls?.length ?? 0);
         if (msg.tool_calls && msg.tool_calls.length > 0) {
             normalized.tool_calls = msg.tool_calls;
+        } else if (rawContent !== null && rawContent.length > 0) {
+            // V2.0 follow-up: client-side fallback for inference servers
+            // that didn't surface tool calls in the native field. Triggered
+            // only when (a) the server returned no native tool_calls, and
+            // (b) there's content to inspect. The fallback parser handles
+            // 5 known formats — see toolCallFallback.ts. Empty result is
+            // the common case (model genuinely produced just text); when
+            // we DO recover calls, we log a warn so this can be tracked
+            // by compliance review of the audit log.
+            const fallback = extractFallbackToolCalls(rawContent);
+            if (fallback.toolCalls.length > 0) {
+                normalized.tool_calls = fallback.toolCalls;
+                // Replace content with the cleaned version (tool-call
+                // blocks removed). The narrative prose around the calls
+                // is preserved so the agent's reasoning is still visible.
+                normalized.content = fallback.cleanContent.length > 0
+                    ? fallback.cleanContent
+                    : null;
+                log.warn(
+                    `[Provider] Fallback tool-call parser recovered ${fallback.toolCalls.length} call(s) ` +
+                    `from format(s): ${fallback.formatsDetected.join(', ')}. ` +
+                    `Inference server's --tool-call-parser is likely misconfigured for this model.`
+                );
+            }
+        }
+        if (surfacedReasoning !== undefined) {
+            normalized.reasoning_content = surfacedReasoning;
+        }
+        // Capability tracking: only meaningful when we actually
+        // requested tools. If `includeTools` was false the model had
+        // no opportunity to call anything, so this response carries
+        // zero information about endpoint capability.
+        const wantsTools = options?.tools !== undefined && options.tools.length > 0;
+        if (wantsTools && includeTools) {
+            try {
+                recordToolUsageResult(this.endpoint, nativeToolCallCount > 0);
+            } catch {
+                // Defensive: tracking is observability, not load-bearing.
+            }
         }
         return normalized;
     }
@@ -474,6 +721,61 @@ async function* parseSseStream(
         }
     };
 
+    /**
+     * Extract a token from a parsed SSE frame. Reads BOTH
+     * `delta.reasoning_content` and `delta.content` (as well as the
+     * non-streaming-shaped fallbacks `message.reasoning_content` /
+     * `message.content`). Concatenated in that order — reasoning
+     * always precedes the answer in Qwen's chat template, so this
+     * matches the model's intent.
+     *
+     * Why both: Qwen 3.x with `--reasoning-parser qwen3` routes
+     * thinking tokens into `reasoning_content`, NOT `content`. If a
+     * server is configured this way and the parser ignores
+     * reasoning_content, the user sees no output at all — the
+     * documented Qwen issue #903 failure mode. Surfacing both means
+     * thinking-mode endpoints work without further configuration;
+     * non-thinking endpoints emit only `content` and behave
+     * identically to before.
+     *
+     * Future UX: a separate stream channel for reasoning vs answer
+     * lets the webview show a "thinking..." spinner with the
+     * collapsed reasoning. That's a UI change for a follow-up; for
+     * now both stream into the same chat as text — strictly better
+     * than the previous "no output" behavior.
+     */
+    const extractToken = (frame: {
+        choices?: Array<{
+            delta?: { content?: string; reasoning_content?: string; reasoning?: string };
+            message?: { content?: string; reasoning_content?: string; reasoning?: string };
+        }>;
+    }): string => {
+        const choice = frame.choices?.[0];
+        if (!choice) { return ''; }
+        // Read reasoning from BOTH possible field names. ASL Lab Qwen 3.6
+        // uses `reasoning`; vLLM with `--reasoning-parser qwen3` uses
+        // `reasoning_content`. Either may carry the chain-of-thought.
+        // Field-name precedence is symmetric (whichever is present wins);
+        // both never appear together in practice.
+        const reasoning = choice.delta?.reasoning
+            ?? choice.delta?.reasoning_content
+            ?? choice.message?.reasoning
+            ?? choice.message?.reasoning_content
+            ?? '';
+        const content = choice.delta?.content
+            ?? choice.message?.content
+            ?? '';
+        // Defensively strip stray <think> tags from reasoning. Some
+        // endpoints (Qwen 3.6 ASL Lab variant) emit them inline. The
+        // tags would render as plain text in the reasoning panel
+        // otherwise. See parseSseToolStream main-loop block for the
+        // mirror of this stripping in the tool-stream path.
+        const strippedReasoning = reasoning
+            .replace(/<think>/gi, '')
+            .replace(/<\/think>/gi, '');
+        return strippedReasoning + content;
+    };
+
     try {
         while (true) {
             // Honor caller-side cancellation between reads.
@@ -484,7 +786,7 @@ async function* parseSseStream(
                 throw err;
             }
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) { break; }
 
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split('\n');
@@ -492,7 +794,7 @@ async function* parseSseStream(
 
             for (const line of lines) {
                 const trimmed = line.trim();
-                if (!trimmed || trimmed === 'data: [DONE]') continue;
+                if (!trimmed || trimmed === 'data: [DONE]') { continue; }
 
                 let payload: string | null = null;
                 if (trimmed.startsWith('data: ')) {
@@ -501,21 +803,19 @@ async function* parseSseStream(
                     // Some providers don't prefix every line with `data:`.
                     payload = trimmed;
                 }
-                if (!payload) continue;
+                if (!payload) { continue; }
 
                 try {
                     const obj = JSON.parse(payload) as {
                         choices?: Array<{
-                            delta?: { content?: string };
-                            message?: { content?: string };
+                            delta?: { content?: string; reasoning_content?: string };
+                            message?: { content?: string; reasoning_content?: string };
                         }>;
                         usage?: Record<string, unknown>;
                     };
                     tryEmitUsage(obj);
-                    const token = obj.choices?.[0]?.delta?.content
-                        ?? obj.choices?.[0]?.message?.content
-                        ?? '';
-                    if (token) yield token;
+                    const token = extractToken(obj);
+                    if (token) { yield token; }
                 } catch {
                     // Malformed line; skip silently. SSE spec allows
                     // intermixing of comment lines and other non-JSON
@@ -531,16 +831,14 @@ async function* parseSseStream(
             try {
                 const obj = JSON.parse(trailing) as {
                     choices?: Array<{
-                        delta?: { content?: string };
-                        message?: { content?: string };
+                        delta?: { content?: string; reasoning_content?: string };
+                        message?: { content?: string; reasoning_content?: string };
                     }>;
                     usage?: Record<string, unknown>;
                 };
                 tryEmitUsage(obj);
-                const token = obj.choices?.[0]?.delta?.content
-                    ?? obj.choices?.[0]?.message?.content
-                    ?? '';
-                if (token) yield token;
+                const token = extractToken(obj);
+                if (token) { yield token; }
             } catch {
                 // ignore
             }
@@ -637,7 +935,7 @@ async function* parseSseToolStream(
      * the stream ends). Returns true if a tool call was yielded.
      */
     const tryYieldToolCall = (entry: AccumulatorEntry): ToolCall | null => {
-        if (entry.yielded) return null;
+        if (entry.yielded) { return null; }
         // OpenAI sometimes emits an empty arguments string for tools
         // that take no parameters. Accept that as `{}`.
         const argsStr = entry.argumentsBuf || '{}';
@@ -665,6 +963,26 @@ async function* parseSseToolStream(
      */
     interface OpenAIDelta {
         content?: string;
+        /**
+         * V2.0 follow-up: reasoning channel for thinking-mode endpoints.
+         * Two known field names:
+         *
+         *   - `reasoning_content` — emitted by vLLM with
+         *     `--reasoning-parser qwen3` and similar configurations
+         *
+         *   - `reasoning` — emitted by ASL Lab Qwen 3.6 deployment
+         *     (and possibly other deployments that don't run the
+         *     OpenAI-style reasoning-parser). May contain inline
+         *     `<think>...</think>` tags that need defensive stripping.
+         *
+         * We accept both. Field-name precedence is symmetric — whichever
+         * is present wins. Streaming consumers see the output as
+         * text-kind deltas. A future webview update can separate
+         * reasoning into a collapsible "thinking..." block; for now,
+         * both stream into the chat as text.
+         */
+        reasoning_content?: string;
+        reasoning?: string;
         tool_calls?: Array<{
             index: number;
             id?: string;
@@ -687,7 +1005,81 @@ async function* parseSseToolStream(
                 throw err;
             }
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+                // Flush residual content in the buffer before breaking.
+                // SSE servers SHOULD send a trailing newline before
+                // closing, but many don't (vLLM under load, abrupt
+                // disconnects, max_tokens cutoff with no graceful
+                // wind-down). Without this flush, the final
+                // `data: {...}` frame — often the one carrying the
+                // closing tool-call arguments fragment AND the
+                // finish_reason — gets silently discarded, and the
+                // tool-call accumulator ends up incomplete. Symptom
+                // in production: "[Provider] Dropped incomplete tool
+                // call write_file at index 0: args=..." with the
+                // arguments JSON cut off mid-string.
+                if (buffer.length > 0) {
+                    const trimmed = buffer.trim();
+                    buffer = '';
+                    if (trimmed && trimmed !== 'data: [DONE]') {
+                        let payload: string | null = null;
+                        if (trimmed.startsWith('data: ')) {
+                            payload = trimmed.substring(6);
+                        } else if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+                            payload = trimmed;
+                        }
+                        if (payload) {
+                            try {
+                                const obj = JSON.parse(payload) as {
+                                    choices?: Array<{ delta?: OpenAIDelta; finish_reason?: string | null }>;
+                                };
+                                const choice = obj.choices?.[0];
+                                if (choice) {
+                                    const delta = choice.delta;
+                                    if (delta) {
+                                        // Mirror the main-loop logic: read both
+                                        // reasoning field names and strip stray
+                                        // <think> tags. See main loop above for rationale.
+                                        const reasoningChunk = delta.reasoning ?? delta.reasoning_content;
+                                        if (reasoningChunk) {
+                                            const stripped = reasoningChunk
+                                                .replace(/<think>/gi, '')
+                                                .replace(/<\/think>/gi, '');
+                                            if (stripped.length > 0) {
+                                                yield { kind: 'text', content: stripped };
+                                            }
+                                        }
+                                        if (delta.content) {
+                                            yield { kind: 'text', content: delta.content };
+                                        }
+                                        if (delta.tool_calls) {
+                                            for (const tc of delta.tool_calls) {
+                                                const idx = tc.index;
+                                                let entry = accumulator.get(idx);
+                                                if (!entry) {
+                                                    entry = { id: '', name: '', argumentsBuf: '', yielded: false };
+                                                    accumulator.set(idx, entry);
+                                                }
+                                                if (tc.id) { entry.id = tc.id; }
+                                                if (tc.function?.name) { entry.name = tc.function.name; }
+                                                if (tc.function?.arguments !== undefined) {
+                                                    entry.argumentsBuf += tc.function.arguments;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (choice.finish_reason) {
+                                        finishReason = choice.finish_reason;
+                                    }
+                                }
+                            } catch {
+                                // Residual was malformed — nothing we can do.
+                            }
+                        }
+                    }
+                }
+                break;
+            }
 
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split('\n');
@@ -695,8 +1087,8 @@ async function* parseSseToolStream(
 
             for (const line of lines) {
                 const trimmed = line.trim();
-                if (!trimmed) continue;
-                if (trimmed === 'data: [DONE]') break outer;
+                if (!trimmed) { continue; }
+                if (trimmed === 'data: [DONE]') { break outer; }
 
                 let payload: string | null = null;
                 if (trimmed.startsWith('data: ')) {
@@ -704,7 +1096,7 @@ async function* parseSseToolStream(
                 } else if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
                     payload = trimmed;
                 }
-                if (!payload) continue;
+                if (!payload) { continue; }
 
                 let obj: {
                     choices?: Array<{
@@ -720,10 +1112,34 @@ async function* parseSseToolStream(
                 }
 
                 const choice = obj.choices?.[0];
-                if (!choice) continue;
+                if (!choice) { continue; }
 
                 const delta = choice.delta;
                 if (delta) {
+                    // Yield reasoning-channel text first if present
+                    // (thinking-mode endpoints). Read from BOTH possible
+                    // field names: `reasoning_content` (vLLM with
+                    // --reasoning-parser qwen3) and `reasoning` (ASL Lab
+                    // Qwen 3.6 deployment). For non-thinking endpoints
+                    // both are undefined, so behavior is unchanged.
+                    // See OpenAIDelta docstring.
+                    const reasoningChunk = delta.reasoning ?? delta.reasoning_content;
+                    if (reasoningChunk) {
+                        // Defensively strip stray <think> / </think> tags
+                        // that some endpoints emit inline within the
+                        // reasoning field (Qwen 3.6 ASL Lab variant).
+                        // Streaming-mode stripping is line-cheap because
+                        // the tag text is always whole within a single
+                        // chunk in practice. If we ever see partial
+                        // tags spanning chunks the user sees a brief
+                        // "<think" flash and then the rest — acceptable.
+                        const stripped = reasoningChunk
+                            .replace(/<think>/gi, '')
+                            .replace(/<\/think>/gi, '');
+                        if (stripped.length > 0) {
+                            yield { kind: 'text', content: stripped };
+                        }
+                    }
                     // Yield text content immediately if present.
                     if (delta.content) {
                         yield { kind: 'text', content: delta.content };
@@ -738,8 +1154,8 @@ async function* parseSseToolStream(
                                 entry = { id: '', name: '', argumentsBuf: '', yielded: false };
                                 accumulator.set(idx, entry);
                             }
-                            if (tc.id) entry.id = tc.id;
-                            if (tc.function?.name) entry.name = tc.function.name;
+                            if (tc.id) { entry.id = tc.id; }
+                            if (tc.function?.name) { entry.name = tc.function.name; }
                             if (tc.function?.arguments !== undefined) {
                                 entry.argumentsBuf += tc.function.arguments;
                             }
@@ -762,7 +1178,7 @@ async function* parseSseToolStream(
         const indices = Array.from(accumulator.keys()).sort((a, b) => a - b);
         for (const idx of indices) {
             const entry = accumulator.get(idx);
-            if (!entry) continue;
+            if (!entry) { continue; }
             const toolCall = tryYieldToolCall(entry);
             if (toolCall) {
                 yield { kind: 'tool_call', toolCall };
@@ -815,8 +1231,100 @@ void isAbortError;
 // pointing at the same endpoint, the second one benefits from the
 // first's probe.
 
-type ToolCapability = 'supported' | 'unsupported';
+// 'supported'  → endpoint accepts tools AND model uses them. Native
+//                 OpenAI tool-calling works as documented.
+// 'unsupported' → endpoint rejects the `tools` field outright with a
+//                 400 error mentioning tool/function/tool_choice.
+//                 We strip the field and skip tool calls entirely.
+// 'degraded'   → endpoint accepts the `tools` field (no 400 error)
+//                 but the model never produces actual tool_calls in
+//                 response — instead emitting tutorial-prose content.
+//                 Detected after N consecutive empty-tool_calls
+//                 responses where the model wrote markdown about
+//                 the tools instead of calling them.
+//
+//                 In degraded mode we render tool schemas into the
+//                 system prompt as text and parse responses with
+//                 extractFallbackToolCalls. This keeps the agent
+//                 working for customers running misconfigured
+//                 inference servers (most commonly Qwen 2.5 Coder
+//                 on vLLM without --tool-call-parser hermes).
+type ToolCapability = 'supported' | 'unsupported' | 'degraded';
 const toolCapabilityCache = new Map<string, ToolCapability>();
+
+// How many consecutive prose-instead-of-tools responses before we
+// mark an endpoint as degraded. Three is a balance: one or two could
+// be a model legitimately deciding the user wanted an explanation
+// rather than an action, but three in a row when tools are in the
+// request is a structural problem with the chat template.
+const DEGRADED_DETECTION_THRESHOLD = 3;
+
+// Per-endpoint counter of consecutive responses where we requested
+// tools but got back empty tool_calls + non-empty content.
+const consecutiveProseResponses = new Map<string, number>();
+
+// Default max_tokens to send when the caller didn't specify one AND
+// the request involves tool calls. Without this floor, some inference
+// servers (vLLM with no max_tokens default, llama.cpp under default
+// settings) truncate tool-call argument streams mid-JSON, producing
+// "[Provider] Dropped incomplete tool call" warnings. 4096 was chosen
+// to comfortably fit a write_file with ~3KB content plus surrounding
+// reasoning/narrative, while staying well below typical 32K+ context
+// limits. Customers who need larger writes should set the max
+// explicitly via CompletionOptions.maxTokens — this is just a floor.
+const DEFAULT_MAX_TOKENS_WITH_TOOLS = 4096;
+
+/**
+ * Record whether a tool-requesting response actually used tools.
+ * Called by requestStreaming/requestNonStreaming after each response
+ * where `tools` was in the request.
+ *
+ *   - usedTools=true  → reset the counter; the model is using tools.
+ *   - usedTools=false → increment; if we hit threshold, mark degraded.
+ *
+ * If the endpoint is already marked unsupported, we don't touch
+ * anything — that takes precedence and is a stronger signal.
+ */
+export function recordToolUsageResult(
+    endpoint: string,
+    usedTools: boolean
+): void {
+    const existing = toolCapabilityCache.get(endpoint);
+    if (existing === 'unsupported') { return; }
+
+    if (usedTools) {
+        consecutiveProseResponses.delete(endpoint);
+        // If the endpoint was previously marked degraded but the
+        // model just used a tool, that's a strong "actually fine"
+        // signal — promote to supported. Could happen if the
+        // customer fixed their vLLM config mid-session.
+        if (existing === 'degraded') {
+            toolCapabilityCache.set(endpoint, 'supported');
+            log.info(
+                `[Provider] Endpoint ${endpoint} recovered to native ` +
+                `tool-calling mode.`
+            );
+        }
+        return;
+    }
+
+    const next = (consecutiveProseResponses.get(endpoint) ?? 0) + 1;
+    consecutiveProseResponses.set(endpoint, next);
+
+    if (next >= DEGRADED_DETECTION_THRESHOLD && existing !== 'degraded') {
+        toolCapabilityCache.set(endpoint, 'degraded');
+        log.warn(
+            `[Provider] Endpoint ${endpoint} marked as degraded: ` +
+            `${next} consecutive responses with empty tool_calls when ` +
+            `tools were requested. Falling back to text-mode tool calling. ` +
+            `This usually means the inference server's chat template is ` +
+            `not configured for native tool-calling (e.g. vLLM needs ` +
+            `--tool-call-parser hermes for Qwen). The agent will keep ` +
+            `working via fallback parsing, but consider fixing the server ` +
+            `config for better reliability.`
+        );
+    }
+}
 
 /**
  * Identify errors thrown when the endpoint doesn't support tool-calling.
@@ -853,7 +1361,7 @@ const toolCapabilityCache = new Map<string, ToolCapability>();
  */
 function isToolCapabilityError(e: unknown): boolean {
     const errorObj = e as { status?: number; body?: string; message?: string };
-    if (errorObj?.status !== 400) return false;
+    if (errorObj?.status !== 400) { return false; }
     // Combine message + body and search for hint terms.
     const haystack = `${errorObj.message ?? ''} ${errorObj.body ?? ''}`.toLowerCase();
     return haystack.includes('tool') || haystack.includes('function');
@@ -872,9 +1380,20 @@ export function setToolCapability(endpoint: string, capability: ToolCapability):
 }
 
 /**
+ * Test hook: read the current capability for an endpoint. Returns
+ * undefined if the endpoint hasn't been observed yet. Used by
+ * unit tests to assert state transitions without round-tripping
+ * through real HTTP requests.
+ */
+export function getToolCapability(endpoint: string): ToolCapability | undefined {
+    return toolCapabilityCache.get(endpoint);
+}
+
+/**
  * Test hook: clear the capability cache. Used by tests to ensure each
  * test starts from a clean state.
  */
 export function resetToolCapabilityCache(): void {
     toolCapabilityCache.clear();
+    consecutiveProseResponses.clear();
 }

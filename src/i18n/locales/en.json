@@ -34,7 +34,17 @@
     "swarm_execution_logs": "Swarm Execution Logs",
     "user_label": "You",
     "view_prompt_instructions": "View Prompt Instructions",
-    "working": "Working..."
+    "working": "Working...",
+    "compacted_summary": "Context compacted (older messages summarized to save tokens)",
+    "empty": {
+      "hint": "Describe a feature, paste an error, or ask about your codebase. NexusCode will plan the change, write it across files, and run the verifier — you review the diff.",
+      "shortcut_attach": "@ to attach files",
+      "shortcut_newline": "Shift+Enter for newline",
+      "shortcut_send": "Enter to send",
+      "title": "Plan, code, verify."
+    },
+    "tool_activity_count_tooltip": "Tool calls",
+    "tool_activity_unscoped": "Tool activity"
   },
   "codelens": {
     "manually_refreshed": "NexusCode: CodeLens manually refreshed!"
@@ -60,7 +70,28 @@
     "spec_not_found": "Spec '{{name}}' not found"
   },
   "hooks": {
-    "no_hooks_defined": "NexusCode: no hooks defined yet. Create .nexus/hooks/<n>.md to add one."
+    "no_hooks_defined": "NexusCode: no hooks defined yet. Create .nexus/hooks/<n>.md to add one.",
+    "title": "Hooks",
+    "close": "Close hooks panel",
+    "loading": "Loading hooks…",
+    "empty_title": "No hooks yet",
+    "empty_hint": "Hooks fire prompts on file saves, commands, or schedules. Create a markdown file at .nexus/hooks/<name>.md to add one.",
+    "hook_singular": "hook",
+    "hook_plural": "hooks",
+    "enabled_label": "enabled",
+    "enable": "Enable hook",
+    "disable": "Disable hook",
+    "run_now": "Run hook now",
+    "open_in_editor": "Open in editor",
+    "last_fired": "last fired",
+    "activity_label": "Hook activity",
+    "fire_running": "Running",
+    "fire_succeeded": "Succeeded",
+    "fire_errored": "Errored",
+    "fire_timed_out": "Timed out",
+    "fire_skipped": "Skipped",
+    "fire_waiting_output": "Waiting for output…",
+    "fire_file_label": "File"
   },
   "mention": {
     "attach_file_context": "Attach File Context"
@@ -100,7 +131,20 @@
   },
   "steering": {
     "rules_saved": "✨ NexusCode steering rules saved to .nexus/steering/structure.md",
-    "save_failed": "Failed to save steering rules"
+    "save_failed": "Failed to save steering rules",
+    "title": "Steering rules",
+    "close": "Close steering panel",
+    "loading": "Loading steering rules…",
+    "empty_title": "No steering rules yet",
+    "empty_hint": "Steering rules guide the agent across every task. Create one of the canonical files (product, structure, tech) or add your own .md file in .nexus/steering/.",
+    "active": "active",
+    "total": "total",
+    "create": "Create",
+    "open_in_editor": "Open in editor",
+    "kind_canonical": "canonical",
+    "kind_custom": "custom",
+    "modified": "modified",
+    "not_created": "not created"
   },
   "terminal": {
     "extension_updated": "Extension updated successfully. Reloading...",
@@ -123,7 +167,8 @@
     "header": "Traceability Matrix",
     "matrix_computing": "The graph currently shows physical files. Semantic AI links are being calculated in the background and will appear here shortly.",
     "matrix_computing_label": "Matrix Computing:",
-    "subheader": "Click a 3D Node to view its structural text data."
+    "subheader": "Click a 3D Node to view its structural text data.",
+    "loading_3d": "Loading 3D engine..."
   },
   "transactions": {
     "atomic_committed": "Atomic Transaction Committed with AI Metadata."
@@ -143,5 +188,122 @@
   },
   "workspace": {
     "no_folder_open": "Please open a workspace folder first."
+  },
+  "bash_approval": {
+    "allow": "Allow once",
+    "allow_always": "Allow for this task",
+    "allow_always_tooltip": "Allow all bash commands for this task. Resets at the next user message.",
+    "block": "Block",
+    "body": "The agent wants to run a shell command. It has passed the static denylist and the LLM Security Monitor; your approval is the final gate.",
+    "title": "Approve command?"
+  },
+  "security_banner": {
+    "already_disabled": "Already disabled for this session",
+    "body": "The Security Monitor model is not responding, so commands are being blocked by default. Retry once your model is back, switch to a different model in Settings, or disable the gate for this session.",
+    "confirm_disable": "Disable the security gate for this session? Commands the agent runs will execute without the LLM safety check until you reload VS Code.",
+    "disable_session": "Disable for this session",
+    "disabled_label": "Gate disabled",
+    "dismiss": "Dismiss",
+    "last_command": "Last blocked command",
+    "retry": "Retry",
+    "title": "Security gate offline"
+  },
+  "security_strip": {
+    "aria_label": "Security posture",
+    "audit_chain": "Audit chain valid",
+    "autopilot": "Autopilot",
+    "awaiting_approval": "Awaiting approval",
+    "coder_model": "Coder",
+    "confirm_on_bash": "Confirm on bash",
+    "denylist": "Denylist active",
+    "denylist_tooltip": "Static regex denylist runs before the LLM judge. Catches rm -rf /, fork bombs, curl|sh patterns.",
+    "monitor_offline": "Monitor offline",
+    "monitor_online": "Monitor online",
+    "monitor_tooltip": "LLM Security Monitor reviews every bash_exec command before user confirmation.",
+    "planner_model": "Planner"
+  },
+  "audit": {
+    "title": "Audit log",
+    "entries": "entries",
+    "chain_valid": "chain valid",
+    "chain_broken": "chain broken",
+    "chain_broken_warning": "Hash chain integrity check failed. Investigate the on-disk log immediately.",
+    "close": "Close audit panel",
+    "clear": "Clear audit panel",
+    "clear_tooltip": "Clear panel (disk log unaffected)",
+    "empty_title": "No activity yet",
+    "empty_hint": "When the agent runs tools, edits files, or invokes the LLM, those events appear here. The on-disk log at .nexus/audit/ records everything for compliance."
+  },
+  "nav": {
+    "workspace": "Workspace",
+    "specs": "Specs",
+    "hooks": "Hooks",
+    "steering": "Steering",
+    "map": "Code map",
+    "audit": "Audit log",
+    "settings": "Settings",
+    "mcp": "MCP servers",
+    "diagnostics": "Diagnostics"
+  },
+  "specs": {
+    "phase_stepper_aria": "Spec workflow progress",
+    "phase_requirements": "Requirements",
+    "phase_design": "Design",
+    "phase_tasks": "Tasks",
+    "status_approved": "approved",
+    "status_draft": "draft",
+    "status_not_started": "not started",
+    "ears_toolbar_aria": "EARS keyword inserters",
+    "ears_label": "EARS",
+    "ears_about": "About EARS",
+    "ears_explanation": "EARS (Easy Approach to Requirements Syntax) is a structured pattern for writing testable requirements. Keywords stay UPPERCASE ENGLISH in every locale to anchor grep + tooling."
+  },
+  "mcp": {
+    "title": "MCP Servers",
+    "reload": "Reload",
+    "reload_tooltip": "Re-read .nexus/mcp-servers.json",
+    "loading": "Loading MCP servers…",
+    "empty_title": "No MCP servers configured",
+    "empty_hint": "Add server entries to .nexus/mcp-servers.json to extend the agent with external tools.",
+    "config_error_title": "Config error",
+    "config_error_server_label": "Server",
+    "tools_label": "Tools",
+    "status_disabled": "Disabled",
+    "status_configured": "Configured",
+    "status_connecting": "Connecting",
+    "status_connected": "Connected",
+    "status_error": "Error"
+  },
+  "diagnostics": {
+    "title": "Diagnostics",
+    "refresh": "Refresh",
+    "refresh_tooltip": "Refresh sessions and timing data",
+    "section_sessions": "Sessions",
+    "section_summary": "Summary",
+    "section_tokens": "Tokens",
+    "section_tools": "Tools",
+    "section_timeline": "Timeline",
+    "section_timing": "Startup phases (host)",
+    "sessions_loading": "Loading sessions…",
+    "sessions_empty": "No audit sessions recorded yet.",
+    "session_pick_prompt": "— pick a session —",
+    "bundle_error_title": "Failed to load session",
+    "bundle_loading": "Loading session details…",
+    "summary_started": "Started",
+    "summary_duration": "Duration",
+    "summary_events": "Events",
+    "summary_errors": "Errors",
+    "tokens_prompt": "prompt",
+    "tokens_completion": "completion",
+    "tokens_call": "call",
+    "tokens_calls": "calls",
+    "tokens_total": "total",
+    "agent_planner": "planner",
+    "agent_coder": "coder",
+    "agent_verifier": "verifier",
+    "agent_hook": "hook",
+    "agent_unknown": "unknown",
+    "copy_bundle": "Copy bundle as JSON",
+    "copy_bundle_tooltip": "Copy full session bundle as JSON for support tickets"
   }
 }

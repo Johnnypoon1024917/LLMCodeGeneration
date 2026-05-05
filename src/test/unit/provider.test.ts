@@ -291,6 +291,112 @@ describe('SSE stream parsing — synthetic byte streams', () => {
         expect(result).toBe('non-stream-shape');
     });
 
+    test('V2.0 follow-up: surfaces delta.reasoning_content for thinking-mode endpoints', async () => {
+        // Qwen 3.x with --reasoning-parser qwen3 routes thinking
+        // tokens into reasoning_content, NOT content. Without the
+        // fix, the user saw nothing. With the fix, the reasoning
+        // streams into the chat as text alongside any content.
+        const chunks = [
+            'data: {"choices":[{"delta":{"reasoning_content":"Let me think... "}}]}\n',
+            'data: {"choices":[{"delta":{"reasoning_content":"the answer is "}}]}\n',
+            'data: {"choices":[{"delta":{"content":"42."}}]}\n',
+            'data: [DONE]\n'
+        ];
+        mockFetchWithStream(streamFromChunks(chunks));
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://x', model: 'm' });
+        const result = await provider.completion([{ role: 'user', content: 'hi' }]);
+        // Reasoning yielded first, then content
+        expect(result).toBe('Let me think... the answer is 42.');
+    });
+
+    test('V2.0 follow-up: handles thinking-only response (Qwen issue #903)', async () => {
+        // Documented Qwen 3.6 MoE failure mode: response contains ONLY
+        // reasoning_content with empty content. Without the fix the
+        // user saw a completely empty reply. With the fix they see
+        // the reasoning text — strictly better than nothing.
+        const chunks = [
+            'data: {"choices":[{"delta":{"reasoning_content":"This is my full answer in the reasoning channel."}}]}\n',
+            'data: [DONE]\n'
+        ];
+        mockFetchWithStream(streamFromChunks(chunks));
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://x', model: 'm' });
+        const result = await provider.completion([{ role: 'user', content: 'hi' }]);
+        expect(result).toBe('This is my full answer in the reasoning channel.');
+    });
+
+    test('V2.0 follow-up: yields reasoning_content + content concatenated within one frame', async () => {
+        // Some servers emit both fields in the same delta frame.
+        // We yield reasoning first, then content, in document order.
+        const chunks = [
+            'data: {"choices":[{"delta":{"reasoning_content":"thinking ","content":"speaking"}}]}\n',
+            'data: [DONE]\n'
+        ];
+        mockFetchWithStream(streamFromChunks(chunks));
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://x', model: 'm' });
+        const result = await provider.completion([{ role: 'user', content: 'hi' }]);
+        expect(result).toBe('thinking speaking');
+    });
+
+    test('ASL Lab Qwen 3.6 compat: reads `reasoning` field (not just reasoning_content)', async () => {
+        // The ASL Lab Qwen 3.6 deployment uses `reasoning` field name,
+        // not `reasoning_content`. Without the dual-read fix, the user
+        // would see no reasoning output even with thinking mode on.
+        const chunks = [
+            'data: {"choices":[{"delta":{"reasoning":"Step 1: parse the request. "}}]}\n',
+            'data: {"choices":[{"delta":{"reasoning":"Step 2: pick the tool. "}}]}\n',
+            'data: {"choices":[{"delta":{"content":"Done."}}]}\n',
+            'data: [DONE]\n'
+        ];
+        mockFetchWithStream(streamFromChunks(chunks));
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://x', model: 'm' });
+        const result = await provider.completion([{ role: 'user', content: 'hi' }]);
+        expect(result).toBe('Step 1: parse the request. Step 2: pick the tool. Done.');
+    });
+
+    test('ASL Lab Qwen 3.6 compat: strips inline <think>...</think> tags from reasoning field', async () => {
+        // ASL Lab Qwen 3.6 sometimes emits `reasoning` containing literal
+        // <think>...</think> tags inline. Without stripping, the user sees
+        // the tags as plain text in the reasoning panel — distracting and
+        // confusing. Defensive stripping in the SSE parser handles this.
+        const chunks = [
+            'data: {"choices":[{"delta":{"reasoning":"<think>I need to pick a tool.</think>"}}]}\n',
+            'data: {"choices":[{"delta":{"content":"Calling tool."}}]}\n',
+            'data: [DONE]\n'
+        ];
+        mockFetchWithStream(streamFromChunks(chunks));
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://x', model: 'm' });
+        const result = await provider.completion([{ role: 'user', content: 'hi' }]);
+        expect(result).toBe('I need to pick a tool.Calling tool.');
+        // Specifically, no literal <think> in the output
+        expect(result).not.toContain('<think>');
+        expect(result).not.toContain('</think>');
+    });
+
+    test('ASL Lab Qwen 3.6 compat: when both `reasoning` and `reasoning_content` present, both surface', async () => {
+        // Defensive: shouldn't normally happen, but if a server emits
+        // both field names in the same frame we don't drop either.
+        // Per the precedence in extractToken: `reasoning` wins (read
+        // first); `reasoning_content` is a fallback. So when both are
+        // present in one frame, only `reasoning` surfaces — the
+        // `reasoning_content` value is treated as redundant.
+        const chunks = [
+            'data: {"choices":[{"delta":{"reasoning":"primary ","reasoning_content":"secondary "}}]}\n',
+            'data: {"choices":[{"delta":{"content":"answer"}}]}\n',
+            'data: [DONE]\n'
+        ];
+        mockFetchWithStream(streamFromChunks(chunks));
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://x', model: 'm' });
+        const result = await provider.completion([{ role: 'user', content: 'hi' }]);
+        // `reasoning` wins; `reasoning_content` ignored when both present
+        expect(result).toBe('primary answer');
+    });
+
     test('honors abort signal between reads', async () => {
         // Build a stream that will produce content but abort before it
         // reaches the consumer.
@@ -403,7 +509,7 @@ describe('OpenAICompatibleProvider — chatCompletion (Component 2A)', () => {
      */
     function mockFetchJson(payload: unknown, status = 200, captureBody?: { body: string | undefined }): void {
         globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
-            if (captureBody) captureBody.body = init?.body as string;
+            if (captureBody) { captureBody.body = init?.body as string; }
             return new Response(JSON.stringify(payload), {
                 status,
                 headers: { 'content-type': 'application/json' }
@@ -924,5 +1030,122 @@ describe('OpenAICompatibleProvider — streamChatCompletion (Component 2B-1)', (
         const finishDeltas = deltas.filter(d => d.kind === 'finish');
         expect(finishDeltas).toHaveLength(1);
         expect(finishDeltas[0]).toEqual({ kind: 'finish', reason: 'stop' });
+    });
+
+    test('flushes residual buffer when stream ends without trailing newline', async () => {
+        // Bug fix: vLLM and other servers sometimes close the SSE
+        // stream without a trailing \n on the final frame. Without
+        // this fix, the last "data: {...}" frame — often carrying
+        // the closing tool-call arguments fragment AND finish_reason —
+        // would be silently dropped, leaving the tool-call accumulator
+        // in an incomplete state and producing "[Provider] Dropped
+        // incomplete tool call" warnings on perfectly-valid responses.
+        //
+        // We construct a stream where the FINAL frame has no trailing
+        // newline. The prior fix flushes `buffer` on done=true.
+        setToolCapability('http://no-trailing-newline', 'supported');
+
+        mockSseStream([
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":""}}]}}]}\n',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"main.c\\","}}]}}]}\n',
+            // The final frame has the closing fragment AND finish_reason
+            // but NO trailing \n — this is the bug repro case.
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"content\\":\\"hi\\"}"}}]},"finish_reason":"tool_calls"}]}'
+        ]);
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://no-trailing-newline', model: 'm' });
+        const stream = await provider.streamChatCompletion(
+            [{ role: 'user', content: 'write hi' }],
+            { tools: [{ type: 'function', function: { name: 'write_file', description: 'w', parameters: {} } }] }
+        );
+        const deltas = await collectDeltas(stream);
+
+        // The tool call should still be yielded fully, despite the
+        // missing trailing newline.
+        const toolCallDeltas = deltas.filter(d => d.kind === 'tool_call');
+        expect(toolCallDeltas).toHaveLength(1);
+        const tc = (toolCallDeltas[0] as { kind: 'tool_call'; toolCall: ToolCall }).toolCall;
+        expect(tc.function.name).toBe('write_file');
+        expect(JSON.parse(tc.function.arguments)).toEqual({ path: 'main.c', content: 'hi' });
+    });
+
+    test('sends max_tokens default when tools are requested without explicit maxTokens', async () => {
+        // Bug fix: when a tool-using request omits max_tokens, some
+        // inference servers (vLLM in some configs) apply tiny defaults
+        // like 16-256 tokens, deterministically truncating tool-call
+        // arguments mid-JSON. We force a sensible floor (4096) on the
+        // wire to prevent this.
+        setToolCapability('http://default-max-tokens', 'supported');
+
+        let capturedBody: string | undefined;
+        globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+            capturedBody = init?.body as string;
+            return new Response(streamFromChunks(['data: [DONE]\n']), {
+                status: 200,
+                headers: { 'content-type': 'text/event-stream' }
+            });
+        }) as typeof globalThis.fetch;
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://default-max-tokens', model: 'm' });
+        const stream = await provider.streamChatCompletion(
+            [{ role: 'user', content: 'do a thing' }],
+            // No maxTokens — but tools requested.
+            { tools: [{ type: 'function', function: { name: 'write_file', description: 'w', parameters: {} } }] }
+        );
+        await collectDeltas(stream);
+
+        expect(capturedBody).toBeDefined();
+        const parsed = JSON.parse(capturedBody!);
+        expect(parsed.max_tokens).toBe(4096);
+    });
+
+    test('does not override caller-specified max_tokens when tools are requested', async () => {
+        setToolCapability('http://explicit-max-tokens', 'supported');
+
+        let capturedBody: string | undefined;
+        globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+            capturedBody = init?.body as string;
+            return new Response(streamFromChunks(['data: [DONE]\n']), {
+                status: 200,
+                headers: { 'content-type': 'text/event-stream' }
+            });
+        }) as typeof globalThis.fetch;
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://explicit-max-tokens', model: 'm' });
+        const stream = await provider.streamChatCompletion(
+            [{ role: 'user', content: 'do a thing' }],
+            {
+                tools: [{ type: 'function', function: { name: 'write_file', description: 'w', parameters: {} } }],
+                maxTokens: 512  // explicit caller value — should win
+            }
+        );
+        await collectDeltas(stream);
+
+        const parsed = JSON.parse(capturedBody!);
+        expect(parsed.max_tokens).toBe(512);
+    });
+
+    test('does not add max_tokens default for tool-free requests', async () => {
+        // When the caller doesn't request tools, we don't impose a
+        // default — preserves the existing behavior for chat-only
+        // requests (where the model usually doesn't need a high cap).
+        let capturedBody: string | undefined;
+        globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+            capturedBody = init?.body as string;
+            return new Response(streamFromChunks(['data: [DONE]\n']), {
+                status: 200,
+                headers: { 'content-type': 'text/event-stream' }
+            });
+        }) as typeof globalThis.fetch;
+
+        const provider = new OpenAICompatibleProvider({ endpoint: 'http://no-tools-no-default', model: 'm' });
+        const stream = await provider.streamChatCompletion(
+            [{ role: 'user', content: 'just chat' }]
+            // No tools, no maxTokens
+        );
+        await collectDeltas(stream);
+
+        const parsed = JSON.parse(capturedBody!);
+        expect(parsed.max_tokens).toBeUndefined();
     });
 });

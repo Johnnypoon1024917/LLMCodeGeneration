@@ -26,6 +26,7 @@
 //     but for now the user reviews output and applies manually.
 
 import * as vscode from 'vscode';
+import { randomUUID } from 'crypto';
 import { t } from '../i18n';
 import { getProvider } from '../llm';
 import { wrapUntrusted } from '../context/styleContext';
@@ -34,9 +35,12 @@ import { errorMessage, isAbortError } from '../utilities/errors';
 import {
     HookDefinition,
     HookContext,
+    HookTrigger,
     parseHookFile,
     interpolatePrompt
 } from './HookSchema';
+import type { HookEventEmitter } from './hookEventEmitter';
+import type { AuditLog } from '../audit/AuditLog';
 
 /** Cap on file content fed into a hook's interpolated prompt. */
 const MAX_HOOK_FILE_CONTENT = 16_000;
@@ -74,13 +78,43 @@ export class HookManager {
     /** How many hooks are currently mid-fire. */
     private inflightFires = 0;
 
+    /** P1.4: optional event emitter for chat-thread hook cards. When
+     *  set, every fire emits started/output/completed events that the
+     *  webview renders inline. When absent (CLI runtime, tests), the
+     *  hook still works — just silently, with output going only to
+     *  the OutputChannel as before. */
+    private emitter: HookEventEmitter | undefined;
+
+    /** P1.4: optional audit log handle. When set, every fire writes
+     *  one hook_fire record on completion. Logging is best-effort —
+     *  if the audit write throws, the hook fire isn't affected. */
+    private audit: AuditLog | undefined;
+
     /** Singleton accessor. */
     static getInstance(): HookManager {
-        if (!HookManager._instance) HookManager._instance = new HookManager();
+        if (!HookManager._instance) { HookManager._instance = new HookManager(); }
         return HookManager._instance;
     }
 
     private constructor() {}
+
+    /**
+     * P1.4: install the chat-card event emitter. Call once after
+     * SidebarProvider is constructed and before user-driven hooks
+     * fire. Idempotent — subsequent calls replace the previous
+     * emitter (e.g. on webview reload).
+     */
+    setEmitter(emitter: HookEventEmitter | undefined): void {
+        this.emitter = emitter;
+    }
+
+    /**
+     * P1.4: install the audit log. Call once after AuditLog is
+     * initialized in extension.ts activate(). Idempotent.
+     */
+    setAuditLog(audit: AuditLog | undefined): void {
+        this.audit = audit;
+    }
 
     // ─── Lifecycle ──────────────────────────────────────────────────────
 
@@ -116,7 +150,7 @@ export class HookManager {
     }
 
     stop(): void {
-        for (const ds of this.hookDisposables.values()) ds.forEach(d => d.dispose());
+        for (const ds of this.hookDisposables.values()) { ds.forEach(d => d.dispose()); }
         this.hookDisposables.clear();
         this.managerDisposables.forEach(d => d.dispose());
         this.managerDisposables = [];
@@ -128,7 +162,7 @@ export class HookManager {
 
     private async loadHooks(): Promise<void> {
         // Tear down previously registered triggers
-        for (const ds of this.hookDisposables.values()) ds.forEach(d => d.dispose());
+        for (const ds of this.hookDisposables.values()) { ds.forEach(d => d.dispose()); }
         this.hookDisposables.clear();
         this.hooks.clear();
 
@@ -141,7 +175,7 @@ export class HookManager {
         }
 
         for (const [name, type] of entries) {
-            if (type !== vscode.FileType.File || !name.endsWith('.md')) continue;
+            if (type !== vscode.FileType.File || !name.endsWith('.md')) { continue; }
             const fileUri = vscode.Uri.joinPath(specs.hooksDir(), name);
 
             try {
@@ -153,20 +187,28 @@ export class HookManager {
                     this.log(`⚠️ ${name}: malformed frontmatter, skipped`);
                     continue;
                 }
-                if (!hook.enabled) {
-                    this.log(`⏸️ ${hook.id}: disabled`);
-                    continue;
-                }
                 if (this.hooks.has(hook.id)) {
                     this.log(`⚠️ ${hook.id}: duplicate id, skipped`);
                     continue;
                 }
+                // Track all loaded hooks so the UI can list them, even
+                // disabled ones (the user may want to re-enable). Only
+                // register triggers for enabled hooks though — disabled
+                // hooks are inert until toggled back on.
                 this.hooks.set(hook.id, hook);
+                if (!hook.enabled) {
+                    this.log(`⏸️ ${hook.id}: disabled (loaded but not registered)`);
+                    continue;
+                }
                 this.registerHook(hook);
             } catch (e) {
                 this.log(`⚠️ ${name}: load error: ${e}`);
             }
         }
+        // Notify any subscribers (typically SidebarProvider, which
+        // forwards to the webview) that the loaded list has changed.
+        // This handles cold-start, FS watcher reloads, and toggles.
+        this.notifyListSubscribers();
     }
 
     private registerHook(hook: HookDefinition): void {
@@ -215,17 +257,17 @@ export class HookManager {
     private async onDocumentSaved(doc: vscode.TextDocument): Promise<void> {
         // Don't fire on saves of files we ourselves wrote (avoids loops).
         const relative = vscode.workspace.asRelativePath(doc.uri);
-        if (relative.startsWith('.nexus/')) return;
+        if (relative.startsWith('.nexus/')) { return; }
 
         for (const hook of this.hooks.values()) {
-            if (hook.trigger.type !== 'onFileSave') continue;
-            if (!matchGlob(hook.trigger.pattern, relative)) continue;
+            if (hook.trigger.type !== 'onFileSave') { continue; }
+            if (!matchGlob(hook.trigger.pattern, relative)) { continue; }
 
             // Per-hook+file debounce — VS Code can emit multiple saves rapidly
             const dedupeKey = `${hook.id}::${relative}`;
             const now = Date.now();
             const last = this.lastFireAt.get(dedupeKey) || 0;
-            if (now - last < HookManager.FIRE_DEBOUNCE_MS) continue;
+            if (now - last < HookManager.FIRE_DEBOUNCE_MS) { continue; }
             this.lastFireAt.set(dedupeKey, now);
 
             const fileContent = doc.getText().substring(0, MAX_HOOK_FILE_CONTENT);
@@ -257,7 +299,7 @@ export class HookManager {
             title: 'NexusCode: Run Hook',
             placeHolder: 'Pick a hook to run manually'
         });
-        if (!picked) return;
+        if (!picked) { return; }
 
         await this.fireHook(picked.hook, {
             workspaceRoot: this.workspaceRoot.fsPath,
@@ -270,12 +312,24 @@ export class HookManager {
 
     private async fireHook(hook: HookDefinition, ctx: HookContext): Promise<void> {
         const channel = this.getOutput();
+        const fireStartedAt = Date.now();
+        // P1.4: stable id to correlate started → output → completed
+        // events for this single fire. Webview keys cards by this.
+        const hookFireId = randomUUID();
 
         // Concurrency cap: silently drop fires when over the limit. Better than
         // queueing them — if 50 saves happen in a burst, the user wants the
         // newest ones, not a queue of 47 stale ones to slowly drain.
         if (this.inflightFires >= MAX_CONCURRENT_FIRES) {
             channel.appendLine(`⏸️ ${hook.id}: skipped (already ${this.inflightFires} hook(s) running)`);
+            // Surface the skip to the UI as a muted card. Without this,
+            // a user watching the chat thread would have no idea their
+            // hook even tried to fire — and the OutputChannel is opt-in.
+            this.emitFireStarted(hookFireId, hook, ctx);
+            this.emitFireCompleted(hookFireId, hook, 'skipped', 0,
+                `Already ${this.inflightFires} hook(s) running.`);
+            this.recordAuditFire(hook, ctx, 'skipped', 0,
+                `concurrency cap (${MAX_CONCURRENT_FIRES})`);
             return;
         }
 
@@ -283,7 +337,12 @@ export class HookManager {
         channel.show(true);
         channel.appendLine(`\n━━━ ▶ ${hook.name} (${hook.id}) ━━━`);
         channel.appendLine(`Triggered: ${ctx.triggerType} @ ${ctx.triggeredAt}`);
-        if (ctx.filePath) channel.appendLine(`File: ${ctx.filePath}`);
+        if (ctx.filePath) { channel.appendLine(`File: ${ctx.filePath}`); }
+
+        // Emit "started" before any LLM work so the card appears in chat
+        // immediately. The user sees the hook firing in real time even
+        // if the LLM call is slow.
+        this.emitFireStarted(hookFireId, hook, ctx);
 
         const interpolated = interpolatePrompt(hook.promptTemplate, ctx);
 
@@ -298,6 +357,8 @@ export class HookManager {
         const abortController = new AbortController();
         const timeoutHandle = setTimeout(() => abortController.abort(), HOOK_FIRE_TIMEOUT_MS);
 
+        let status: 'success' | 'error' | 'timeout' = 'success';
+        let errorReason: string | undefined;
         try {
             // Migrated to Provider abstraction (Component 1, Session 2).
             // Hooks are non-streaming, single-turn, with a hard 60s
@@ -317,18 +378,126 @@ export class HookManager {
                     signal: abortController.signal
                 }
             );
-            channel.appendLine(output || '(no output)');
+            const finalOutput = output || '(no output)';
+            channel.appendLine(finalOutput);
             channel.appendLine(`━━━ ◀ ${hook.id} done ━━━`);
+            // Emit the full output as a single chunk. Hooks are
+            // non-streaming today; if streaming lands later we'd emit
+            // multiple chunks. The webview's reducer accumulates them
+            // either way.
+            this.emitFireOutput(hookFireId, hook, finalOutput);
         } catch (e: unknown) {
             if (isAbortError(e)) {
-                channel.appendLine(`⏱️ ${hook.id}: timed out after ${HOOK_FIRE_TIMEOUT_MS / 1000}s`);
+                status = 'timeout';
+                errorReason = `timed out after ${HOOK_FIRE_TIMEOUT_MS / 1000}s`;
+                channel.appendLine(`⏱️ ${hook.id}: ${errorReason}`);
             } else {
-                channel.appendLine(`⚠️ ${hook.id}: ${errorMessage(e)}`);
+                status = 'error';
+                errorReason = errorMessage(e);
+                channel.appendLine(`⚠️ ${hook.id}: ${errorReason}`);
             }
         } finally {
             clearTimeout(timeoutHandle);
             this.inflightFires--;
+            const durationMs = Date.now() - fireStartedAt;
+            this.emitFireCompleted(hookFireId, hook, status, durationMs, errorReason);
+            this.recordAuditFire(hook, ctx, status, durationMs, errorReason);
+            // Free seq-counter memory for this fire. Long sessions with
+            // many hook fires would otherwise leak entries.
+            this.emitter?.forgetFire(hookFireId);
         }
+    }
+
+    // ─── P1.4: emitter + audit helpers ─────────────────────────────────
+
+    private emitFireStarted(hookFireId: string, hook: HookDefinition, ctx: HookContext): void {
+        if (!this.emitter) { return; }
+        const event: Omit<import('./hookProtocol').HookFireStartedEvent, 'seq'> = {
+            type: 'hookFireStarted',
+            hookFireId,
+            hookId: hook.id,
+            hookName: hook.name,
+            triggerType: ctx.triggerType,
+            timestamp: Date.now()
+        };
+        // Only set filePath when truthy — exactOptionalPropertyTypes
+        // forbids `undefined` on optional fields.
+        if (ctx.filePath) {
+            (event as { filePath?: string }).filePath = ctx.filePath;
+        }
+        this.emitter.emit(event);
+    }
+
+    private emitFireOutput(hookFireId: string, hook: HookDefinition, chunk: string): void {
+        if (!this.emitter || !chunk) { return; }
+        this.emitter.emit({
+            type: 'hookFireOutput',
+            hookFireId,
+            hookId: hook.id,
+            hookName: hook.name,
+            chunk,
+            timestamp: Date.now()
+        });
+    }
+
+    private emitFireCompleted(
+        hookFireId: string,
+        hook: HookDefinition,
+        status: 'success' | 'error' | 'timeout' | 'skipped',
+        durationMs: number,
+        errorMessage?: string
+    ): void {
+        if (!this.emitter) { return; }
+        const event: Omit<import('./hookProtocol').HookFireCompletedEvent, 'seq'> = {
+            type: 'hookFireCompleted',
+            hookFireId,
+            hookId: hook.id,
+            hookName: hook.name,
+            status,
+            durationMs,
+            timestamp: Date.now()
+        };
+        if (errorMessage !== undefined) {
+            (event as { errorMessage?: string }).errorMessage = errorMessage;
+        }
+        this.emitter.emit(event);
+    }
+
+    /**
+     * Best-effort audit write. Failures are swallowed — the audit log
+     * is observability infrastructure, not a gate. If it throws (disk
+     * full, etc.), the hook fire shouldn't be retroactively cancelled.
+     */
+    private recordAuditFire(
+        hook: HookDefinition,
+        ctx: HookContext,
+        status: 'success' | 'error' | 'timeout' | 'skipped',
+        durationMs: number,
+        errorReason?: string
+    ): void {
+        if (!this.audit) { return; }
+        const payload: import('../audit/types').HookFirePayload = {
+            hookId: hook.id,
+            hookName: hook.name,
+            triggerType: ctx.triggerType,
+            durationMs,
+            status
+        };
+        if (ctx.filePath) {
+            (payload as { filePath?: string }).filePath = ctx.filePath;
+        }
+        if (errorReason !== undefined) {
+            (payload as { errorMessage?: string }).errorMessage = errorReason;
+        }
+        // No await — audit writes are fire-and-forget for hooks. If the
+        // user is reviewing the audit log seconds later they'll see this
+        // record. The `void` annotation tells TS we deliberately ignore
+        // the promise.
+        void this.audit.logHookFire(payload).catch(() => {
+            // Already handled inside emit() with a console.warn; we
+            // don't have a logger here that can afford to fire on
+            // every failed audit write.
+        });
     }
 
     // ─── Internals ──────────────────────────────────────────────────────
@@ -343,6 +512,242 @@ export class HookManager {
     private log(msg: string): void {
         this.getOutput().appendLine(`[HookManager] ${msg}`);
     }
+
+    // ─── PR 3.2: public API for the hooks panel ────────────────────────
+
+    /** Last-fired timestamps as ISO strings, populated by fireHook on
+     *  successful invocation. Separate from lastFireAt (epoch-millis,
+     *  used for debouncing) to avoid mixing concerns. */
+    private lastFiredAtIso = new Map<string, string>();
+
+    /** Subscribers notified whenever the hook list, enabled state, or
+     *  fire status changes. Used by SidebarProvider to forward
+     *  hookListUpdated messages to the webview. */
+    private listSubscribers: Array<(summaries: HookSummaryView[]) => void> = [];
+
+    /**
+     * Returns a serializable view of all loaded hooks, suitable for
+     * sending to the webview as the `hookListUpdated.hooks` payload.
+     * Includes disabled hooks. Trigger summaries are pre-formatted for
+     * display so the webview doesn't need to know about glob patterns
+     * or schedule semantics.
+     */
+    getHookSummaries(): HookSummaryView[] {
+        const summaries: HookSummaryView[] = [];
+        for (const hook of this.hooks.values()) {
+            const summary: HookSummaryView = {
+                id: hook.id,
+                name: hook.name,
+                enabled: hook.enabled,
+                triggerSummary: formatTriggerSummary(hook.trigger),
+                triggerType: hook.trigger.type,
+                inflight: false  // We don't currently track per-hook inflight; could in v2
+            };
+            if (hook.description !== undefined) {
+                summary.description = hook.description;
+            }
+            const lastFired = this.lastFiredAtIso.get(hook.id);
+            if (lastFired !== undefined) {
+                summary.lastFiredAt = lastFired;
+            }
+            summaries.push(summary);
+        }
+        // Stable sort: enabled first, then by name
+        summaries.sort((a, b) => {
+            if (a.enabled !== b.enabled) {
+                return a.enabled ? -1 : 1;
+            }
+            return a.name.localeCompare(b.name);
+        });
+        return summaries;
+    }
+
+    /**
+     * Subscribe to hook-list changes. Fires whenever loadHooks
+     * completes or a fire/toggle changes the visible state. Returns
+     * a disposer.
+     */
+    subscribeListChanges(callback: (summaries: HookSummaryView[]) => void): () => void {
+        this.listSubscribers.push(callback);
+        // Immediately deliver current state so subscribers don't have
+        // to wait for the next change to populate.
+        try {
+            callback(this.getHookSummaries());
+        } catch (e: unknown) {
+            this.log(`subscriber threw on initial deliver: ${String(e)}`);
+        }
+        return () => {
+            const idx = this.listSubscribers.indexOf(callback);
+            if (idx !== -1) {
+                this.listSubscribers.splice(idx, 1);
+            }
+        };
+    }
+
+    private notifyListSubscribers(): void {
+        if (this.listSubscribers.length === 0) {
+            return;
+        }
+        const snapshot = this.getHookSummaries();
+        for (const fn of this.listSubscribers) {
+            try {
+                fn(snapshot);
+            } catch (e: unknown) {
+                this.log(`subscriber threw: ${String(e)}`);
+            }
+        }
+    }
+
+    /**
+     * Toggle a hook's enabled state. Rewrites the .md file's frontmatter
+     * `enabled:` field. The FS watcher then fires loadHooks() which
+     * fires notifyListSubscribers() — UI updates round-trip via disk
+     * (no optimistic state).
+     */
+    async toggleHook(id: string, enabled: boolean): Promise<void> {
+        const hook = this.hooks.get(id);
+        if (!hook) {
+            this.log(`toggleHook: unknown id "${id}"`);
+            return;
+        }
+        try {
+            const uri = vscode.Uri.parse(hook.sourceUri);
+            const buf = await vscode.workspace.fs.readFile(uri);
+            const text = new TextDecoder().decode(buf);
+            const updated = setFrontmatterEnabled(text, enabled);
+            await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(updated));
+            this.log(`${id}: ${enabled ? 'enabled' : 'disabled'} via UI`);
+            // Force-reload immediately so the UI reflects the change
+            // without waiting for the FS watcher (which is debounced).
+            await this.loadHooks();
+            this.notifyListSubscribers();
+        } catch (e: unknown) {
+            this.log(`toggleHook failed for ${id}: ${String(e)}`);
+        }
+    }
+
+    /**
+     * Manually fire a hook outside its trigger context. Useful for
+     * testing, demoing, or "run-this-once" workflows. The hook fires
+     * with an empty HookContext (no filePath, no fileContent) — hooks
+     * that depend on those should handle the absence gracefully.
+     */
+    async runHookManually(id: string): Promise<void> {
+        const hook = this.hooks.get(id);
+        if (!hook) {
+            this.log(`runHookManually: unknown id "${id}"`);
+            return;
+        }
+        if (!hook.enabled) {
+            this.log(`runHookManually: ${id} is disabled, skipping`);
+            return;
+        }
+        const ctx: HookContext = {
+            workspaceRoot: this.workspaceRoot.fsPath,
+            triggeredAt: new Date().toISOString(),
+            triggerType: hook.trigger.type
+        };
+        await this.fireHook(hook, ctx);
+        this.lastFiredAtIso.set(id, new Date().toISOString());
+        this.notifyListSubscribers();
+    }
+
+    /**
+     * Open a hook's .md file in the main VS Code editor. Lets the
+     * user edit the prompt body or the frontmatter directly. The
+     * FS watcher picks up the save and reloads automatically.
+     */
+    async openHookFile(id: string): Promise<void> {
+        const hook = this.hooks.get(id);
+        if (!hook) {
+            this.log(`openHookFile: unknown id "${id}"`);
+            return;
+        }
+        try {
+            const uri = vscode.Uri.parse(hook.sourceUri);
+            const doc = await vscode.workspace.openTextDocument(uri);
+            await vscode.window.showTextDocument(doc);
+        } catch (e: unknown) {
+            this.log(`openHookFile failed for ${id}: ${String(e)}`);
+        }
+    }
+}
+
+/** Public summary type for the webview payload. Strict shape because
+ *  this crosses the postMessage boundary. */
+export interface HookSummaryView {
+    id: string;
+    name: string;
+    description?: string;
+    enabled: boolean;
+    triggerSummary: string;
+    triggerType: 'onFileSave' | 'onCommand' | 'onSchedule';
+    lastFiredAt?: string;
+    inflight: boolean;
+}
+
+/** Format a trigger as a human-readable one-liner. The webview shows
+ *  this as the trigger pill content, so it must be short. */
+function formatTriggerSummary(trigger: HookTrigger): string {
+    if (trigger.type === 'onFileSave') {
+        return `on save: ${trigger.pattern}`;
+    }
+    if (trigger.type === 'onCommand') {
+        return `command: ${trigger.commandId}`;
+    }
+    if (trigger.type === 'onSchedule') {
+        return `every ${trigger.everySeconds}s`;
+    }
+    return 'unknown trigger';
+}
+
+/** Rewrite the YAML frontmatter `enabled:` field in a hook .md file's
+ *  text. Preserves the rest of the document byte-for-byte. If no
+ *  `enabled:` field exists, inserts one before the closing `---`.
+ *  Exported for testability. */
+export function setFrontmatterEnabled(source: string, enabled: boolean): string {
+    // Frontmatter delimited by --- on the first line and the next ---.
+    // We're lenient about leading newlines / BOM.
+    const trimmed = source.replace(/^\uFEFF/, '');
+    if (!trimmed.startsWith('---')) {
+        // No frontmatter — leave the file alone, just prepend one.
+        // Defensive: shouldn't happen because parseHookFile rejects
+        // these, but if a malformed hook somehow got toggled, don't
+        // wreck it.
+        return `---\nenabled: ${enabled}\n---\n${source}`;
+    }
+    const lines = trimmed.split('\n');
+    let endIdx = -1;
+    for (let i = 1; i < lines.length; i++) {
+        if (lines[i] === '---') {
+            endIdx = i;
+            break;
+        }
+    }
+    if (endIdx === -1) {
+        // Malformed — no closing ---. Leave the file alone.
+        return source;
+    }
+    // Find the existing enabled: line (case-insensitive key)
+    let foundIdx = -1;
+    for (let i = 1; i < endIdx; i++) {
+        if (/^\s*enabled\s*:/i.test(lines[i] ?? '')) {
+            foundIdx = i;
+            break;
+        }
+    }
+    if (foundIdx !== -1) {
+        // Replace the value, preserving the leading whitespace + key
+        const original = lines[foundIdx] ?? '';
+        const m = original.match(/^(\s*enabled\s*:\s*)(.*)$/i);
+        if (m) {
+            lines[foundIdx] = `${m[1]}${enabled}`;
+        }
+    } else {
+        // Insert before the closing ---
+        lines.splice(endIdx, 0, `enabled: ${enabled}`);
+    }
+    return lines.join('\n');
 }
 
 // ─── Internal: glob matcher ─────────────────────────────────────────────

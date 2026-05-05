@@ -3758,3 +3758,813 @@ body, html, #root {
 .nexus-spec-tasks-loader-stop:hover {
   background: color-mix(in srgb, var(--vscode-editor-background) 15%, transparent);
 }
+/* PR 1.3: Meta-mode banner. Was previously rendered as text in the
+   nexus-app-header-status when metaMode was active. The brand header
+   was removed (rail logo replaces it), so meta-mode shows here as a
+   thin warning bar above the canvas. */
+.nexus-meta-mode-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 14%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--vscode-charts-orange, #cca700) 30%, transparent);
+    color: var(--vscode-charts-orange, #cca700);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+}
+
+
+/* ─── V2 Execution Modes (Plan / Autonomy) ──────────────────────────
+
+   Plan mode is the default; the toolbar is visually quiet so the
+
+   user focus stays on individual task cards. Autonomy mode ramps
+
+   visual weight up — accent border on the toolbar, magenta badges
+
+   on the queue indicator, pulse animation on the currently-running
+
+   counter. The "this is the cool mode" cue for demos and at-a-glance
+
+   recognition: a regulated-industry user glancing at their colleague's
+
+   screen should be able to tell which mode is active without reading. */
+
+
+
+.execution-mode-toolbar {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 12px;
+
+    padding: 8px 12px;
+
+    border-bottom: 1px solid var(--vscode-widget-border);
+
+    background: var(--vscode-editor-background);
+
+    font-size: 11px;
+
+    transition: background 0.18s ease, border-color 0.18s ease;
+
+}
+
+
+
+/* Subtle accent when autonomy is selected — the toolbar gets a
+
+   left edge band of magenta so the audience sees "different mode
+
+   is active" peripherally. Does NOT use the full background tint
+
+   (looked alarming in early review). */
+
+.execution-mode-toolbar.is-autonomy {
+
+    background: linear-gradient(
+
+        90deg,
+
+        color-mix(in srgb, var(--vscode-terminal-ansiMagenta) 8%, transparent) 0%,
+
+        var(--vscode-editor-background) 12%
+
+    );
+
+    border-left: 2px solid var(--vscode-terminal-ansiMagenta);
+
+}
+
+
+
+/* Stronger accent while a run is actually in progress — gives the
+
+   audience a clear "things are happening" signal that pairs with
+
+   the queue counter. */
+
+.execution-mode-toolbar.is-running {
+
+    background: linear-gradient(
+
+        90deg,
+
+        color-mix(in srgb, var(--vscode-terminal-ansiMagenta) 14%, transparent) 0%,
+
+        color-mix(in srgb, var(--vscode-terminal-ansiMagenta) 4%, var(--vscode-editor-background)) 25%
+
+    );
+
+    border-left: 2px solid var(--vscode-terminal-ansiMagenta);
+
+}
+
+
+
+.execution-mode-toolbar__label {
+
+    color: var(--nexus-subtext);
+
+    user-select: none;
+
+}
+
+
+
+/* Replace the default <select> chrome — the OS-native dropdown
+
+   sticks out badly against the rest of the panel chrome. */
+
+.execution-mode-toolbar__select {
+
+    background: var(--vscode-input-background);
+
+    color: var(--vscode-input-foreground);
+
+    border: 1px solid var(--vscode-input-border, color-mix(in srgb, var(--vscode-foreground) 18%, transparent));
+
+    border-radius: 3px;
+
+    padding: 3px 24px 3px 8px;
+
+    font-size: 11px;
+
+    font-family: inherit;
+
+    cursor: pointer;
+
+    appearance: none;
+
+    -webkit-appearance: none;
+
+    -moz-appearance: none;
+
+    /* Custom chevron — inline SVG. Uses currentColor so it picks up
+
+       theme colors automatically. */
+
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 4 L5 7 L8 4' stroke='currentColor' stroke-width='1.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
+    background-repeat: no-repeat;
+
+    background-position: right 6px center;
+
+    transition: border-color 0.15s ease;
+
+}
+
+
+
+.execution-mode-toolbar__select:hover:not(:disabled) {
+
+    border-color: var(--vscode-focusBorder, var(--vscode-terminal-ansiMagenta));
+
+}
+
+
+
+.execution-mode-toolbar__select:focus {
+
+    outline: none;
+
+    border-color: var(--vscode-focusBorder, var(--vscode-terminal-ansiMagenta));
+
+    box-shadow: 0 0 0 1px var(--vscode-focusBorder, var(--vscode-terminal-ansiMagenta));
+
+}
+
+
+
+.execution-mode-toolbar__select:disabled {
+
+    cursor: not-allowed;
+
+    opacity: 0.55;
+
+}
+
+
+
+/* "Run All Tasks" CTA — the primary action when autonomy is selected
+
+   and idle. Magenta to match the autonomy accent so the audience
+
+   visually links button → mode. */
+
+.execution-mode-toolbar__run-all {
+
+    margin-left: auto;
+
+    background: var(--vscode-terminal-ansiMagenta);
+
+    color: var(--vscode-button-foreground);
+
+    border: none;
+
+    border-radius: 3px;
+
+    padding: 3px 12px;
+
+    font-size: 11px;
+
+    font-weight: 600;
+
+    cursor: pointer;
+
+    transition: filter 0.15s ease, transform 0.1s ease;
+
+}
+
+
+
+.execution-mode-toolbar__run-all:hover {
+
+    filter: brightness(1.15);
+
+}
+
+
+
+.execution-mode-toolbar__run-all:active {
+
+    transform: translateY(1px);
+
+}
+
+
+
+/* Queue counter shown during a run. Pulse animation tells the
+
+   audience "the agent is working" — pairs with the streamed
+
+   reasoning that's already going below. */
+
+.execution-mode-toolbar__queue-counter {
+
+    margin-left: auto;
+
+    color: var(--vscode-terminal-ansiMagenta);
+
+    font-weight: 600;
+
+    display: inline-flex;
+
+    align-items: center;
+
+    gap: 6px;
+
+}
+
+
+
+.execution-mode-toolbar__queue-counter::before {
+
+    content: "";
+
+    width: 6px;
+
+    height: 6px;
+
+    border-radius: 50%;
+
+    background: var(--vscode-terminal-ansiMagenta);
+
+    animation: nexus-autonomy-pulse 1.4s ease-in-out infinite;
+
+    flex-shrink: 0;
+
+}
+
+
+
+@keyframes nexus-autonomy-pulse {
+
+    0%, 100% {
+
+        opacity: 0.4;
+
+        transform: scale(0.85);
+
+    }
+
+    50% {
+
+        opacity: 1;
+
+        transform: scale(1.1);
+
+    }
+
+}
+
+
+
+/* Halt button — quiet visual weight (it's a recovery action, not
+
+   a feature). Hover gets a subtle warning tint. */
+
+.execution-mode-toolbar__halt {
+
+    background: transparent;
+
+    color: var(--vscode-foreground);
+
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 25%, transparent);
+
+    border-radius: 3px;
+
+    padding: 3px 10px;
+
+    font-size: 11px;
+
+    cursor: pointer;
+
+    transition: background 0.15s ease, border-color 0.15s ease;
+
+}
+
+
+
+.execution-mode-toolbar__halt:hover {
+
+    background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 14%, transparent);
+
+    border-color: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 60%, transparent);
+
+}
+
+
+
+/* Halt-by-rejection error banner. Distinct from real errors because
+
+   the run STOPPED on the user's behalf — it's not a crash, just a
+
+   pause point. Warm yellow rather than alarm red. */
+
+.execution-mode-toolbar__error-banner {
+
+    padding: 8px 12px;
+
+    border-bottom: 1px solid var(--vscode-widget-border);
+
+    background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 12%, transparent);
+
+    color: var(--vscode-foreground);
+
+    font-size: 11px;
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    gap: 12px;
+
+}
+
+
+
+.execution-mode-toolbar__error-banner-dismiss {
+
+    background: transparent;
+
+    color: var(--vscode-foreground);
+
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 25%, transparent);
+
+    border-radius: 3px;
+
+    padding: 2px 10px;
+
+    font-size: 11px;
+
+    cursor: pointer;
+
+}
+
+
+
+.execution-mode-toolbar__error-banner-dismiss:hover {
+
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+
+}
+
+
+
+/* Per-task buttons get visually parked during an autonomy run.
+
+   The user CAN'T click them (disabled in JSX), but a half-faded
+
+   look reinforces "the queue is driving — don't try to interfere." */
+
+.nexus-task-card.is-queued button.micro-btn {
+
+    opacity: 0.45;
+
+    cursor: not-allowed;
+
+}
+
+
+
+/* ─── Thinking-mode pill (V2.0 follow-up) ───────────────────────────
+
+   Bulk toggle for thinking-mode across all three agents. Three
+
+   visual states:
+
+     .is-on    blue accent     "🧠 Deep thinking" — accuracy-first default
+
+     .is-off   amber accent    "⚡ Speed mode"     — explicit speed opt-in
+
+     .is-mixed dotted border   "🧠 Custom"        — per-agent customization
+
+   Sits between the mode dropdown and the right-aligned action area
+
+   (Run All / queue counter). Visible in both Plan and Autonomy modes
+
+   because thinking applies regardless of how tasks are dispatched. */
+
+
+
+.execution-mode-toolbar__thinking-pill {
+
+    background: transparent;
+
+    color: var(--vscode-foreground);
+
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 22%, transparent);
+
+    border-radius: 12px;
+
+    padding: 3px 10px;
+
+    font-size: 11px;
+
+    font-weight: 500;
+
+    cursor: pointer;
+
+    white-space: nowrap;
+
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+
+    user-select: none;
+
+}
+
+
+
+.execution-mode-toolbar__thinking-pill.is-on {
+
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 12%, transparent);
+
+    border-color: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 45%, transparent);
+
+    color: var(--vscode-charts-blue, #4cc2ff);
+
+}
+
+
+
+.execution-mode-toolbar__thinking-pill.is-on:hover {
+
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 20%, transparent);
+
+}
+
+
+
+.execution-mode-toolbar__thinking-pill.is-off {
+
+    background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 14%, transparent);
+
+    border-color: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 50%, transparent);
+
+    color: var(--vscode-charts-orange, #cca700);
+
+}
+
+
+
+.execution-mode-toolbar__thinking-pill.is-off:hover {
+
+    background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 22%, transparent);
+
+}
+
+
+
+.execution-mode-toolbar__thinking-pill.is-mixed {
+
+    background: transparent;
+
+    /* Dotted border tells the user "this is a heterogeneous state".
+
+       Same-color text avoids competing with the pure on/off variants. */
+
+    border-style: dashed;
+
+    border-color: color-mix(in srgb, var(--vscode-foreground) 35%, transparent);
+
+    color: var(--nexus-subtext);
+
+}
+
+
+
+.execution-mode-toolbar__thinking-pill.is-mixed:hover {
+
+    background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+
+}
+
+
+
+.execution-mode-toolbar__thinking-pill:focus-visible {
+
+    outline: none;
+
+    box-shadow: 0 0 0 2px var(--vscode-focusBorder, var(--vscode-charts-blue, #4cc2ff));
+
+}
+
+
+
+/* Advanced link — quiet text-button styling. Opens VS Code settings
+
+   filtered to per-agent thinking keys for power users. */
+
+.execution-mode-toolbar__thinking-advanced {
+
+    background: transparent;
+
+    border: none;
+
+    padding: 0 4px;
+
+    font-size: 11px;
+
+    color: var(--nexus-subtext);
+
+    cursor: pointer;
+
+    text-decoration: none;
+
+    user-select: none;
+
+    transition: color 0.15s ease, text-decoration 0.15s ease;
+
+}
+
+
+
+.execution-mode-toolbar__thinking-advanced:hover {
+
+    color: var(--vscode-foreground);
+
+    text-decoration: underline;
+
+}
+
+
+
+.execution-mode-toolbar__thinking-advanced:focus-visible {
+
+    outline: none;
+
+    color: var(--vscode-foreground);
+
+    text-decoration: underline;
+
+}
+
+
+
+/* ─── V2 polish: code-map selected-node card ──────────────────────
+
+   Renders at the top of the code-map detail sidebar when the user
+
+   single-clicks a node. Replaces the old "scroll to node card" UX
+
+   with a permanent detail surface that doesn't require scrolling.
+
+   The card uses subtle accent so it doesn't compete with the
+
+   long node-list below. */
+
+
+
+.nexus-graph-selected-card {
+
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 8%, transparent);
+
+    border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 35%, transparent);
+
+    border-radius: 6px;
+
+    padding: 12px;
+
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 8px;
+
+    flex-shrink: 0;
+
+}
+
+
+
+.nexus-graph-selected-card__header {
+
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    gap: 8px;
+
+}
+
+
+
+.nexus-graph-selected-card__kind {
+
+    font-size: 10px;
+
+    font-weight: 700;
+
+    letter-spacing: 0.6px;
+
+    text-transform: uppercase;
+
+    color: var(--vscode-charts-blue, #4cc2ff);
+
+}
+
+
+
+.nexus-graph-selected-card__close {
+
+    background: transparent;
+
+    color: var(--nexus-subtext);
+
+    border: none;
+
+    cursor: pointer;
+
+    font-size: 14px;
+
+    line-height: 1;
+
+    padding: 2px 6px;
+
+    border-radius: 3px;
+
+    transition: background 0.15s ease, color 0.15s ease;
+
+}
+
+
+
+.nexus-graph-selected-card__close:hover {
+
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+
+    color: var(--vscode-foreground);
+
+}
+
+
+
+.nexus-graph-selected-card__name {
+
+    font-size: 14px;
+
+    font-weight: 600;
+
+    color: var(--vscode-foreground);
+
+    word-break: break-word;
+
+    line-height: 1.3;
+
+}
+
+
+
+.nexus-graph-selected-card__parent {
+
+    font-size: 11px;
+
+    color: var(--nexus-subtext);
+
+}
+
+
+
+.nexus-graph-selected-card__parent code {
+
+    font-family: var(--vscode-editor-font-family, monospace);
+
+    font-size: 10px;
+
+    color: var(--vscode-foreground);
+
+    background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+
+    padding: 1px 4px;
+
+    border-radius: 3px;
+
+}
+
+
+
+.nexus-graph-selected-card__actions {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 12px;
+
+    flex-wrap: wrap;
+
+    margin-top: 4px;
+
+}
+
+
+
+.nexus-graph-selected-card__open-btn {
+
+    background: var(--vscode-charts-blue, #4cc2ff);
+
+    color: var(--vscode-button-foreground, #ffffff);
+
+    border: none;
+
+    border-radius: 4px;
+
+    padding: 5px 12px;
+
+    font-size: 11px;
+
+    font-weight: 600;
+
+    cursor: pointer;
+
+    transition: filter 0.15s ease, transform 0.1s ease;
+
+}
+
+
+
+.nexus-graph-selected-card__open-btn:hover:not(:disabled) {
+
+    filter: brightness(1.15);
+
+}
+
+
+
+.nexus-graph-selected-card__open-btn:active:not(:disabled) {
+
+    transform: translateY(1px);
+
+}
+
+
+
+.nexus-graph-selected-card__open-btn:disabled {
+
+    opacity: 0.45;
+
+    cursor: not-allowed;
+
+}
+
+
+
+.nexus-graph-selected-card__hint {
+
+    font-size: 10px;
+
+    color: var(--nexus-subtext);
+
+    font-style: italic;
+
+}

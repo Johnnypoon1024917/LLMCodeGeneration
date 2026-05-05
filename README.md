@@ -1,39 +1,101 @@
-# NexusCode: Autonomous AI Coding Assistant
+# NexusCode Powers
 
-NexusCode is a powerful, autonomous AI programming assistant for Visual Studio Code. It acts as a pair programmer capable of understanding your entire project context, executing surgical code injections, and even evolving its own codebase.
+A "Power" is a curated bundle of steering rules + hooks that pre-
+configures NexusCode for a specific project shape. Drop the bundle's
+`.nexus/` directory into your project root and the agent immediately
+operates with the conventions baked in.
 
-## 🚀 Features
+There is no installer, registry, or store — Powers are plain Markdown
+files versioned in Git, copy-pasteable, and reviewable.
 
-- **Surgical AST Code Injection:** Powered by Tree-Sitter, NexusCode doesn't just append text; it mathematically analyzes your code's Abstract Syntax Tree to inject methods and properties exactly where they belong without breaking syntax.
-- **Atomic File Edits:** AI-generated implementation plans are broken down into single-file, atomic steps. Review, accept, or reject changes on a per-file basis using the native CodeLens UI.
-- **Context-Aware Generation:** NexusCode automatically scans your workspace and reads your `.eslintrc` and `tsconfig.json` to ensure generated code matches your project's strict styling rules.
-- **Auto-Healing Tests:** If generated tests fail, the AI automatically reads the terminal error output and attempts to fix the logic before you even have to look at it.
-- **Meta-Mode (Self-Evolution):** NexusCode is capable of reading and modifying its own extension source code, allowing it to build new features for itself.
+## Available bundles
 
-## ⚙️ Configuration
+| Bundle | What it's for |
+|---|---|
+| [`banking-compliance-zh/`](./banking-compliance-zh/) | HK / PRC financial-services projects under HKMA / SFC / PBoC oversight. Demonstrates **scoped steering** (`## Applies to`) and audit-focused hooks. |
+| [`django/`](./django/) | Django + DRF web applications. ORM discipline, migration awareness. |
+| [`typescript-monorepo/`](./typescript-monorepo/) | pnpm/npm/Yarn workspace monorepos. Strict TS, ESM, no circular deps. Demonstrates the **scheduled** hook trigger. |
 
-NexusCode can be connected to any OpenAI-compatible API endpoint (including local LLMs via LM Studio or vLLM). 
+## Installing a bundle
 
-Access these settings in VS Code via `Preferences: Open Settings (UI)` -> search for `NexusCode`:
+```bash
+# From inside your project root:
+cp -r path/to/nexuscode/examples/powers/<bundle-name>/.nexus ./
+```
 
-* `nexuscode.apiEndpoint`: The URL of your LLM provider (Default: `http://127.0.0.1:1234/v1/chat/completions`).
-* `nexuscode.model`: The name or path of the model to use (Default: `qwen-72b`).
-* `nexuscode.apiKey`: Your API Key (if using a cloud provider or authenticated gateway).
-* `nexuscode.enableTools`: Enable agent tools for autonomous repository exploration.
+NexusCode picks up the changes automatically — no restart required.
+Both the steering panel and the hooks panel will refresh.
 
-## 🛠️ Usage
+If your project already has a `.nexus/` directory, merge selectively:
 
-1. Open the **NexusCode** sidebar from the Activity Bar.
-2. Type a natural language request (e.g., *"Create a new AuthGuard component and write tests for it"*).
-3. Review the AI's generated implementation plan.
-4. Click **Execute All** or run tasks individually.
-5. Review the purple highlighted code changes in your editor and click **Accept** or **Reject** from the floating lens above the code.
+```bash
+cp -r path/to/.../<bundle>/.nexus/steering/* ./.nexus/steering/
+cp -r path/to/.../<bundle>/.nexus/hooks/*    ./.nexus/hooks/
+```
 
-## 📝 Requirements
+## What's in a bundle
 
-* Visual Studio Code v1.80.0 or higher.
-* Node.js and NPM (for workspace command execution and auto-healing).
+Each bundle is a directory containing:
 
-## 🔒 Security & Privacy
+```
+<bundle-name>/
+├── README.md             — what this bundle does, what to customise
+└── .nexus/
+    ├── steering/
+    │   ├── product.md    — domain context (often a placeholder)
+    │   ├── tech.md       — language / framework / discipline rules
+    │   └── structure.md  — folder layout + ## Exclude paths
+    └── hooks/
+        └── *.md          — agent hooks (frontmatter + prompt body)
+```
 
-NexusCode is designed to work with local, privacy-first LLMs. When using endpoints like LM Studio or Ollama, your codebase never leaves your local machine.
+The `.nexus/` subtree is what gets copied into the user's project.
+The README and the wrapping directory are documentation, not
+distributed.
+
+## Authoring your own bundle
+
+Steering files use the conventions documented in NexusCode's main
+docs. Briefly:
+
+- **`## Applies to`** — bullet list of path prefixes. When present,
+  the steering file ONLY applies to tasks whose target file matches
+  one of the prefixes. When absent, the file applies globally.
+- **`## Exclude paths`** — bullet list of substring patterns.
+  Matching paths are filtered out of the agent's context-picker.
+- **HTML comments** are stripped before injection — use them
+  liberally for in-file authoring notes that shouldn't reach the
+  agent.
+
+Hooks use YAML frontmatter:
+
+```yaml
+---
+name: My hook
+description: One-line description
+trigger:
+  type: onFileSave    # or onCommand or onSchedule
+  pattern: "src/**/*.ts"  # for onFileSave
+  # commandId: my-cmd     # for onCommand
+  # everySeconds: 3600    # for onSchedule (min 60)
+enabled: true
+---
+```
+
+Below the frontmatter, the prompt body has access to template
+variables: `{{workspaceRoot}}`, `{{filePath}}`, `{{fileContent}}`,
+`{{triggeredAt}}`, `{{triggerType}}`.
+
+## Why "Powers" as plain repos, not a registry
+
+The roadmap considered building a Powers store with discovery,
+ratings, install flow. That's a year of work for benefits a registry
+brings only at scale. Plain Git directories are:
+
+- Reviewable as PRs
+- Diffable across versions
+- Forkable for org-specific adjustments
+- Compatible with any code-review workflow you already have
+
+When the ecosystem grows past three bundles, we'll revisit. For now,
+Markdown wins.

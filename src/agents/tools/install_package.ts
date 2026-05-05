@@ -37,10 +37,10 @@ async function fileExists(workspaceRoot: string, name: string): Promise<boolean>
 }
 
 async function detectPackageManager(workspaceRoot: string): Promise<'npm' | 'pip' | 'cargo' | null> {
-    if (await fileExists(workspaceRoot, 'package.json')) return 'npm';
-    if (await fileExists(workspaceRoot, 'Cargo.toml')) return 'cargo';
-    if (await fileExists(workspaceRoot, 'requirements.txt')) return 'pip';
-    if (await fileExists(workspaceRoot, 'pyproject.toml')) return 'pip';
+    if (await fileExists(workspaceRoot, 'package.json')) { return 'npm'; }
+    if (await fileExists(workspaceRoot, 'Cargo.toml')) { return 'cargo'; }
+    if (await fileExists(workspaceRoot, 'requirements.txt')) { return 'pip'; }
+    if (await fileExists(workspaceRoot, 'pyproject.toml')) { return 'pip'; }
     return null;
 }
 

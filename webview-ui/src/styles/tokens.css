@@ -1,0 +1,207 @@
+/* webview-ui/src/styles/tokens.css
+ *
+ * Single source of truth for the NexusCode design system.
+ *
+ * Three layers:
+ *
+ *   1. VS Code theme bridge — uses var(--vscode-*) so we inherit the
+ *      user's editor theme. Falls back to NexusCode-brand defaults
+ *      when running standalone (CLI demo, marketing screenshots).
+ *
+ *   2. NexusCode semantic tokens — `--nx-*`. Components reference
+ *      these, never the raw VS Code vars. This is the abstraction
+ *      that lets us swap themes without touching components.
+ *
+ *   3. Tailwind v4 @theme — exposes the semantic tokens as utility
+ *      classes (`bg-surface-base`, `text-text-primary`,
+ *      `border-border-strong`). Lives in globals.css, not here.
+ *
+ * Architecture decision: dark mode is the headline. Compliance-
+ * conscious developers default to dark; institutional buyers expect
+ * "real software is dark." Light mode exists for accessibility and
+ * for screenshots that go into compliance reports.
+ *
+ * The unforgettable design element is the security-posture strip —
+ * persistent at the top of the workspace, always showing which
+ * gates are active. That's why we have a dedicated `--nx-status-*`
+ * ramp — those colors only ever appear in security/audit contexts
+ * so the visual language stays consistent.
+ */
+
+/* ─── Layer 1: VS Code bridge ──────────────────────────────────── */
+
+:root {
+  /* Map VS Code theme vars with brand fallbacks. The fallbacks are
+     calibrated so a standalone render (no VS Code) produces a
+     defensible, unsigned NexusCode dark theme. */
+  --nx-vscode-fg:           var(--vscode-foreground, #e6e6e6);
+  --nx-vscode-bg:           var(--vscode-editor-background, #0b0d10);
+  --nx-vscode-bg-side:      var(--vscode-sideBar-background, #0d1014);
+  --nx-vscode-bg-input:     var(--vscode-input-background, #1a1d21);
+  --nx-vscode-border:       var(--vscode-input-border, #2a2e34);
+  --nx-vscode-accent:       var(--vscode-button-background, #3b82f6);
+  --nx-vscode-accent-fg:    var(--vscode-button-foreground, #ffffff);
+  --nx-vscode-error:        var(--vscode-errorForeground, #ef4444);
+  --nx-vscode-warn:         var(--vscode-editorWarning-foreground, #f59e0b);
+  --nx-vscode-success:      var(--vscode-debugIcon-startForeground, #10b981);
+  --nx-vscode-link:         var(--vscode-textLink-foreground, #60a5fa);
+}
+
+/* ─── Layer 2: NexusCode semantic tokens ───────────────────────── */
+
+:root {
+  /* SURFACES — three levels of elevation. We deliberately don't go
+     above three; more elevation tiers create indecision about which
+     surface to use. */
+  --nx-surface-base:    var(--nx-vscode-bg);          /* page bg */
+  --nx-surface-raised:  var(--nx-vscode-bg-side);     /* panels, cards */
+  --nx-surface-sunken:  var(--nx-vscode-bg-input);    /* inputs, code blocks */
+  --nx-surface-overlay: rgba(0, 0, 0, 0.55);          /* modal backdrop */
+
+  /* TEXT — primary for body, secondary for labels, tertiary for
+     meta/timestamps, inverse for buttons on accent backgrounds. */
+  --nx-text-primary:    var(--nx-vscode-fg);
+  --nx-text-secondary:  color-mix(in oklab, var(--nx-vscode-fg) 72%, transparent);
+  --nx-text-tertiary:   color-mix(in oklab, var(--nx-vscode-fg) 48%, transparent);
+  --nx-text-inverse:    var(--nx-vscode-accent-fg);
+  --nx-text-link:       var(--nx-vscode-link);
+
+  /* BORDERS — subtle for default, strong for emphasis, focus for
+     keyboard navigation. We use color-mix so borders look right
+     against any user theme without hardcoding alpha. */
+  --nx-border-subtle:   color-mix(in oklab, var(--nx-vscode-fg) 12%, transparent);
+  --nx-border-default:  color-mix(in oklab, var(--nx-vscode-fg) 18%, transparent);
+  --nx-border-strong:   color-mix(in oklab, var(--nx-vscode-fg) 28%, transparent);
+  --nx-border-focus:    var(--nx-vscode-accent);
+
+  /* ACCENT — the single confident color. We don't have a secondary
+     accent; we have status colors instead. Keeping accent use
+     narrow keeps the brand identity strong. */
+  --nx-accent:          var(--nx-vscode-accent);
+  --nx-accent-hover:    color-mix(in oklab, var(--nx-vscode-accent) 88%, white);
+  --nx-accent-soft:     color-mix(in oklab, var(--nx-vscode-accent) 18%, var(--nx-surface-base));
+  --nx-accent-fg:       var(--nx-vscode-accent-fg);
+
+  /* STATUS COLORS — used ONLY in security/audit/state contexts so
+     they retain semantic weight. Don't reach for these for emphasis;
+     use them when they mean what they say. */
+  --nx-status-secure:   #10b981;   /* audit chain valid, gates active */
+  --nx-status-pending:  #f59e0b;   /* awaiting approval, gate degraded */
+  --nx-status-blocked:  #ef4444;   /* denied, gate offline, error */
+  --nx-status-info:     #60a5fa;   /* informational, neutral state */
+  --nx-status-running:  #a78bfa;   /* tool executing right now */
+
+  /* SOFT BACKGROUNDS for status pills/cards — same hue, low opacity.
+     These work in both light and dark modes via color-mix. */
+  --nx-status-secure-bg:  color-mix(in oklab, #10b981 14%, transparent);
+  --nx-status-pending-bg: color-mix(in oklab, #f59e0b 14%, transparent);
+  --nx-status-blocked-bg: color-mix(in oklab, #ef4444 14%, transparent);
+  --nx-status-info-bg:    color-mix(in oklab, #60a5fa 14%, transparent);
+  --nx-status-running-bg: color-mix(in oklab, #a78bfa 14%, transparent);
+
+  /* TYPOGRAPHY — system stack, calibrated for institutional look on
+     macOS, Windows, and Linux. CSP blocks remote font loading and
+     bundling IBM Plex Sans adds ~200KB; the system stack reads
+     professional enough on its own. To add IBM Plex Sans later:
+     drop the WOFF2 files in webview-ui/public/fonts/, add a
+     @font-face block in this file, and prepend "IBM Plex Sans"
+     to the stack below.
+
+     CJK: PingFang SC on macOS, Microsoft YaHei on Windows. Both are
+     system defaults in their ecosystems and read as institutional. */
+  --nx-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "微软雅黑", system-ui, sans-serif;
+  --nx-font-mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* TYPE SCALE — restrained. We have 6 sizes total. Adding more
+     creates inconsistency. Compliance UIs benefit from smaller text
+     than consumer apps because users read carefully and want density. */
+  --nx-text-xs:   11px;   /* metadata, timestamps */
+  --nx-text-sm:   12px;   /* secondary body, labels */
+  --nx-text-md:   13px;   /* primary body — note: SMALLER than web norm */
+  --nx-text-lg:   15px;   /* card titles */
+  --nx-text-xl:   18px;   /* section headers */
+  --nx-text-2xl:  22px;   /* page-level (rare) */
+
+  --nx-leading-tight:  1.3;
+  --nx-leading-normal: 1.5;
+  --nx-leading-relaxed: 1.65;
+
+  /* SPACING — 4px base. Standard scale. */
+  --nx-space-1: 4px;
+  --nx-space-2: 8px;
+  --nx-space-3: 12px;
+  --nx-space-4: 16px;
+  --nx-space-5: 20px;
+  --nx-space-6: 24px;
+  --nx-space-8: 32px;
+  --nx-space-10: 40px;
+  --nx-space-12: 48px;
+
+  /* RADII — small for inputs and pills, medium for cards, none for
+     surfaces flush with the edge. We deliberately don't use large
+     radii; pillowy corners read consumer, not institutional. */
+  --nx-radius-xs:   3px;    /* inline pills, badges */
+  --nx-radius-sm:   4px;    /* buttons, inputs */
+  --nx-radius-md:   6px;    /* cards, dialogs */
+  --nx-radius-lg:   8px;    /* large containers (rare) */
+  --nx-radius-pill: 999px;  /* status pills */
+
+  /* MOTION — functional, not celebratory. 120ms is the audit-log
+     value: fast enough to feel responsive, slow enough that the
+     state change is perceived rather than missed. */
+  --nx-motion-fast:   90ms;
+  --nx-motion-base:   120ms;
+  --nx-motion-slow:   200ms;
+  --nx-ease:          cubic-bezier(0.2, 0, 0.13, 1);
+
+  /* SHADOWS — subtle and only on the highest elevation (popovers,
+     dropdowns). Cards don't have shadows; they have borders.
+     Shadows on every card is a 2018 design tic. */
+  --nx-shadow-sm: 0 1px 2px rgba(0,0,0,0.20);
+  --nx-shadow-md: 0 4px 12px rgba(0,0,0,0.32);
+  --nx-shadow-lg: 0 12px 32px rgba(0,0,0,0.42);
+
+  /* ICON SIZE — 16px is the institutional standard. Don't use
+     larger icons for emphasis; use color or weight instead. */
+  --nx-icon-sm: 14px;
+  --nx-icon-md: 16px;
+  --nx-icon-lg: 20px;
+}
+
+/* ─── Light theme override ──────────────────────────────────────
+   When VS Code is in a light theme, the bridge variables flip
+   automatically. We just override the brand fallbacks here so a
+   standalone render in light mode also looks correct. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-nx-theme="dark"]) {
+    --nx-vscode-fg:        var(--vscode-foreground, #1f2328);
+    --nx-vscode-bg:        var(--vscode-editor-background, #ffffff);
+    --nx-vscode-bg-side:   var(--vscode-sideBar-background, #f6f7f8);
+    --nx-vscode-bg-input:  var(--vscode-input-background, #ffffff);
+    --nx-vscode-border:    var(--vscode-input-border, #d8dde3);
+    --nx-shadow-sm: 0 1px 2px rgba(15,23,42,0.06);
+    --nx-shadow-md: 0 4px 12px rgba(15,23,42,0.10);
+    --nx-shadow-lg: 0 12px 32px rgba(15,23,42,0.14);
+  }
+}
+
+/* Manual override (for users who want light in dark VS Code or vice
+   versa). Settings UI sets [data-nx-theme] on <html>. */
+[data-nx-theme="light"] {
+  --nx-vscode-fg:        #1f2328;
+  --nx-vscode-bg:        #ffffff;
+  --nx-vscode-bg-side:   #f6f7f8;
+  --nx-vscode-bg-input:  #ffffff;
+  --nx-vscode-border:    #d8dde3;
+  --nx-shadow-sm: 0 1px 2px rgba(15,23,42,0.06);
+  --nx-shadow-md: 0 4px 12px rgba(15,23,42,0.10);
+  --nx-shadow-lg: 0 12px 32px rgba(15,23,42,0.14);
+}
+
+[data-nx-theme="dark"] {
+  --nx-vscode-fg:        #e6e6e6;
+  --nx-vscode-bg:        #0b0d10;
+  --nx-vscode-bg-side:   #0d1014;
+  --nx-vscode-bg-input:  #1a1d21;
+  --nx-vscode-border:    #2a2e34;
+}

@@ -46,6 +46,23 @@ export interface ParsedTask {
     file?: string;
     /** Status derived from the checkbox marker. */
     status: TaskStatus;
+    /**
+     * P1.2 deferred-infra: task IDs this task depends on, parsed from
+     * the `dependsOn` attribute on the <task> tag. The PlannerAgent's
+     * markup contract has carried this attribute since the spec was
+     * written, but downstream code wasn't extracting it. Empty array
+     * if `dependsOn="none"`, the attribute is absent, or it parses to
+     * a non-list value.
+     *
+     * Format on the wire: comma-separated task IDs.
+     *   <task id="TASK-003" dependsOn="TASK-001,TASK-002">
+     *
+     * The strings here are raw IDs; resolving them to ParsedTask
+     * objects (and detecting unknown / cyclic references) lives in
+     * `topologicalOrder()` below — separation of concerns: the parser
+     * captures, the orderer validates.
+     */
+    dependencies: string[];
 }
 
 const STATUS_TO_MARKER: Record<TaskStatus, string> = {
@@ -132,7 +149,7 @@ export class TaskTracker {
         //   [ ] Plain task no leading marker
         const checkRe = /^\s*(?:\d+\.\s+|[-*]\s+)?\[([ xX!])\]\s*(?:\*\*([^*]+?)\*\*|([^(\n]+?))(?:\s*\(File:\s*`([^`]+)`\))?\s*$/;
 
-        let pendingTag: { id?: string; file?: string } | null = null;
+        let pendingTag: { id?: string; file?: string; dependencies: string[] } | null = null;
 
         for (const line of lines) {
             const tagMatch = line.match(tagRe);
@@ -160,6 +177,7 @@ export class TaskTracker {
             const taskRecord: ParsedTask = {
                 description,
                 status: MARKER_TO_STATUS[marker] ?? 'pending',
+                dependencies: pendingTag?.dependencies ?? [],
             };
             if (pendingTag?.id !== undefined) {
                 taskRecord.id = pendingTag.id;
@@ -230,8 +248,8 @@ export class TaskTracker {
         }
     }
 
-    private static parseTaskTagAttrs(attrs: string): { id?: string; file?: string } {
-        const out: { id?: string; file?: string } = {};
+    private static parseTaskTagAttrs(attrs: string): { id?: string; file?: string; dependencies: string[] } {
+        const out: { id?: string; file?: string; dependencies: string[] } = { dependencies: [] };
         const idM = attrs.match(/\bid="([^"]+)"/i);
         if (idM && idM[1] !== undefined) {
             out.id = idM[1];
@@ -240,6 +258,221 @@ export class TaskTracker {
         if (fileM && fileM[1] !== undefined) {
             out.file = fileM[1];
         }
+        // P1.2 deferred-infra: parse dependsOn. The conventional
+        // value for "no dependencies" is the literal string "none";
+        // missing attribute is also no-deps. Anything else is a
+        // comma-separated list of task IDs.
+        const depM = attrs.match(/\bdependsOn="([^"]+)"/i);
+        if (depM && depM[1] !== undefined) {
+            const raw = depM[1].trim();
+            if (raw && raw.toLowerCase() !== 'none') {
+                out.dependencies = raw
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter((s) => s.length > 0);
+            }
+        }
         return out;
     }
+}
+
+// ─── Topological ordering (cross-task dependency awareness) ────────────────
+//
+// The PlannerAgent emits tasks with optional `dependsOn` declarations.
+// Until now those declarations were silently dropped at parse time —
+// this section makes them queryable.
+//
+// What lives here:
+//   - topologicalOrder(): sort tasks so all dependencies precede their
+//     dependents. Surfaces cycles + dangling references as data, never
+//     throws.
+//   - findDependencyIssues(): pure validator; returns a structured
+//     report without producing an order. Used by UI / linting paths
+//     that want to flag bad plans without committing to an execution
+//     order.
+//
+// What does NOT live here:
+//   - Any LLM prompt tuning. The PlannerAgent prompt that asks the
+//     model to emit `dependsOn` is the part that needs real fixture
+//     iteration. This file is the data side of that contract; it
+//     starts paying off the instant the planner emits anything other
+//     than `dependsOn="none"`.
+//   - Any execution-side use. Coordinator / TaskRunner integration
+//     comes in a follow-up PR once the planner emits dependencies
+//     reliably enough to trust.
+
+export interface DependencyIssue {
+    /** Task whose dependsOn list contains the problem. */
+    taskId: string;
+    /** What's wrong with the declaration. */
+    kind: 'unknown_id' | 'cycle' | 'self_reference';
+    /** For 'unknown_id': the ID that wasn't found.
+     *  For 'cycle': the chain (e.g. ['TASK-001', 'TASK-002', 'TASK-001']).
+     *  For 'self_reference': the offending self-id. */
+    detail: string | string[];
+}
+
+export interface TopologicalResult {
+    /** Tasks in execution-safe order, OR the input order if there
+     *  were issues that prevented a valid sort. Always returns SOME
+     *  order so callers can render the list even on a bad plan. */
+    ordered: ParsedTask[];
+    /** Validation findings. Empty array means a clean DAG. */
+    issues: DependencyIssue[];
+}
+
+/**
+ * Topologically sort tasks by their declared dependencies.
+ *
+ * Tasks without an `id` or with empty `dependencies` are treated as
+ * roots. Tasks whose deps reference an unknown id are still included
+ * in the output (in their original relative position) and the issue
+ * is surfaced via `issues`. Cycles are detected and broken
+ * deterministically — every cycle entry is reported as an issue and
+ * the participating tasks are emitted in their original input order.
+ *
+ * Pure function. Does not throw. Does not mutate input.
+ */
+export function topologicalOrder(tasks: readonly ParsedTask[]): TopologicalResult {
+    const issues: DependencyIssue[] = [];
+
+    // Build id → task index. Tasks without ids can't be referenced by
+    // other tasks — that's fine, they just won't appear in any
+    // dependency graph.
+    const idToTask = new Map<string, ParsedTask>();
+    for (const t of tasks) {
+        if (t.id) {
+            idToTask.set(t.id, t);
+        }
+    }
+
+    // Stage 1: find unknown / self references. These don't break the
+    // sort — we just drop them from the dependency graph and report.
+    const cleanedDeps = new Map<ParsedTask, string[]>();
+    for (const t of tasks) {
+        const deps: string[] = [];
+        for (const depId of t.dependencies) {
+            if (t.id && depId === t.id) {
+                issues.push({ taskId: t.id, kind: 'self_reference', detail: depId });
+                continue;
+            }
+            if (!idToTask.has(depId)) {
+                issues.push({
+                    taskId: t.id ?? `(unnamed: "${t.description}")`,
+                    kind: 'unknown_id',
+                    detail: depId,
+                });
+                continue;
+            }
+            deps.push(depId);
+        }
+        cleanedDeps.set(t, deps);
+    }
+
+    // Stage 2: Kahn's algorithm. Stable iteration order over `tasks`
+    // means ties (multiple tasks with no remaining deps) are emitted
+    // in input order — important so the UI sees a deterministic
+    // result on every parse.
+    const indegree = new Map<ParsedTask, number>();
+    const dependents = new Map<ParsedTask, ParsedTask[]>();
+    for (const t of tasks) {
+        indegree.set(t, (cleanedDeps.get(t) ?? []).length);
+        dependents.set(t, []);
+    }
+    for (const t of tasks) {
+        for (const depId of cleanedDeps.get(t) ?? []) {
+            const dep = idToTask.get(depId);
+            if (dep) {
+                dependents.get(dep)!.push(t);
+            }
+        }
+    }
+
+    const ordered: ParsedTask[] = [];
+    const ready: ParsedTask[] = [];
+    for (const t of tasks) {
+        if ((indegree.get(t) ?? 0) === 0) { ready.push(t); }
+    }
+
+    while (ready.length > 0) {
+        const next = ready.shift()!;
+        ordered.push(next);
+        for (const dep of dependents.get(next) ?? []) {
+            const newDeg = (indegree.get(dep) ?? 0) - 1;
+            indegree.set(dep, newDeg);
+            if (newDeg === 0) { ready.push(dep); }
+        }
+    }
+
+    // Stage 3: cycle detection. Anything not in `ordered` after
+    // Kahn's is part of a cycle. Walk the residual subgraph to
+    // recover one representative cycle per SCC.
+    if (ordered.length < tasks.length) {
+        const remaining = tasks.filter((t) => !ordered.includes(t));
+        const reportedInCycle = new Set<ParsedTask>();
+        for (const start of remaining) {
+            if (reportedInCycle.has(start)) { continue; }
+            const cycle = findCycleFrom(start, idToTask, cleanedDeps);
+            if (cycle && cycle.length > 0) {
+                for (const t of cycle) { reportedInCycle.add(t); }
+                issues.push({
+                    taskId: cycle[0]!.id ?? cycle[0]!.description,
+                    kind: 'cycle',
+                    detail: cycle.map((t) => t.id ?? t.description),
+                });
+            }
+        }
+        // Emit the cycle members in their original input order so the
+        // caller sees a complete list. Ordering inside a cycle is
+        // ambiguous by definition; input order is the least surprising.
+        for (const t of remaining) { ordered.push(t); }
+    }
+
+    return { ordered, issues };
+}
+
+/**
+ * Lighter-weight validator. Same checks as topologicalOrder but
+ * returns issues without producing an order. Useful for UI lint
+ * paths that don't need to commit to an execution sequence.
+ */
+export function findDependencyIssues(tasks: readonly ParsedTask[]): DependencyIssue[] {
+    return topologicalOrder(tasks).issues;
+}
+
+/** Internal: DFS from `start` to find a cycle it participates in. */
+function findCycleFrom(
+    start: ParsedTask,
+    idToTask: Map<string, ParsedTask>,
+    cleanedDeps: Map<ParsedTask, string[]>
+): ParsedTask[] | null {
+    // DFS with a path stack. When we hit a node already on the stack,
+    // slice from its first occurrence to the current end — that's the
+    // cycle.
+    const stack: ParsedTask[] = [];
+    const inStack = new Set<ParsedTask>();
+    const seen = new Set<ParsedTask>();
+
+    function dfs(node: ParsedTask): ParsedTask[] | null {
+        stack.push(node);
+        inStack.add(node);
+        seen.add(node);
+        for (const depId of cleanedDeps.get(node) ?? []) {
+            const dep = idToTask.get(depId);
+            if (!dep) { continue; }
+            if (inStack.has(dep)) {
+                const i = stack.indexOf(dep);
+                return stack.slice(i).concat([dep]);
+            }
+            if (!seen.has(dep)) {
+                const found = dfs(dep);
+                if (found) { return found; }
+            }
+        }
+        stack.pop();
+        inStack.delete(node);
+        return null;
+    }
+
+    return dfs(start);
 }

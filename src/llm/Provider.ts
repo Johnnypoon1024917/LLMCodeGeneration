@@ -83,12 +83,31 @@ export interface ToolCall {
  * string; the null carries meaning ("model deliberately produced no
  * text"). Callers wanting a string default via `content ?? ''`.
  *
+ * V2.0: `reasoning_content` carries the model's chain-of-thought when
+ * the endpoint is a thinking-mode model (Qwen 3.6, DeepSeek R1, etc.).
+ * MUST be passed back into subsequent requests as part of the messages
+ * array for Thinking Preservation to work — Qwen issue #26 documented
+ * that dropping `reasoning_content` from history causes reasoning to
+ * leak into `content` on the next turn (visible `</think>` tags). Our
+ * Provider layer normalizes the field; the agent loop's
+ * `messages.push(aiMessage)` carries it forward via standard
+ * JSON.stringify behavior.
+ *
  * Returned from `chatCompletion()` — Component 2A's new method.
  */
 export interface AssistantMessage {
     role: 'assistant';
     content: string | null;
     tool_calls?: ToolCall[];
+    /**
+     * Model's chain-of-thought (Qwen 3.6 / DeepSeek R1 / etc.) when
+     * the endpoint runs in thinking mode. Optional — non-thinking
+     * models and older endpoints never set it.
+     *
+     * Whether or not callers display this field, it MUST be preserved
+     * across conversation turns — see the docstring above.
+     */
+    reasoning_content?: string;
 }
 
 /**
@@ -204,6 +223,49 @@ export interface CompletionOptions {
      * is absent or empty.
      */
     toolChoice?: ToolChoice;
+    /**
+     * V2.0: enable thinking mode on Qwen 3.6 / DeepSeek R1 / similar.
+     * Routed via `extra_body.chat_template_kwargs.enable_thinking` in
+     * the request body when set; non-Qwen endpoints ignore the field
+     * (it sits inside `extra_body` which is opaque to OpenAI's spec).
+     *
+     * When undefined, no `enable_thinking` flag is emitted — the
+     * endpoint's default applies (Qwen 3.6 defaults to `true`, older
+     * models ignore the flag entirely).
+     */
+    enableThinking?: boolean;
+    /**
+     * V2.0: enable Thinking Preservation on Qwen 3.6. Routed via
+     * `extra_body.chat_template_kwargs.preserve_thinking`. When true,
+     * the inference server keeps reasoning context across turns —
+     * critical for long autonomous sessions because it (a) reduces
+     * redundant reasoning on every turn, (b) improves KV cache reuse,
+     * (c) gives the agent consistency across multi-step tool loops.
+     *
+     * REQUIRES that callers pass `reasoning_content` from previous
+     * AssistantMessage responses back into the messages array. The
+     * Provider layer surfaces `reasoning_content` on AssistantMessage
+     * (see Provider.ts); the agent loop's `messages.push(aiMessage)`
+     * pattern carries it forward automatically.
+     */
+    preserveThinking?: boolean;
+    /**
+     * V2.0: nucleus sampling cutoff. Qwen 3.6 thinking mode wants
+     * top_p=0.95; non-thinking wants 0.8. Older callers can ignore.
+     */
+    topP?: number;
+    /**
+     * V2.0: top-k sampling. Qwen 3.6 recommends top_k=20 in thinking
+     * mode. Routed via `extra_body.top_k` because it's not in the
+     * OpenAI spec.
+     */
+    topK?: number;
+    /**
+     * V2.0: presence penalty. Qwen 3.6 recommends 0.0 in thinking
+     * mode and 1.5 in non-thinking mode (the latter prevents
+     * repetitive output on shorter answers).
+     */
+    presencePenalty?: number;
 }
 
 /**

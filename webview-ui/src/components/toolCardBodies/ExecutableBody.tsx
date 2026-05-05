@@ -1,7 +1,7 @@
 // webview-ui/src/components/toolCardBodies/ExecutableBody.tsx
 //
-// Component 2B-4c: body strategy for "executable" tools — the four
-// shell-running tools share this body:
+// Body strategy for "executable" tools — the four shell-running tools
+// share this body:
 //
 //   - bash_exec       → arbitrary shell command
 //   - run_tests       → test runner (jest / pytest / npm test)
@@ -9,113 +9,83 @@
 //   - git_commit      → git commit / git push
 //
 // All four go through src/agents/tools/_execHelper.ts → runCommand,
-// which produces a `bash_output` UI payload (stdout, stderr,
-// exitCode, durationMs) and emits chronologically-interleaved
-// `toolCallOutput` events as the subprocess runs (Q7=7B streaming
-// deltas). The events accumulate into `state.outputBuffer` via
-// applyToolEvent's reducer.
+// which produces a `bash_output` UI payload (stdout, stderr, exitCode,
+// durationMs) and emits chronologically-interleaved `toolCallOutput`
+// events as the subprocess runs. The events accumulate into
+// `state.outputBuffer` via applyToolEvent's reducer.
 //
 // Rendering strategy:
+//   - Status === 'running'  → outputBuffer in a terminal-style <pre>.
+//                             "(running…)" placeholder if no output yet.
+//   - Status === 'success'  → same <pre>, plus completion meta strip
+//                             (exit code chip + duration). Auto-scrolled
+//                             to the end so the user lands on the tail.
+//   - Status === 'error' or 'cancelled' → same <pre> with red/grey chip
+//                             on the meta strip.
 //
-//   - Status === 'running'  → show outputBuffer in a terminal-style
-//                             <pre>. Cursor blinks in the empty case.
-//   - Status === 'success'  → same <pre>, but with completion meta
-//                             (exit code, duration). Auto-scrolled
-//                             to the end so the user lands on the
-//                             tail of the output.
-//   - Status === 'error' or 'cancelled' → same <pre> with red border
-//                             on the meta strip. exit code shown
-//                             prominently.
+// Output is rendered from outputBuffer (chronological order preserved)
+// rather than payload.stdout + payload.stderr (which would lose
+// ordering). Synthesizes from payload only when buffer is empty —
+// rare, indicates events were dropped.
 //
-// Why we render outputBuffer directly (not payload.stdout +
-// payload.stderr): the streaming chunks ARE chronologically
-// interleaved (runCommand's handleChunk emits in arrival order),
-// which is what a real terminal shows. Splitting into stdout-then-
-// stderr loses that ordering. The payload's stdout/stderr fields
-// are still useful for debugging — exposed via a "View streams
-// separately" details toggle when complete.
-//
-// Edge cases:
-//
-//   - Empty output (no chunks ever arrived AND payload empty):
-//     "(no output)" placeholder.
-//   - outputBuffer empty but payload has content (rare — events
-//     dropped/lost): fall back to synthesizing a stream from
-//     payload.stdout + payload.stderr.
-//   - Very long output: native browser scrolling handles it. The
-//     <pre> has max-height; user can scroll.
-//
-// Reuses CSS:
-//   - .command-card-output, .command-card-empty (from existing
-//     CommandCard styling — terminal-y look for output blocks)
-//   - .tool-call-info-meta, .tool-call-info-meta-item (from 2B-4a)
-//   - .tool-call-card-empty, .tool-call-card-error (from 2B-4a)
-//
-// Adds CSS:
-//   - .tool-call-exec-* family for the meta + exit code chips
+// PR 2.2 (Sprint 2): visual overhaul. Chrome (meta, error) now uses
+// shared body atoms + design tokens. Exit-code chip rewritten using
+// the Pill primitive for consistency with the rest of the redesign.
+// Terminal output <pre> intentionally keeps its dark GitHub-style
+// background — that's the universal developer expectation for
+// command output. resolveOutputText / useAutoScrollOnUpdate /
+// formatDuration / ExitCodeChip logic preserved.
 
 import React, { useEffect, useRef } from 'react';
 import {
-    AlertCircle as IconAlert,
     CheckCircle2 as IconSuccess,
     XCircle as IconFail,
     SlashSquare as IconCancelled,
     Clock as IconClock
 } from 'lucide-react';
 import type { ToolCallState, ToolResult } from '../../toolEvents';
+import { cn } from '../ui/cn';
+import { Pill } from '../ui/Pill';
+import { BodyContainer, BodyError } from './shared';
 
 export interface ExecutableBodyProps {
     state: ToolCallState;
 }
 
 /**
- * Auto-scroll a ref'd element to the bottom whenever its
- * dependency value changes. Used to keep the output `<pre>` pinned
- * to the latest line as new chunks stream in. Without this, the
- * user has to manually scroll to follow streaming output.
+ * Auto-scroll a ref'd element to the bottom whenever its dependency
+ * value changes. Used to keep the output `<pre>` pinned to the latest
+ * line as new chunks stream in. Without this, the user has to manually
+ * scroll to follow streaming output.
  *
- * Caveat: if the user has scrolled UP to read earlier output, we
- * shouldn't yank them back to the bottom on every chunk. Track the
- * user's intent: only auto-scroll if they were already at the
- * bottom (or near it) before the new content arrived.
+ * Caveat: if the user has scrolled UP to read earlier output, we don't
+ * yank them back to the bottom on every chunk. We only auto-scroll if
+ * the user was already at the bottom before the new content arrived.
  */
 function useAutoScrollOnUpdate(
     ref: React.RefObject<HTMLElement>,
     dep: string
 ): void {
-    // Track whether the user is currently pinned to the bottom.
-    // We update this on every dep change; if at the time of the
-    // update the user was at the bottom, we keep them there.
     const wasAtBottomRef = useRef(true);
 
     useEffect(() => {
         const el = ref.current;
-        if (!el) return;
-        // After the DOM updates with new content, decide based on
-        // the PRIOR pinned state: if the user was at the bottom
-        // before this update, scroll to the new bottom; otherwise
-        // leave them alone.
+        if (!el) { return; }
         if (wasAtBottomRef.current) {
             el.scrollTop = el.scrollHeight;
         }
-        // Now sample the new state for the NEXT update.
-        // Threshold of 12px allows tiny rounding from line-height
-        // calculations to still count as "at the bottom".
         const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
         wasAtBottomRef.current = distanceFromBottom < 12;
     }, [dep, ref]);
 }
 
 /**
- * Format duration as a human-readable string. Mirrors the helper
- * in ToolCallCard but inlined here to avoid circular import.
- *   < 1000ms   → "342ms"
- *   < 60000ms  → "4.2s"
- *   else       → "1m 23s"
+ * Format duration as a human-readable string. Mirrors the helper in
+ * ToolCallCard but inlined to avoid circular import.
  */
 function formatDuration(ms: number): string {
-    if (ms < 1000) return `${ms}ms`;
-    if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+    if (ms < 1000) { return `${ms}ms`; }
+    if (ms < 60_000) { return `${(ms / 1000).toFixed(1)}s`; }
     const m = Math.floor(ms / 60_000);
     const s = Math.floor((ms % 60_000) / 1000);
     return `${m}m ${s}s`;
@@ -123,68 +93,77 @@ function formatDuration(ms: number): string {
 
 export function ExecutableBody({ state }: ExecutableBodyProps): React.ReactElement {
     const preRef = useRef<HTMLPreElement>(null);
-
-    // Resolve the output text. While running, we always use the
-    // streamed outputBuffer. Once complete, prefer outputBuffer if
-    // we have any (chronological ordering preserved); fall back to
-    // payload-synthesized output if events were dropped.
     const outputText = resolveOutputText(state);
-
-    // Auto-scroll on every output change, but respect the user's
-    // current scroll position (see hook implementation).
     useAutoScrollOnUpdate(preRef, outputText);
 
-    // Error path — explicit error payload (e.g., spawn failed before
-    // runCommand could collect any output).
     if (state.result?.uiPayload.kind === 'error') {
-        return (
-            <div className="tool-call-card-error">
-                <IconAlert size={14} />
-                <span>{state.result.uiPayload.message}</span>
-            </div>
-        );
+        return <BodyError message={state.result.uiPayload.message} />;
     }
 
-    // Compute meta info: exit code (if completed), duration.
-    const isComplete = state.status === 'success' || state.status === 'error' || state.status === 'cancelled';
+    const isComplete =
+        state.status === 'success' ||
+        state.status === 'error' ||
+        state.status === 'cancelled';
     const bashPayload =
         state.result?.uiPayload.kind === 'bash_output'
             ? state.result.uiPayload
             : null;
 
     return (
-        <div className="tool-call-info-body">
+        <BodyContainer>
             <pre
                 ref={preRef}
-                className="command-card-output tool-call-exec-output"
                 tabIndex={0}
+                className={cn(
+                    'm-0 px-4 py-3',
+                    'font-mono text-xs leading-relaxed',
+                    'bg-[#0d1117] text-[#c9d1d9]',
+                    'whitespace-pre-wrap',
+                    'max-h-70 overflow-y-auto',
+                    'outline-none focus:ring-1 focus:ring-border-focus focus:ring-inset'
+                )}
             >
                 {outputText
                     ? outputText
-                    : <span className="command-card-empty">
-                        {state.status === 'running' ? '(running…)' : '(no output)'}
-                      </span>}
+                    : (
+                        <span className="text-[#8b949e] italic">
+                            {state.status === 'running' ? '(running…)' : '(no output)'}
+                        </span>
+                    )}
             </pre>
 
             {isComplete && (
-                <div className="tool-call-exec-meta" data-status={state.status}>
+                <div
+                    data-status={state.status}
+                    className={cn(
+                        'flex items-center gap-3',
+                        'px-4 py-2',
+                        'border-t border-border-subtle',
+                        'font-mono text-xs',
+                        // Tint the meta row when the run failed/was cancelled
+                        // so the eye is drawn to the result chip.
+                        state.status === 'error' && 'bg-status-blocked-bg/50 border-t-status-blocked/30',
+                        state.status === 'cancelled' && 'bg-surface-sunken'
+                    )}
+                >
                     <ExitCodeChip
                         status={state.status}
                         // exactOptionalPropertyTypes: spread only when defined.
-                        // bashPayload?.exitCode is `number | undefined`; spreading
-                        // an empty object when undefined matches the optional
-                        // prop type (`exitCode?: number`).
-                        {...(bashPayload?.exitCode !== undefined ? { exitCode: bashPayload.exitCode } : {})}
+                        {...(bashPayload?.exitCode !== undefined
+                            ? { exitCode: bashPayload.exitCode }
+                            : {})}
                     />
                     {(state.durationMs ?? bashPayload?.durationMs) !== undefined && (
-                        <span className="tool-call-info-meta-item tool-call-exec-duration">
+                        <span className="inline-flex items-center gap-1 text-text-tertiary tabular-nums">
                             <IconClock size={11} />
-                            <span>{formatDuration(state.durationMs ?? bashPayload!.durationMs)}</span>
+                            <span>
+                                {formatDuration(state.durationMs ?? bashPayload!.durationMs)}
+                            </span>
                         </span>
                     )}
                 </div>
             )}
-        </div>
+        </BodyContainer>
     );
 }
 
@@ -192,26 +171,22 @@ export function ExecutableBody({ state }: ExecutableBodyProps): React.ReactEleme
 
 /**
  * Choose the right text to render. Priority:
- *
  *   1. outputBuffer if non-empty (streamed chunks, chronological)
- *   2. payload's stdout + stderr concatenated (if completed and
- *      buffer is empty — rare, indicates events were lost)
+ *   2. payload's stdout + stderr concatenated (if completed and buffer
+ *      is empty — rare, indicates events were lost)
  *   3. empty string (caller renders a placeholder)
  *
- * The synthesized fallback explicitly LABELS the streams ("--- stdout ---"
- * etc.) because we've lost chronology and the user should know.
+ * The synthesized fallback explicitly LABELS the streams ("--- stderr ---")
+ * because chronology is lost and the user should know.
  */
 function resolveOutputText(state: ToolCallState): string {
-    if (state.outputBuffer) return state.outputBuffer;
+    if (state.outputBuffer) { return state.outputBuffer; }
     if (state.result?.uiPayload.kind === 'bash_output') {
         const p = state.result.uiPayload;
         const parts: string[] = [];
-        if (p.stdout) parts.push(p.stdout);
+        if (p.stdout) { parts.push(p.stdout); }
         if (p.stderr) {
-            // Label only when both streams have content — pure-stderr
-            // commands (e.g., `cmake --version`) shouldn't show a
-            // gratuitous "--- stderr ---" header.
-            if (p.stdout) parts.push('\n--- stderr ---\n');
+            if (p.stdout) { parts.push('\n--- stderr ---\n'); }
             parts.push(p.stderr);
         }
         return parts.join('');
@@ -220,15 +195,17 @@ function resolveOutputText(state: ToolCallState): string {
 }
 
 /**
- * Compact chip showing the exit code. Color-coded:
- *   - exit 0 + status='success' → green check + "exit 0"
- *   - exit !0 + status='error'  → red X + "exit N"
- *   - status='cancelled'        → grey slash + "cancelled"
+ * Compact chip showing the exit code. Uses the Pill primitive for
+ * visual consistency with the security strip and audit log.
  *
- * Why we don't infer status from exit code alone: a command can
- * exit 0 but the dispatch wrapper can still mark it as 'cancelled'
- * (e.g., the abort signal fired right as the process was wrapping up).
- * The status carries authority; exit code is just informational.
+ *   - status='success'   → secure pill, "exit 0" or "done"
+ *   - status='error'     → blocked pill, "exit N" or "failed"
+ *   - status='cancelled' → neutral pill, "cancelled"
+ *
+ * We don't infer status from exit code alone: a command can exit 0
+ * but the dispatch wrapper can still mark it as 'cancelled' (abort
+ * signal racing process completion). Status carries authority; exit
+ * code is informational.
  */
 function ExitCodeChip({
     status,
@@ -239,30 +216,27 @@ function ExitCodeChip({
 }): React.ReactElement {
     if (status === 'cancelled') {
         return (
-            <span className="tool-call-exec-chip tool-call-exec-chip-cancelled">
-                <IconCancelled size={11} />
-                <span>cancelled</span>
-            </span>
+            <Pill variant="neutral" className="font-mono">
+                <IconCancelled size={11} className="mr-1" />
+                cancelled
+            </Pill>
         );
     }
     if (status === 'error') {
         return (
-            <span className="tool-call-exec-chip tool-call-exec-chip-error">
-                <IconFail size={11} />
-                <span>{exitCode !== undefined ? `exit ${exitCode}` : 'failed'}</span>
-            </span>
+            <Pill variant="blocked" className="font-mono">
+                <IconFail size={11} className="mr-1" />
+                {exitCode !== undefined ? `exit ${exitCode}` : 'failed'}
+            </Pill>
         );
     }
-    // success
     return (
-        <span className="tool-call-exec-chip tool-call-exec-chip-success">
-            <IconSuccess size={11} />
-            <span>{exitCode !== undefined ? `exit ${exitCode}` : 'done'}</span>
-        </span>
+        <Pill variant="secure" className="font-mono">
+            <IconSuccess size={11} className="mr-1" />
+            {exitCode !== undefined ? `exit ${exitCode}` : 'done'}
+        </Pill>
     );
 }
 
-// Discourage unused-import warnings if a future refactor drops
-// references — keep the type imported because it's part of the
-// public contract.
+// Keep the type imported because it's part of the public contract.
 export type { ToolResult };

@@ -1,0 +1,120 @@
+{
+  "runId": "2026-05-02T15:36:49.656Z",
+  "gitSha": "unknown",
+  "fixtureCount": 6,
+  "results": [
+    {
+      "fixtureId": "001-node-fizzbuzz",
+      "mode": "interactive",
+      "status": "timeout",
+      "checksPassed": 0,
+      "checksTotal": 5,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json was created",
+        "file_exists: entry point exists",
+        "command: runs without crashing",
+        "command_output_contains: output includes \"FizzBuzz\" at line 15",
+        "command_output_contains: output includes \"Buzz\" at line 5"
+      ]
+    },
+    {
+      "fixtureId": "001-node-fizzbuzz",
+      "mode": "autopilot",
+      "status": "timeout",
+      "checksPassed": 0,
+      "checksTotal": 5,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json was created",
+        "file_exists: entry point exists",
+        "command: runs without crashing",
+        "command_output_contains: output includes \"FizzBuzz\" at line 15",
+        "command_output_contains: output includes \"Buzz\" at line 5"
+      ]
+    },
+    {
+      "fixtureId": "003-react-form-component",
+      "mode": "interactive",
+      "status": "timeout",
+      "checksPassed": 0,
+      "checksTotal": 8,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json with react and vitest",
+        "file_exists: ContactForm component file",
+        "file_exists: ContactForm test file",
+        "command: install succeeds",
+        "command: typecheck passes",
+        "command: tests pass",
+        "semantic: component handles in-flight submit state",
+        "semantic: tests cover error recovery"
+      ]
+    },
+    {
+      "fixtureId": "003-react-form-component",
+      "mode": "autopilot",
+      "status": "timeout",
+      "checksPassed": 0,
+      "checksTotal": 8,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json with react and vitest",
+        "file_exists: ContactForm component file",
+        "file_exists: ContactForm test file",
+        "command: install succeeds",
+        "command: typecheck passes",
+        "command: tests pass",
+        "semantic: component handles in-flight submit state",
+        "semantic: tests cover error recovery"
+      ]
+    },
+    {
+      "fixtureId": "002-express-validate-endpoint",
+      "mode": "interactive",
+      "status": "timeout",
+      "checksPassed": 0,
+      "checksTotal": 7,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json with express dependency",
+        "file_exists: tsconfig.json for typescript",
+        "command: install succeeds",
+        "command: typecheck passes",
+        "integration: rejects invalid email with 400",
+        "integration: accepts valid input with 201 + UUID",
+        "integration: rejects missing required field"
+      ]
+    },
+    {
+      "fixtureId": "002-express-validate-endpoint",
+      "mode": "autopilot",
+      "status": "timeout",
+      "checksPassed": 0,
+      "checksTotal": 7,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json with express dependency",
+        "file_exists: tsconfig.json for typescript",
+        "command: install succeeds",
+        "command: typecheck passes",
+        "integration: rejects invalid email with 400",
+        "integration: accepts valid input with 201 + UUID",
+        "integration: rejects missing required field"
+      ]
+    }
+  ],
+  "aggregates": {
+    "interactiveSuccessRate": 0,
+    "autopilotSuccessRate": 0,
+    "meanInterventionsInteractive": 0,
+    "meanInterventionsAutopilot": 0,
+    "completionRate": 0
+  }
+}

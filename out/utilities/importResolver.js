@@ -47,8 +47,9 @@ async function resolveMissingImports(editor) {
     const document = editor.document;
     const text = document.getText();
     const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders)
+    if (!workspaceFolders) {
         return;
+    }
     // Regex to find relative import paths (e.g., import { X } from '../types')
     const importRegex = /import\s+.*?\s+from\s+['"]([^'"]+)['"]/g;
     let match;
@@ -56,11 +57,13 @@ async function resolveMissingImports(editor) {
     let hasFixes = false;
     while ((match = importRegex.exec(text)) !== null) {
         const importPath = match[1];
-        if (importPath === undefined || match[0] === undefined)
+        if (importPath === undefined || match[0] === undefined) {
             continue;
+        }
         // Skip third-party node_modules (like 'react' or 'lodash')
-        if (!importPath.startsWith('.'))
+        if (!importPath.startsWith('.')) {
             continue;
+        }
         const currentDir = path.dirname(document.uri.fsPath);
         let absoluteTargetPath = path.resolve(currentDir, importPath);
         let targetUri = vscode.Uri.file(absoluteTargetPath);

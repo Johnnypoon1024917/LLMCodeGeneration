@@ -8,20 +8,25 @@ import { originalContentProvider } from './diffProvider';
 import { activateTerminalInterceptor } from './terminalInterceptor';
 import { ASTParser } from './utilities/astParser';
 import { HookManager } from './hooks/HookManager';
+import { McpManager } from './mcp/mcpManager';
 import { log } from './logger';
 import { setDeps } from './container';
 import { VSCodeConfigSource } from './adapters/VSCodeConfigSource';
 import { initI18n, t } from './i18n';
 import { AuditLog } from './audit/AuditLog';
+import { mark } from './diagnostics/startupTiming';
 
 export async function activate(context: vscode.ExtensionContext) {
+    mark('activate.start');
     log.info('LLMCodeGeneration is now active!');
     // Initialize the AST Parser on startup
     await ASTParser.init(context);
+    mark('activate.astParser.done');
 
     // Initialize i18n. Default to English; future versions may read this
     // from `nexuscode.locale` config and switch on activation.
     await initI18n('en');
+    mark('activate.i18n.done');
 
     // Initialize the audit logger for the active workspace, or a fallback
     // location (extension dir) if no workspace is open. Audit init reads
@@ -30,6 +35,7 @@ export async function activate(context: vscode.ExtensionContext) {
         ?? context.extensionUri.fsPath;
     const audit = new AuditLog(auditRoot);
     await audit.init();
+    mark('activate.audit.done');
 
     // Install runtime deps for the typed container. This must run BEFORE
     // any consumer code that calls getDeps() — at the start of activate().
@@ -41,6 +47,7 @@ export async function activate(context: vscode.ExtensionContext) {
         config: new VSCodeConfigSource('nexuscode'),
         audit
     });
+    mark('activate.deps.done');
 
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     context.subscriptions.push(
@@ -102,7 +109,7 @@ export async function activate(context: vscode.ExtensionContext) {
             });
 
             // showInputBox returns undefined when the user presses Esc
-            if (key === undefined) return;
+            if (key === undefined) { return; }
 
             if (key === '') {
                 await context.secrets.delete('nexuscode_apikey');
@@ -122,7 +129,7 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
         vscode.commands.registerCommand('nexuscode.inlineEdit', async () => {
             const editor = vscode.window.activeTextEditor;
-            if (!editor) return;
+            if (!editor) { return; }
 
             const selection = editor.document.getText(editor.selection);
             const filename = vscode.workspace.asRelativePath(editor.document.uri);
@@ -132,7 +139,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 placeHolder: "e.g., Extract this logic into a separate React component..."
             });
 
-            if (!userInput) return;
+            if (!userInput) { return; }
 
             const contextStr = selection ? `\n\`\`\`${editor.document.languageId} title="${filename}"\n${selection}\n\`\`\`\n` : "";
 
@@ -158,7 +165,7 @@ export async function activate(context: vscode.ExtensionContext) {
         // --- HIGHLIGHT / REVIEW COMMANDS ---
         vscode.commands.registerCommand('nexuscode.reviewCode', async () => {
             const editor = vscode.window.activeTextEditor;
-            if (!editor) return;
+            if (!editor) { return; }
             const selectedText = editor.document.getText(editor.selection);
             if (!selectedText) {
                 vscode.window.showWarningMessage(t("commands.highlight_code_to_review"));
@@ -169,7 +176,7 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
         vscode.commands.registerCommand('nexuscode.optimizeSelection', async () => {
             const editor = vscode.window.activeTextEditor;
-            if (!editor) return;
+            if (!editor) { return; }
             const selection = editor.document.getText(editor.selection);
             sidebarProvider._view?.webview.postMessage({ type: 'requestReview', code: selection });
             await vscode.commands.executeCommand('nexuscode.sidebar.focus');
@@ -226,12 +233,34 @@ export async function activate(context: vscode.ExtensionContext) {
     // We don't fail activation if no workspace is open — hooks just won't run.
     const folders = vscode.workspace.workspaceFolders;
     if (folders && folders.length > 0) {
-        HookManager.getInstance().start(context, folders[0]!.uri).catch(e => {
+        const hm = HookManager.getInstance();
+        // P1.4: wire the audit log so every fire is recorded. The
+        // emitter for chat-thread cards is wired later, in
+        // SidebarProvider, because the emitter's sink (postMessage)
+        // only exists once the webview is mounted.
+        hm.setAuditLog(audit);
+        hm.start(context, folders[0]!.uri).catch(e => {
             log.error('HookManager failed to start:', e);
         });
+
+        // P2.1: start the MCP manager. Loads .nexus/mcp-servers.json
+        // (if present), watches for changes, surfaces config errors
+        // and per-server status to the webview.
+        //
+        // Deliberately fire-and-forget — the initial config load is
+        // async and we don't want to delay extension activation. UI
+        // shows "loading" state until the manager fires its first
+        // notification.
+        try {
+            McpManager.getInstance().start(folders[0]!.uri);
+        } catch (e) {
+            log.error('McpManager failed to start:', e);
+        }
     }
+    mark('activate.done');
 }
 
 export function deactivate(): void {
     HookManager.getInstance().stop();
+    McpManager.getInstance().dispose();
 }

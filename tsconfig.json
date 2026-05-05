@@ -20,12 +20,13 @@
 		"noUncheckedIndexedAccess": true,
 		"exactOptionalPropertyTypes": true,
 		"noPropertyAccessFromIndexSignature": true,
-		"resolveJsonModule": true
+		"resolveJsonModule": true,
+		"skipLibCheck": true
 	},
     "exclude": [
         "node_modules",
         ".vscode-test",
         "webview-ui",
-        "src/test/unit"
+        "src/test"
     ]
 }

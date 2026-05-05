@@ -41,7 +41,8 @@ import type {
     ToolCallPayload,
     FileWritePayload,
     SpecEditPayload,
-    ConfigChangePayload
+    ConfigChangePayload,
+    HookFirePayload
 } from './types';
 import { GENESIS_HASH } from './types';
 
@@ -80,6 +81,23 @@ export class AuditLog {
     private initialized = false;
 
     /**
+     * Subscribers notified of every successfully-persisted record.
+     * Added in PR 2.4b. Use case: SidebarProvider forwards new records
+     * to the webview so the AuditLogPanel can render them in real time.
+     *
+     * Contract:
+     *   - Callback fires AFTER the record is written to disk. If the
+     *     write fails, no callback fires (consistent with the principle
+     *     that subscribers see what's in the JSONL — no false positives).
+     *   - Errors thrown by callbacks are caught and logged but don't
+     *     break the chain or affect other subscribers. A misbehaving
+     *     subscriber can't stall audit emission.
+     *   - Subscriptions are not persisted across restarts; subscribers
+     *     re-register on each extension activation.
+     */
+    private subscribers: Array<(record: AuditRecord) => void> = [];
+
+    /**
      * Construct an AuditLog bound to a workspace root.
      *
      * Does NOT initialize state from disk yet — call `init()` first
@@ -100,7 +118,7 @@ export class AuditLog {
      * hash. Idempotent — safe to call multiple times.
      */
     async init(): Promise<void> {
-        if (this.initialized) return;
+        if (this.initialized) { return; }
         try {
             await fs.mkdir(this.auditDir, { recursive: true });
             this.lastHash = await this.readLastHashFromDisk();
@@ -190,6 +208,27 @@ export class AuditLog {
     }
 
     /**
+     * P1.4: log a hook fire to the audit chain.
+     *
+     * Summary format: "Hook <id> fired (<status>, <duration>ms)" — kept
+     * short for grep / portal preview rendering. Full payload includes
+     * hookName, triggerType, filePath (when applicable), and
+     * errorMessage (when applicable) for compliance review.
+     *
+     * No parentId: hooks fire outside agent task hierarchies; they're
+     * top-level audit events. If a hook's output later triggers a tool
+     * call (a v2 use case — e.g. autopilot mode), that call's audit
+     * record can reference this hook's id via parentId.
+     */
+    async logHookFire(payload: HookFirePayload): Promise<void> {
+        return this.emit({
+            kind: 'hook_fire',
+            summary: `Hook ${payload.hookId} fired (${payload.status}, ${payload.durationMs}ms)`,
+            payload: payload as unknown as Record<string, unknown>,
+        });
+    }
+
+    /**
      * Read all records from the file system within a date range.
      * Used by the export CLI command and (eventually) the admin portal
      * shipper.
@@ -206,17 +245,17 @@ export class AuditLog {
                 const dateStr = file.slice('audit-'.length, -'.jsonl'.length);
                 const fileDate = new Date(dateStr);
 
-                if (opts?.since && fileDate < startOfDay(opts.since)) continue;
-                if (opts?.until && fileDate > opts.until) continue;
+                if (opts?.since && fileDate < startOfDay(opts.since)) { continue; }
+                if (opts?.until && fileDate > opts.until) { continue; }
 
                 const content = await fs.readFile(path.join(this.auditDir, file), 'utf-8');
                 for (const line of content.split('\n')) {
-                    if (line.trim() === '') continue;
+                    if (line.trim() === '') { continue; }
                     try {
                         const record = JSON.parse(line) as AuditRecord;
                         const ts = new Date(record.timestamp);
-                        if (opts?.since && ts < opts.since) continue;
-                        if (opts?.until && ts > opts.until) continue;
+                        if (opts?.since && ts < opts.since) { continue; }
+                        if (opts?.until && ts > opts.until) { continue; }
                         records.push(record);
                     } catch {
                         console.warn(`[audit] failed to parse line in ${file}: ${line.substring(0, 80)}`);
@@ -249,6 +288,41 @@ export class AuditLog {
             expected = computeRecordHash(record);
         }
         return { valid: broken.length === 0, brokenAt: broken };
+    }
+
+    /**
+     * Subscribe to new audit records. The callback fires for every
+     * record successfully persisted via emit(). Records emitted BEFORE
+     * subscribe() is called are NOT replayed — subscribers see only
+     * forward-going events. To populate UI with historical records,
+     * combine readRecords() with subscribe().
+     *
+     * Returns a disposer function. Call it to unregister; idempotent.
+     *
+     * @example
+     *   const unsubscribe = auditLog.subscribe((record) => {
+     *       webview.postMessage({ type: 'auditEntryAppended', record });
+     *   });
+     *   // later, on dispose:
+     *   unsubscribe();
+     */
+    subscribe(callback: (record: AuditRecord) => void): () => void {
+        this.subscribers.push(callback);
+        return () => {
+            const idx = this.subscribers.indexOf(callback);
+            if (idx !== -1) {
+                this.subscribers.splice(idx, 1);
+            }
+        };
+    }
+
+    /**
+     * Remove all subscribers. Used by tests to reset state, and during
+     * extension deactivation if the AuditLog instance outlives its
+     * subscribers (it shouldn't, but defensive).
+     */
+    clearSubscribers(): void {
+        this.subscribers = [];
     }
 
     // ─── Internals ─────────────────────────────────────────────────
@@ -286,6 +360,18 @@ export class AuditLog {
             const filepath = path.join(this.auditDir, `audit-${today}.jsonl`);
             await fs.appendFile(filepath, JSON.stringify(record) + '\n', 'utf-8');
             this.lastHash = newHash;
+            // Notify subscribers AFTER the write succeeds. A failing
+            // write skips notification — subscribers should only see
+            // records that are durably on disk. Each subscriber is
+            // wrapped in try/catch so one misbehaving listener can't
+            // stall the audit pipeline or affect other subscribers.
+            for (const fn of this.subscribers) {
+                try {
+                    fn(record);
+                } catch (subErr: unknown) {
+                    console.warn('[audit] subscriber threw:', subErr);
+                }
+            }
         } catch (e: unknown) {
             // Per design: don't throw. Log and continue. lastHash is NOT
             // updated, so the next record will retry the chain link to
@@ -308,7 +394,7 @@ export class AuditLog {
         for (const file of auditFiles) {
             const content = await fs.readFile(path.join(this.auditDir, file), 'utf-8').catch(() => '');
             const lines = content.split('\n').filter(l => l.trim() !== '');
-            if (lines.length === 0) continue;
+            if (lines.length === 0) { continue; }
             const lastLine = lines[lines.length - 1]!;
             try {
                 const lastRecord = JSON.parse(lastLine) as AuditRecord;
@@ -351,10 +437,10 @@ export function computeRecordHash(record: AuditRecord): string {
  * any field at any depth changes the output, which is what we need.
  */
 function canonicalJson(value: unknown): string {
-    if (value === null) return 'null';
+    if (value === null) { return 'null'; }
     if (typeof value === 'undefined') return 'null'; // JSON treats undefined as missing/null in objects
-    if (typeof value === 'string') return JSON.stringify(value);
-    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (typeof value === 'string') { return JSON.stringify(value); }
+    if (typeof value === 'number' || typeof value === 'boolean') { return String(value); }
     if (Array.isArray(value)) {
         return '[' + value.map(canonicalJson).join(',') + ']';
     }

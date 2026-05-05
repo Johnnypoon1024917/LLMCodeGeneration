@@ -1,0 +1,109 @@
+/* webview-ui/src/styles/globals.css
+ *
+ * Main entry stylesheet for the webview. Imports order matters:
+ *
+ *   1. tailwindcss — must come first so the v4 plugin sees the
+ *      directive and generates utilities into this file.
+ *
+ *   2. tokens.css — establishes --nx-* CSS variables.
+ *
+ *   3. @theme inline — exposes the tokens as Tailwind utility
+ *      classes. `inline` keyword tells v4 to embed the value
+ *      reference (not the resolved value), so theme switching
+ *      flows correctly: change --nx-* var → utility class
+ *      reflects new value without rebuild.
+ *
+ *   4. App.css (legacy) — temporary, while migration is in flight.
+ *      Contains the inline-style escape hatches the old App.tsx
+ *      relies on. Removed at end of Sprint 3 when no component
+ *      references it.
+ *
+ * Tailwind v4 reads @theme natively, no JS config file needed.
+ * Adding a new token to the system: add it to tokens.css, then
+ * (only if you want a Tailwind utility for it) add a line below.
+ */
+
+@import "tailwindcss";
+@import "./tokens.css";
+
+/* Tailwind v4 @theme — exposes --nx-* tokens as utility classes.
+ *
+ * Naming: keep utility names predictable so engineers don't have
+ * to memorize a translation table. `bg-surface-base` maps to
+ * `--nx-surface-base`, `text-text-primary` to `--nx-text-primary`,
+ * etc. The `text-text-*` doubling reads slightly awkwardly but is
+ * the convention Tailwind v4 uses (`text-` is the utility prefix
+ * for color, `text-primary` is the token name).
+ */
+@theme inline {
+  --color-surface-base:    var(--nx-surface-base);
+  --color-surface-raised:  var(--nx-surface-raised);
+  --color-surface-sunken:  var(--nx-surface-sunken);
+  --color-surface-overlay: var(--nx-surface-overlay);
+
+  --color-text-primary:   var(--nx-text-primary);
+  --color-text-secondary: var(--nx-text-secondary);
+  --color-text-tertiary:  var(--nx-text-tertiary);
+  --color-text-inverse:   var(--nx-text-inverse);
+  --color-text-link:      var(--nx-text-link);
+
+  --color-border-subtle:  var(--nx-border-subtle);
+  --color-border-default: var(--nx-border-default);
+  --color-border-strong:  var(--nx-border-strong);
+  --color-border-focus:   var(--nx-border-focus);
+
+  --color-accent:       var(--nx-accent);
+  --color-accent-hover: var(--nx-accent-hover);
+  --color-accent-soft:  var(--nx-accent-soft);
+  --color-accent-fg:    var(--nx-accent-fg);
+
+  --color-status-secure:  var(--nx-status-secure);
+  --color-status-pending: var(--nx-status-pending);
+  --color-status-blocked: var(--nx-status-blocked);
+  --color-status-info:    var(--nx-status-info);
+  --color-status-running: var(--nx-status-running);
+
+  --color-status-secure-bg:  var(--nx-status-secure-bg);
+  --color-status-pending-bg: var(--nx-status-pending-bg);
+  --color-status-blocked-bg: var(--nx-status-blocked-bg);
+  --color-status-info-bg:    var(--nx-status-info-bg);
+  --color-status-running-bg: var(--nx-status-running-bg);
+
+  --font-sans: var(--nx-font-sans);
+  --font-mono: var(--nx-font-mono);
+
+  --text-xs:  var(--nx-text-xs);
+  --text-sm:  var(--nx-text-sm);
+  --text-md:  var(--nx-text-md);
+  --text-lg:  var(--nx-text-lg);
+  --text-xl:  var(--nx-text-xl);
+  --text-2xl: var(--nx-text-2xl);
+
+  --radius-xs:   var(--nx-radius-xs);
+  --radius-sm:   var(--nx-radius-sm);
+  --radius-md:   var(--nx-radius-md);
+  --radius-lg:   var(--nx-radius-lg);
+  --radius-pill: var(--nx-radius-pill);
+
+  /* Animation duration tokens for `transition-duration-*` etc. */
+  --animate-duration-fast: var(--nx-motion-fast);
+  --animate-duration-base: var(--nx-motion-base);
+  --animate-duration-slow: var(--nx-motion-slow);
+}
+
+/* Body defaults — set once globally, every component inherits. */
+body {
+  background-color: var(--nx-surface-base);
+  color: var(--nx-text-primary);
+  font-family: var(--nx-font-sans);
+  font-size: var(--nx-text-md);
+  line-height: var(--nx-leading-normal);
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+  padding: 0;
+}
+
+/* Legacy App.css. Kept inline-imported during the migration so the
+ * existing components that still depend on `.nexus-*` class names
+ * continue to work. Removed at end of Sprint 3. */
+@import "../App.css";

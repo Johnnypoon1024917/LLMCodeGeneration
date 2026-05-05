@@ -1,6 +1,6 @@
 // webview-ui/src/components/toolCardBodies/NetworkBody.tsx
 //
-// Component 2B-4d: body strategy for "network" tools.
+// Body strategy for "network" tools.
 //
 // One tool uses this body:
 //   - web_fetch → fetch a URL and return its content
@@ -21,159 +21,124 @@
 //   On failure:
 //     uiPayload: { kind: 'error', message: <string> }
 //
-// Why we parse the string instead of consuming a structured payload:
+// We parse the string instead of consuming a structured payload because
 // the toolProtocol's ToolResult union doesn't currently have a
-// dedicated kind for web fetch. Lifting `kind: 'string'` to a
-// proper `kind: 'web_fetch_result'` would touch the protocol, the
-// dispatcher, and the frontend mirror — out of scope for 2B-4d.
-// The parsing is a controlled hack: we own both the producer
-// (web_fetch.ts) and the consumer (this file), so the format
-// invariant is enforceable. If the format ever drifts, the
-// fallback (verbatim render with a "couldn't parse" note) keeps
-// cards functional.
+// dedicated kind for web fetch. Lifting `kind: 'string'` to a proper
+// `kind: 'web_fetch_result'` would touch the protocol, the dispatcher,
+// and the frontend mirror — out of scope for this PR. Parsing is a
+// controlled hack: we own both the producer (web_fetch.ts) and the
+// consumer (this file). If the format ever drifts, the fallback
+// (verbatim render with a "couldn't parse" note) keeps cards
+// functional.
 //
 // State source: ToolCallState. While running, shows "Fetching…"
-// placeholder. web_fetch is atomic (no streaming chunks), so the
-// outputBuffer is unused here — the result lands in one shot.
+// placeholder. web_fetch is atomic (no streaming), so outputBuffer
+// is unused — the result lands in one shot.
 //
-// Reuses CSS:
-//   - .tool-call-card-empty, .tool-call-card-error (from 2B-4a)
-//   - .tool-call-info-body, .tool-call-info-meta, .tool-call-info-meta-item (from 2B-4a)
-//   - .tool-call-info-code (from 2B-4a — for the body preview <pre>)
-//
-// Adds CSS:
-//   - .tool-call-net-* family for status chip + URL link
+// PR 2.2 (Sprint 2): visual overhaul. Chrome (meta, error, empty)
+// uses shared body atoms + design tokens. Status chip rewritten using
+// the Pill primitive — color ramp now matches the security strip.
+// parseWebFetchPayload preserved verbatim.
 
 import React from 'react';
 import {
-    AlertCircle as IconAlert,
     Globe as IconGlobe,
     ExternalLink as IconExternal
 } from 'lucide-react';
 import type { ToolCallState } from '../../toolEvents';
+import { cn } from '../ui/cn';
+import { Pill } from '../ui/Pill';
+import {
+    BodyContainer,
+    BodyEmpty,
+    BodyError,
+    BodyFallbackPre,
+    BodyMeta,
+    BodyMetaItem
+} from './shared';
 
 export interface NetworkBodyProps {
     state: ToolCallState;
 }
 
-/**
- * Cap on the body preview length. Cards in chat shouldn't dump a
- * 1MB HTML page at the user. The dispatcher already capped the
- * response body at 1MB before sending; we cap *display* further to
- * keep the chat compact. Full body still reachable via "Open URL"
- * if the user wants to see everything.
- */
 const MAX_BODY_PREVIEW_CHARS = 4000;
 
-/**
- * Parsed shape of the web_fetch payload. Optional fields handle
- * the case where parsing partially fails — we extract whatever we
- * can and render the rest verbatim.
- */
 interface ParsedWebFetch {
     url?: string;
     status?: number;
     statusText?: string;
     body: string;
     truncated: boolean;
-    /**
-     * True when parsing succeeded and the URL/status header was
-     * cleanly extracted. False means we fell back to verbatim
-     * rendering. The card adjusts visuals accordingly.
-     */
+    /** True when parsing succeeded and the URL/status header was
+     *  cleanly extracted. False means we fell back to verbatim
+     *  rendering. The card adjusts visuals accordingly. */
     parsed: boolean;
 }
 
 export function NetworkBody({ state }: NetworkBodyProps): React.ReactElement {
     if (state.status === 'running') {
-        return <div className="tool-call-card-empty">Fetching…</div>;
+        return <BodyEmpty>Fetching…</BodyEmpty>;
     }
-
     if (state.result?.uiPayload.kind === 'error') {
-        return (
-            <div className="tool-call-card-error">
-                <IconAlert size={14} />
-                <span>{state.result.uiPayload.message}</span>
-            </div>
-        );
+        return <BodyError message={state.result.uiPayload.message} />;
     }
-
     if (!state.result) {
-        return <div className="tool-call-card-empty">(no result)</div>;
+        return <BodyEmpty>(no result)</BodyEmpty>;
     }
 
     const payload = state.result.uiPayload;
     if (payload.kind !== 'string') {
-        // Defensive — shouldn't happen for web_fetch but the protocol
-        // permits it. Fall back to llmContent as a courtesy.
-        return <pre className="tool-call-card-fallback-output">{state.result.llmContent}</pre>;
+        return <BodyFallbackPre>{state.result.llmContent}</BodyFallbackPre>;
     }
 
     const parsed = parseWebFetchPayload(payload.content);
 
     return (
-        <div className="tool-call-info-body">
-            {/* Meta header: URL link + status chip + truncation flag */}
-            <div className="tool-call-info-meta tool-call-net-meta">
-                <IconGlobe size={12} />
+        <BodyContainer>
+            <BodyMeta className="flex-wrap">
+                <IconGlobe size={12} className="text-text-tertiary shrink-0" />
                 {parsed.url ? (
                     <a
                         href={parsed.url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="tool-call-net-url"
                         title={parsed.url}
+                        className={cn(
+                            'inline-flex items-center gap-1 min-w-0 flex-1',
+                            'text-text-link no-underline hover:underline',
+                            'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-border-focus rounded-xs'
+                        )}
                     >
-                        <span className="tool-call-net-url-text">{parsed.url}</span>
-                        <IconExternal size={10} />
+                        <span className="truncate min-w-0 max-w-full">
+                            {parsed.url}
+                        </span>
+                        <IconExternal size={10} className="shrink-0" />
                     </a>
                 ) : (
-                    <span className="tool-call-info-meta-item tool-call-net-url-text">
+                    <BodyMetaItem className="text-text-tertiary">
                         (URL unparseable)
-                    </span>
+                    </BodyMetaItem>
                 )}
                 {parsed.status !== undefined && (
                     <StatusChip
                         status={parsed.status}
-                        {...(parsed.statusText !== undefined ? { statusText: parsed.statusText } : {})}
+                        {...(parsed.statusText !== undefined
+                            ? { statusText: parsed.statusText }
+                            : {})}
                     />
                 )}
                 {parsed.truncated && (
-                    <span className="tool-call-info-meta-item tool-call-info-truncated">
-                        truncated
-                    </span>
+                    <BodyMetaItem truncated>truncated</BodyMetaItem>
                 )}
-            </div>
-
-            {/* Body preview */}
+            </BodyMeta>
             <BodyPreview body={parsed.body} parsed={parsed.parsed} />
-        </div>
+        </BodyContainer>
     );
 }
 
-// ─── Parsing ─────────────────────────────────────────────────────────
+// ─── Parsing (preserved verbatim) ────────────────────────────────────
 
-/**
- * Parse the structured string emitted by web_fetch's executor.
- * Format (see web_fetch.ts):
- *
- *   URL: <url>
- *   Status: <code> <statusText>
- *   <blank line>
- *   <body>
- *   [response body truncated — exceeded 1MB cap]   ← optional
- *
- * The leading blank line in the dispatcher's output (between
- * `Status:` and the body) gets eaten by the join — we look for
- * the body after the second newline.
- *
- * If parsing fails (header missing, malformed), we set parsed=false
- * and put the entire input into `body`. The caller renders it
- * verbatim with a note.
- */
 function parseWebFetchPayload(content: string): ParsedWebFetch {
-    // Detect and strip a final truncation notice. The dispatcher
-    // appends it as its own line, prefixed with a newline.
     let working = content;
     let truncated = false;
     const truncMatch = working.match(/\n?\[response body truncated[^\]]*\]\s*$/);
@@ -182,17 +147,11 @@ function parseWebFetchPayload(content: string): ParsedWebFetch {
         working = working.substring(0, truncMatch.index ?? 0);
     }
 
-    // Look for "URL: ...\nStatus: ...\n" at the start.
-    // The statusText capture must stay on the Status: line — matching
-    // [^\n]+ rather than .+? prevents the regex from spilling onto
-    // the body if statusText is empty.
     const headerRegex = /^URL:\s*(.+?)\nStatus:\s*(\d+)(?:[ \t]+([^\n]+))?\n/;
     const match = working.match(headerRegex);
     if (!match) {
-        // Fall back to verbatim. The card will show the body
-        // unparsed but at least visible.
         return {
-            body: content,  // include the truncation notice if present
+            body: content,
             truncated,
             parsed: false
         };
@@ -201,16 +160,12 @@ function parseWebFetchPayload(content: string): ParsedWebFetch {
     const [headerSection, url, statusStr, statusText] = match;
     const status = parseInt(statusStr!, 10);
 
-    // Body is everything after the header. The dispatcher inserts a
-    // blank line between Status: and the body, so trim a single
-    // leading newline if present.
     let body = working.substring(headerSection!.length);
     if (body.startsWith('\n')) body = body.substring(1);
 
     return {
         url: url!.trim(),
         status,
-        // exactOptionalPropertyTypes: only include statusText when defined.
         ...(statusText !== undefined ? { statusText: statusText.trim() } : {}),
         body,
         truncated,
@@ -221,16 +176,14 @@ function parseWebFetchPayload(content: string): ParsedWebFetch {
 // ─── Status chip ─────────────────────────────────────────────────────
 
 /**
- * Color-coded HTTP status chip:
- *   - 2xx → green ("200 OK")
- *   - 3xx → blue
- *   - 4xx → orange
- *   - 5xx → red
- *   - other → grey
+ * HTTP status chip using Pill. Color follows the standard ramp:
+ *   - 2xx → secure (green)
+ *   - 3xx → info (blue)
+ *   - 4xx → pending (orange)
+ *   - 5xx → blocked (red)
+ *   - other → neutral
  *
- * The label always shows the numeric code; statusText is appended
- * if non-empty (e.g., "200 OK" vs just "200" if the server didn't
- * include text — uncommon but valid HTTP).
+ * Label always shows numeric code; statusText is appended if non-empty.
  */
 function StatusChip({
     status,
@@ -239,29 +192,23 @@ function StatusChip({
     status: number;
     statusText?: string;
 }): React.ReactElement {
-    let cls = 'tool-call-net-chip-other';
-    if (status >= 200 && status < 300) cls = 'tool-call-net-chip-2xx';
-    else if (status >= 300 && status < 400) cls = 'tool-call-net-chip-3xx';
-    else if (status >= 400 && status < 500) cls = 'tool-call-net-chip-4xx';
-    else if (status >= 500 && status < 600) cls = 'tool-call-net-chip-5xx';
+    let variant: 'secure' | 'info' | 'pending' | 'blocked' | 'neutral' = 'neutral';
+    if (status >= 200 && status < 300) variant = 'secure';
+    else if (status >= 300 && status < 400) variant = 'info';
+    else if (status >= 400 && status < 500) variant = 'pending';
+    else if (status >= 500 && status < 600) variant = 'blocked';
 
     const label = statusText ? `${status} ${statusText}` : String(status);
 
     return (
-        <span className={`tool-call-net-chip ${cls}`}>
+        <Pill variant={variant} className="font-mono">
             {label}
-        </span>
+        </Pill>
     );
 }
 
 // ─── Body preview ────────────────────────────────────────────────────
 
-/**
- * Render the response body in a scrollable <pre>, capped at
- * MAX_BODY_PREVIEW_CHARS. Empty bodies show a friendly placeholder.
- * If parsing failed, prepend a small note so the user knows the
- * verbatim render is a fallback.
- */
 function BodyPreview({
     body,
     parsed
@@ -270,7 +217,7 @@ function BodyPreview({
     parsed: boolean;
 }): React.ReactElement {
     if (!body) {
-        return <div className="tool-call-info-empty">(empty response body)</div>;
+        return <BodyEmpty>(empty response body)</BodyEmpty>;
     }
 
     const truncatedDisplay = body.length > MAX_BODY_PREVIEW_CHARS;
@@ -281,14 +228,30 @@ function BodyPreview({
     return (
         <>
             {!parsed && (
-                <div className="tool-call-net-fallback-note">
+                <div
+                    className={cn(
+                        'px-4 py-2',
+                        'text-xs text-status-pending italic',
+                        'bg-status-pending-bg/40 border-b border-status-pending/20'
+                    )}
+                >
                     Response format wasn't recognized — showing raw output.
                 </div>
             )}
-            <pre className="tool-call-info-code tool-call-net-body" tabIndex={0}>
+            <pre
+                tabIndex={0}
+                className={cn(
+                    'px-4 py-3 m-0',
+                    'font-mono text-xs leading-relaxed',
+                    'bg-surface-base text-text-secondary',
+                    'whitespace-pre-wrap break-all',
+                    'max-h-80 overflow-auto',
+                    'outline-none focus:ring-1 focus:ring-border-focus focus:ring-inset'
+                )}
+            >
                 {displayBody}
                 {truncatedDisplay && (
-                    <span className="tool-call-net-preview-cut">
+                    <span className="block mt-2 text-status-pending italic">
                         {`\n\n… preview cut at ${MAX_BODY_PREVIEW_CHARS} characters (full body sent to LLM)`}
                     </span>
                 )}

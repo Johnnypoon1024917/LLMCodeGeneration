@@ -331,3 +331,104 @@ describe('generateTasks — retry behavior', () => {
         expect(lastMessage.content as string).not.toContain('empty implementationTasks array');
     });
 });
+
+// ─── P1.2: steering-block injection ────────────────────────────────
+
+describe('generateTasks — steering injection (P1.2)', () => {
+    beforeEach(() => {
+        mockProvider.jsonCompletion.mockReset();
+    });
+
+    function goodPlan() {
+        return {
+            folderStructure: ['src/'],
+            implementationTasks: [
+                {
+                    step: 'Create src/index.ts',
+                    file: 'src/index.ts',
+                    detailedInstructions: 'Export a default function.',
+                    relatedRequirement: '',
+                    dependencies: [],
+                    verificationRules: [],
+                    testStrategy: ''
+                }
+            ]
+        };
+    }
+
+    test('omitting steering produces the legacy 2-message shape', async () => {
+        mockProvider.jsonCompletion.mockResolvedValueOnce(goodPlan());
+        await generateTasks('PRD', 'Design', '');
+
+        const messages = mockProvider.jsonCompletion.mock.calls[0]![0];
+        expect(messages).toHaveLength(2);
+        expect(messages[0]!.role).toBe('system');
+        expect(messages[1]!.role).toBe('user');
+    });
+
+    test('empty-string steering produces the legacy 2-message shape', async () => {
+        mockProvider.jsonCompletion.mockResolvedValueOnce(goodPlan());
+        await generateTasks('PRD', 'Design', '', undefined, '');
+
+        const messages = mockProvider.jsonCompletion.mock.calls[0]![0];
+        expect(messages).toHaveLength(2);
+    });
+
+    test('non-empty steering injects a SECOND system message after the planner prompt', async () => {
+        mockProvider.jsonCompletion.mockResolvedValueOnce(goodPlan());
+        const steering =
+            '# Steering: project conventions\n\n' +
+            '## tech\n' +
+            'Use Result<T,E> instead of throw.\n';
+        await generateTasks('PRD', 'Design', '', undefined, steering);
+
+        const messages = mockProvider.jsonCompletion.mock.calls[0]![0];
+        expect(messages).toHaveLength(3);
+        // Order: planner-system → steering-system → user
+        expect(messages[0]!.role).toBe('system');
+        expect(messages[0]!.content).toContain('Principal Orchestrator Agent');
+        expect(messages[1]!.role).toBe('system');
+        expect(messages[1]!.content).toBe(steering);
+        expect(messages[2]!.role).toBe('user');
+    });
+
+    test('steering survives the corrective-retry path', async () => {
+        const steering = '# Steering\n\nNo throws — return Results.';
+        // First attempt: empty plan → triggers retry
+        // Second attempt: good plan
+        mockProvider.jsonCompletion
+            .mockResolvedValueOnce({
+                folderStructure: [],
+                implementationTasks: []
+            })
+            .mockResolvedValueOnce(goodPlan());
+
+        await generateTasks('PRD', 'Design', '', undefined, steering);
+
+        // The retry call should also include the steering message
+        const retryMessages = mockProvider.jsonCompletion.mock.calls[1]![0];
+        // First call had 3 messages; retry adds 1 corrective, so 4
+        expect(retryMessages).toHaveLength(4);
+        // Steering should still be the second system message
+        expect(retryMessages[1]!.role).toBe('system');
+        expect(retryMessages[1]!.content).toBe(steering);
+        // Corrective should be the LAST message
+        expect(retryMessages[3]!.role).toBe('system');
+        // Empty implementationTasks triggers the zero-tasks corrective,
+        // which uses different language than the field-level corrective
+        expect(retryMessages[3]!.content).toContain('empty implementationTasks array');
+    });
+
+    test('steering content goes through unchanged (not re-wrapped)', async () => {
+        mockProvider.jsonCompletion.mockResolvedValueOnce(goodPlan());
+        const steering = 'arbitrary content with NO header at all';
+        await generateTasks('PRD', 'Design', '', undefined, steering);
+
+        const messages = mockProvider.jsonCompletion.mock.calls[0]![0];
+        // Steering string passed to generateTasks is what reaches the LLM,
+        // verbatim. The "wrapping with header" responsibility lives in
+        // formatSteeringPromptBlock — generateTasks is a pure pass-through
+        // for whatever string the caller gave it.
+        expect(messages[1]!.content).toBe(steering);
+    });
+});

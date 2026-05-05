@@ -38,26 +38,31 @@ exports.getInjectionPosition = getInjectionPosition;
 const vscode = __importStar(require("vscode"));
 async function getInjectionPosition(_extensionUri, document, symbolName) {
     const symbols = await vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', document.uri);
-    if (!symbols)
+    if (!symbols) {
         return null;
+    }
     const target = findSymbol(symbols, symbolName);
-    if (!target)
+    if (!target) {
         return null;
+    }
     // Insert just before the closing brace of the symbol body
     const endLine = target.range.end.line;
     const lineText = document.lineAt(endLine).text;
     const closingBraceCol = lineText.indexOf('}');
-    if (closingBraceCol === -1)
+    if (closingBraceCol === -1) {
         return new vscode.Position(endLine, 0);
+    }
     return new vscode.Position(endLine, closingBraceCol);
 }
 function findSymbol(symbols, name) {
     for (const s of symbols) {
-        if (s.name === name)
+        if (s.name === name) {
             return s;
+        }
         const child = findSymbol(s.children, name);
-        if (child)
+        if (child) {
             return child;
+        }
     }
     return null;
 }

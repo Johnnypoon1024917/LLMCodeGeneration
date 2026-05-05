@@ -1,0 +1,73 @@
+id: 002-express-validate-endpoint
+title: Express POST endpoint with input validation
+tier: medium
+
+requirement: |
+  Build an Express server in TypeScript with a single POST /users endpoint.
+  The endpoint accepts a JSON body with fields: name (string, required),
+  email (string, required, must be valid email), age (number, optional, must
+  be positive integer if provided). On invalid input, return HTTP 400 with
+  a JSON body listing each invalid field and why. On valid input, return
+  HTTP 201 with the validated user object plus a generated UUID id.
+  Server should listen on port 3000.
+
+rubric:
+  - kind: file_exists
+    description: package.json with express dependency
+    path: package.json
+
+  - kind: file_exists
+    description: tsconfig.json for typescript
+    path: tsconfig.json
+
+  - kind: command
+    description: install succeeds
+    cmd: npm install
+    timeout_ms: 60000
+
+  - kind: command
+    description: typecheck passes
+    cmd: npx tsc --noEmit
+    timeout_ms: 30000
+
+  - kind: integration
+    description: rejects invalid email with 400
+    setup: |
+      # Start server in background, save PID for teardown
+      npm run start > /tmp/server.log 2>&1 &
+      echo $! > /tmp/server.pid
+      sleep 3
+    request:
+      method: POST
+      path: /users
+      body: { "name": "Alice", "email": "not-an-email", "age": 30 }
+    expect:
+      status: 400
+      body_includes: ["email"]
+    teardown: |
+      kill $(cat /tmp/server.pid) 2>/dev/null || true
+
+  - kind: integration
+    description: accepts valid input with 201 + UUID
+    request:
+      method: POST
+      path: /users
+      body: { "name": "Bob", "email": "bob@example.com", "age": 25 }
+    expect:
+      status: 201
+      body_matches_regex: '"id"\s*:\s*"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"'
+
+  - kind: integration
+    description: rejects missing required field
+    request:
+      method: POST
+      path: /users
+      body: { "name": "Charlie" }
+    expect:
+      status: 400
+      body_includes: ["email"]
+
+has_reference: true
+
+modes: [interactive, autopilot]
+budget_seconds: 600

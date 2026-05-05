@@ -18,7 +18,7 @@ async function performLexicalSearch(query: string, maxResults: number = 10): Pro
     const results: SearchResult[] = [];
     
     const keywords = query.split(' ').filter(w => w.length > 4);
-    if (keywords.length === 0) return [];
+    if (keywords.length === 0) { return []; }
 
     const primaryKeyword = keywords[0]!.toLowerCase(); // length > 0 just checked above
     
@@ -27,7 +27,7 @@ async function performLexicalSearch(query: string, maxResults: number = 10): Pro
     
     let matchCount = 0;
     for (const fileUri of files) {
-        if (matchCount >= maxResults) break;
+        if (matchCount >= maxResults) { break; }
         
         try {
             if (fileUri.fsPath.match(/\.(png|jpg|jpeg|gif|ico|svg|mp4|webm|wasm|exe|dll)$/i)) continue;
@@ -85,11 +85,20 @@ async function performVectorSearch(query: string, maxResults: number = 10): Prom
  * 🧬 THE FUSION: Tri-Factor Context Injection via RRF
  * Combines Lexical RRF, Semantic Vectors, and AST Logic.
  */
-export async function retrieveHybridContext(query: string, topK: number = 5): Promise<string> {
+export async function retrieveHybridContext(
+    query: string,
+    topK: number = 5,
+    /** P1.3: forwarded to the inner getSmartASTContext call. Steering
+     *  authors who want to suppress legacy/generated paths configure
+     *  these in `## Exclude paths` sections of their steering files;
+     *  SidebarProvider loads them via SteeringManager.getExcludePatterns()
+     *  and passes them here. Empty = no filter (legacy behavior). */
+    excludePatterns: ReadonlyArray<string> = []
+): Promise<string> {
     log.debug("[DEBUG-RAG] 🔍 Starting Tri-Factor Hybrid Search...");
 
     try {
-        const astPromise = Promise.resolve(getSmartASTContext(query)).catch((e: any) => {
+        const astPromise = Promise.resolve(getSmartASTContext(query, { excludePatterns })).catch((e: any) => {
             log.warn("[DEBUG-RAG] AST CodeGraph search failed silently:", e);
             return "";
         });

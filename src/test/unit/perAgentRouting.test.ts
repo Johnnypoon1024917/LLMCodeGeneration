@@ -12,7 +12,7 @@
 //   1. `nexuscode.modelPlanner` / `modelCoder` / `modelVerifier`
 //      (matching the role parameter)
 //   2. `nexuscode.model` (global default)
-//   3. hardcoded fallback ('qwen2.5-coder')
+//   3. hardcoded fallback (DEFAULT_MODEL — currently 'qwen3.6-27b')
 //
 // The 'default' role skips step 1 and goes straight to the global,
 // which matches old behavior — useful for code paths that aren't
@@ -32,7 +32,7 @@ import * as vscode from 'vscode';
 function makeConfigSource(values: Record<string, unknown>): ConfigSource {
     return {
         get<T>(key: string, defaultValue?: T): T | undefined {
-            if (key in values) return values[key] as T;
+            if (key in values) { return values[key] as T; }
             return defaultValue;
         }
     };
@@ -77,8 +77,10 @@ describe('getLLMConfig — per-agent model routing', () => {
         test('uses hardcoded fallback when global is unset', async () => {
             setDeps(makeTestDeps({}));
             const cfg = await getLLMConfig();
-            // Hardcoded fallback per llmService.ts L174.
-            expect(cfg.model).toBe('qwen2.5-coder');
+            // Hardcoded fallback per llmService.ts (DEFAULT_MODEL constant).
+            // If you change DEFAULT_MODEL in llmService.ts, update this
+            // string too — these tests are the regression guard.
+            expect(cfg.model).toBe('qwen3.6-27b');
         });
 
         test('explicit role="default" matches no-argument behavior', async () => {
@@ -118,7 +120,7 @@ describe('getLLMConfig — per-agent model routing', () => {
         test('falls back to hardcoded fallback when both unset', async () => {
             setDeps(makeTestDeps({}));
             const cfg = await getLLMConfig('planner');
-            expect(cfg.model).toBe('qwen2.5-coder');
+            expect(cfg.model).toBe('qwen3.6-27b');
         });
 
         test('does NOT use modelCoder or modelVerifier', async () => {

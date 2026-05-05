@@ -59,8 +59,9 @@ function normalizePath(p) {
 async function getProjectContext(rootPath) {
     // Determine the root directory: Use the argument if provided (Meta-Mode), otherwise use workspace (User-Mode)
     const rawRootDir = rootPath || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 ? vscode.workspace.workspaceFolders[0].uri.fsPath : "");
-    if (!rawRootDir)
+    if (!rawRootDir) {
         return "No workspace open.";
+    }
     const rootDir = normalizePath(rawRootDir);
     //  FIX 1: Check the cache! If we already scanned this folder, return it instantly.
     // This drops your TTFT (Time-To-First-Token) from ~3 seconds down to ~20 milliseconds!
@@ -94,8 +95,9 @@ async function getRepoContent(tokenBudgetChars = 200000, rootPath) {
     let fullContent = "REPOSITORY CODEBASE CONTEXT:\n\n";
     let currentChars = 0;
     const rawRootDir = rootPath || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 ? vscode.workspace.workspaceFolders[0].uri.fsPath : "");
-    if (!rawRootDir)
+    if (!rawRootDir) {
         return "";
+    }
     const rootDir = normalizePath(rawRootDir);
     // Helper to read file safely using VS Code FS API
     const readFile = async (filePath) => {
@@ -120,26 +122,32 @@ async function getRepoContent(tokenBudgetChars = 200000, rootPath) {
     filesToRead.sort((a, b) => {
         const getPriority = (p) => {
             const lower = p.toLowerCase();
-            if (lower.includes('app.'))
+            if (lower.includes('app.')) {
                 return -3;
-            if (lower.includes('main.'))
+            }
+            if (lower.includes('main.')) {
                 return -2;
-            if (lower.includes('index.'))
+            }
+            if (lower.includes('index.')) {
                 return -2;
-            if (p.startsWith('src/'))
+            }
+            if (p.startsWith('src/')) {
                 return -1;
+            }
             return 0;
         };
         return getPriority(a) - getPriority(b);
     });
     for (const relativePath of filesToRead) {
-        if (currentChars >= tokenBudgetChars)
+        if (currentChars >= tokenBudgetChars) {
             break;
+        }
         const fullPath = path.join(rootDir, relativePath);
         const content = await readFile(fullPath);
         // Skip files that are likely minified or irrelevant boilerplate
-        if (content.length > 35000 || content.length < 5)
+        if (content.length > 35000 || content.length < 5) {
             continue;
+        }
         const fileBlock = `\n--- START OF FILE: ${relativePath} ---\n${content}\n--- END OF FILE: ${relativePath} ---\n`;
         if (currentChars + fileBlock.length < tokenBudgetChars) {
             fullContent += fileBlock;
@@ -155,8 +163,9 @@ function crawlDirectory(dir, baseDir = dir) {
         const files = fs.readdirSync(dir);
         for (const file of files) {
             // Ignore common junk and binary folders
-            if (['node_modules', 'dist', 'out', 'build', '.git', '.vscode', 'assets'].includes(file))
+            if (['node_modules', 'dist', 'out', 'build', '.git', '.vscode', 'assets'].includes(file)) {
                 continue;
+            }
             const fullPath = path.join(dir, file);
             const stat = fs.statSync(fullPath);
             if (stat.isDirectory()) {
@@ -188,8 +197,9 @@ function generateAsciiTree(paths) {
         const parts = p.split(/[\\\/]/); // Support both slash types
         let currentLevel = tree;
         parts.forEach(part => {
-            if (!currentLevel[part])
+            if (!currentLevel[part]) {
                 currentLevel[part] = {};
+            }
             currentLevel = currentLevel[part];
         });
     });

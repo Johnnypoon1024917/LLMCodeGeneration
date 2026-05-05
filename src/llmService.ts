@@ -26,6 +26,40 @@ import { log } from './logger';
 
 let _apiKeyMigrated = false;
 
+/**
+ * Default model identifier when neither the user's `nexuscode.model`
+ * setting nor any role-specific override is set, and when the
+ * VS Code config layer can't be reached at all (CLI runtime with no
+ * config file, fresh first-launch before settings are written, etc).
+ *
+ * IMPORTANT: this must match `package.json` → contributes →
+ * configuration → `nexuscode.model`.default. Drifting between the two
+ * causes "the setting says X but the runtime uses Y" support tickets.
+ *
+ * Migration history:
+ *   - v1.x  → 'qwen2.5-coder' (default before V2.0)
+ *   - V2.0+ → 'qwen3.6-27b'   (thinking-mode capable, native tool calls)
+ *
+ * If you change this, also update:
+ *   - package.json (contributes.configuration.nexuscode.model.default)
+ *   - tests under src/test/unit/perAgentRouting.test.ts
+ *   - tests under src/test/unit/provider.test.ts (model-name string)
+ *   - tests under src/test/unit/sessionDiagnostics.test.ts
+ */
+const DEFAULT_MODEL = 'qwen3.6-27b';
+
+/**
+ * Last-resort endpoint default. Reached only when the user has
+ * neither configured `nexuscode.apiEndpoint` nor set the
+ * `NEXUSCODE_API_ENDPOINT` env var. Pre-marketplace, this points at
+ * the lab inference cluster; v1 marketplace launch should change
+ * this to either a 127.0.0.1 placeholder (forcing first-run setup)
+ * or remove the fallback entirely with an explicit "configure your
+ * endpoint" onboarding flow. Tracked as a v1 polish item — do NOT
+ * ship this address to the public marketplace.
+ */
+export const DEFAULT_ENDPOINT = 'http://192.168.191.41:8000/v1/chat/completions';
+
 export interface LLMConfig {
     endpoint: string;
     model: string;
@@ -121,8 +155,8 @@ export async function resilientFetch(url: string, options: any, logCallback?: (m
         }
     }, 3, 1000, (attempt, delay, error) => {
         const msg = `⚠️ Nexus API Hiccup (${errorMessage(error)}). Retrying in ${delay / 1000}s (Attempt ${attempt}/3)...`;
-        if (logCallback) logCallback(msg);
-        else log.warn(msg);
+        if (logCallback) { logCallback(msg); }
+        else { log.warn(msg); }
     });
 }
 
@@ -166,12 +200,12 @@ export async function getLLMConfig(role: AgentRole = 'default'): Promise<LLMConf
     //   1. `nexuscode.modelPlanner` / `modelCoder` / `modelVerifier`
     //      (matching the role parameter)
     //   2. `nexuscode.model` (global default)
-    //   3. hardcoded fallback ('qwen2.5-coder')
+    //   3. hardcoded fallback (DEFAULT_MODEL — see top of file)
     //
     // The 'default' role skips step 1 and goes straight to the global,
     // which matches old behavior — useful for code paths that aren't
     // role-tagged yet.
-    const globalModel = config.get<string>('model') || 'qwen2.5-coder';
+    const globalModel = config.get<string>('model') || DEFAULT_MODEL;
     let resolvedModel = globalModel;
     if (role === 'planner') {
         resolvedModel = config.get<string>('modelPlanner') || globalModel;
@@ -187,6 +221,114 @@ export async function getLLMConfig(role: AgentRole = 'default'): Promise<LLMConf
         apiKey: secureKey || undefined,                       // <-- no placeholder
         enableTools: config.get<boolean>('enableTools') ?? true
     };
+}
+
+/**
+ * V2.0: per-role thinking-mode and sampling parameters.
+ *
+ * Qwen 3.6 (and similar reasoning models) want different sampling
+ * settings depending on whether thinking mode is on or off. The
+ * Qwen 3.6 README documents two presets:
+ *
+ *   thinking ON:  temp=0.6, top_p=0.95, top_k=20, presence_penalty=0.0
+ *   thinking OFF: temp=0.7, top_p=0.8,  top_k=20, presence_penalty=1.5
+ *
+ * For NexusCode v2.0 the agent roles all default to thinking ON —
+ * we want the planner to reason carefully about plan structure,
+ * the coder to think before generating non-trivial diffs, and the
+ * verifier to inspect critically. Users with thinking-incapable
+ * endpoints can set `nexuscode.thinking{Planner,Coder,Verifier}`
+ * to false to disable; the resulting request still works against
+ * older Qwen / Llama / GPT-4o-class endpoints because `extra_body`
+ * is treated as opaque pass-through.
+ *
+ * Why a separate function from `getLLMConfig`: thinking mode is
+ * an OPTIONAL per-call concern. Tools that don't care (the
+ * existing `streamChat`, `jsonCompletion`, `completion` paths)
+ * shouldn't have thinking forced on them. Only the new V2.0
+ * agent loop calls this.
+ *
+ * Returns a `CompletionOptions` subset — callers spread it into
+ * their existing options object: `{ ...thinkingDefaults(role), ...mine }`.
+ */
+export interface ThinkingProfile {
+    /** Whether thinking mode should be enabled. */
+    enableThinking: boolean;
+    /** Whether reasoning context should preserve across turns.
+     *  Implies enableThinking; ignored when enableThinking is false. */
+    preserveThinking: boolean;
+    /** Sampling temperature. */
+    temperature: number;
+    /** Nucleus sampling cutoff. */
+    topP: number;
+    /** Top-k sampling. */
+    topK: number;
+    /** Presence penalty. */
+    presencePenalty: number;
+}
+
+export async function getThinkingProfile(role: AgentRole = 'default'): Promise<ThinkingProfile> {
+    // Defensive: if getDeps() throws (pre-activation import paths or
+    // unit tests that haven't called setDeps) OR if config.get itself
+    // throws (a misbehaving config source), fall back to thinking-ON
+    // Qwen 3.6 defaults. The thinking flags ride in extra_body and are
+    // silently ignored by non-thinking endpoints, so the worst case
+    // is "request body has a few extra fields the server ignores" —
+    // never a crash. The whole-function try/catch ensures one bad
+    // config-source read can't kill an agent run.
+    try {
+        const config = getDeps().config;
+
+        // Per-role thinking flag. Default true for the three agent roles
+        // (planner / coder / verifier); 'default' role inherits the planner
+        // setting since it's the most reasoning-heavy fallback.
+        const enableThinkingDefault = true;
+        let configKey: string | null = null;
+        if (role === 'planner') { configKey = 'thinkingPlanner'; }
+        else if (role === 'coder') { configKey = 'thinkingCoder'; }
+        else if (role === 'verifier') { configKey = 'thinkingVerifier'; }
+        // 'default' role: no per-role key; falls through to global default.
+
+        const enableThinking = configKey
+            ? (config.get<boolean>(configKey) ?? enableThinkingDefault)
+            : enableThinkingDefault;
+
+        // preserve_thinking is on by default whenever thinking is on. The
+        // efficiency win documented by Qwen (KV cache reuse, redundant-
+        // reasoning reduction) is exactly what long autonomous sessions
+        // need. Power users can override via nexuscode.preserveThinking.
+        const preserveThinking = enableThinking
+            ? (config.get<boolean>('preserveThinking') ?? true)
+            : false;
+
+        if (enableThinking) {
+            return {
+                enableThinking: true,
+                preserveThinking,
+                temperature: 0.6,
+                topP: 0.95,
+                topK: 20,
+                presencePenalty: 0.0,
+            };
+        }
+        return {
+            enableThinking: false,
+            preserveThinking: false,
+            temperature: 0.7,
+            topP: 0.8,
+            topK: 20,
+            presencePenalty: 1.5,
+        };
+    } catch {
+        return {
+            enableThinking: true,
+            preserveThinking: true,
+            temperature: 0.6,
+            topP: 0.95,
+            topK: 20,
+            presencePenalty: 0.0,
+        };
+    }
 }
 
 export function authHeaders(apiKey: string | undefined): Record<string, string> {
@@ -270,7 +412,7 @@ export function safeParseJSON<T>(jsonString: string): T {
                                 k++;
                                 while (k < extract.length) {
                                     const ck = extract[k];
-                                    if (ck === undefined || !/[ \n\r\t]/.test(ck)) break;
+                                    if (ck === undefined || !/[ \n\r\t]/.test(ck)) { break; }
                                     k++;
                                 }
                                 if (extract[k] === ':') { isKey = true; }
@@ -590,8 +732,8 @@ export function validateTasksPlan(plan: AIPlan): string | null {
         // `relatedRequirement` may be empty without breaking anything.
         const t = task as Partial<ProjectTask>;
         const missing: string[] = [];
-        if (!t.step || !String(t.step).trim()) missing.push('step');
-        if (!t.file || !String(t.file).trim()) missing.push('file');
+        if (!t.step || !String(t.step).trim()) { missing.push('step'); }
+        if (!t.file || !String(t.file).trim()) { missing.push('file'); }
         if (!t.detailedInstructions || !String(t.detailedInstructions).trim()) {
             missing.push('detailedInstructions');
         }
@@ -600,13 +742,13 @@ export function validateTasksPlan(plan: AIPlan): string | null {
         }
     });
 
-    if (issues.length === 0) return null;
+    if (issues.length === 0) { return null; }
     // Cap the issue list at 5 entries so error messages stay readable
     // when the model returns 17 empty tasks. The first few are enough
     // to communicate the failure mode; the user doesn't need to scroll.
     const head = issues.slice(0, 5);
     const remaining = issues.length - head.length;
-    if (remaining > 0) head.push(`(+${remaining} more)`);
+    if (remaining > 0) { head.push(`(+${remaining} more)`); }
     return head.join('; ');
 }
 
@@ -866,8 +1008,10 @@ export async function generateAtomicEdits(tasks: string[], projectContext: strin
 
 
 export async function getAvailableModels(): Promise<string[]> {
-    const config = vscode.workspace.getConfiguration('nexuscode');
-    const fixedModel = config.get<string>('model') || 'qwen2.5-coder';
+    // Use deps.config so this works in both IDE and CLI runtimes. The
+    // CLI uses CliConfigSource (env/flags/cli.json); the IDE uses
+    // VSCodeConfigSource (vscode.workspace.getConfiguration).
+    const fixedModel = getDeps().config.get<string>('model') || DEFAULT_MODEL;
     return [fixedModel];
 }
 
@@ -932,7 +1076,7 @@ Example:
     const completionOptions: import('./llm').CompletionOptions = {
         temperature: 0.2
     };
-    if (abortSignal) completionOptions.signal = abortSignal;
+    if (abortSignal) { completionOptions.signal = abortSignal; }
     const fullDesign = await provider.completion(
         [
             { role: 'system', content: systemPrompt },
@@ -944,7 +1088,22 @@ Example:
     return fullDesign.trim();
 }
 
-export async function generateTasks(requirements: string, design: string, existingStructure: string, abortSignal?: AbortSignal): Promise<AIPlan> {
+export async function generateTasks(
+    requirements: string,
+    design: string,
+    existingStructure: string,
+    abortSignal?: AbortSignal,
+    /** P1.2: project-specific steering rules injected into the planner's
+     *  context. When non-empty, the planner sees this AFTER its
+     *  generic engineering rules so steering can ADD constraints
+     *  (e.g. "always use Result<T,E> instead of throw") without
+     *  overriding the core planning behavior.
+     *
+     *  Build this via SteeringManager.buildSteeringPromptBlock(). Pass
+     *  empty string when steering should be ignored (CLI flag, test
+     *  fixtures, etc.). */
+    steeringBlock: string = ''
+): Promise<AIPlan> {
     const systemPrompt = `You are the Principal Orchestrator Agent.
     The user has provided a PRD, a Technical Design Document, and the existing Directory Structure.
     YOU DO NOT WRITE CODE. Break the project down into an actionable, exhaustive implementation plan.
@@ -1010,12 +1169,25 @@ export async function generateTasks(requirements: string, design: string, existi
     const completionOptions: import('./llm').CompletionOptions = {
         temperature: 0.1
     };
-    if (abortSignal) completionOptions.signal = abortSignal;
+    if (abortSignal) { completionOptions.signal = abortSignal; }
 
-    const baseMessages = [
-        { role: 'system' as const, content: systemPrompt },
-        { role: 'user' as const,   content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
-    ];
+    const baseMessages = steeringBlock
+        ? [
+            { role: 'system' as const, content: systemPrompt },
+            // P1.2: steering as a second system message — placed AFTER
+            // the planner's engineering rules so steering ADDS
+            // constraints rather than overriding the core planning
+            // behavior. The header inside steeringBlock makes its
+            // role explicit ("# Steering: project conventions") so
+            // the model treats it as authoritative on what to apply,
+            // not on how to plan.
+            { role: 'system' as const, content: steeringBlock },
+            { role: 'user' as const,   content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
+        ]
+        : [
+            { role: 'system' as const, content: systemPrompt },
+            { role: 'user' as const,   content: `EXISTING STRUCTURE:\n${existingStructure}\n\nPRD:\n${requirements}\n\nDESIGN:\n${design}` }
+        ];
 
     let parsedPlan = await provider.jsonCompletion<AIPlan>(
         baseMessages,
@@ -1221,8 +1393,22 @@ export async function healGlobalBuild(buildErrors: string, filesContext: string,
 }
 
 //  PHASE 4: ZERO-TRUST SECURITY FIREWALL
-export async function askSecurityMonitor(command: string): Promise<boolean> {
-    const systemPrompt = `You are an elite Security Monitor for an autonomous coding agent.
+//
+// Two entry points:
+//   - askSecurityMonitor: legacy boolean contract (true = block).
+//     Catches all errors and fails CLOSED. Stable public API used by
+//     pre-existing callers and tests.
+//   - askSecurityMonitorVerbose: returns a discriminated verdict
+//     ({ kind: 'allow' } | { kind: 'deny'; reason: string }) and
+//     PROPAGATES errors. Used by the security hook's actionable-banner
+//     path (M-8) — letting infra failures throw lets the caller
+//     distinguish "monitor said no" from "monitor crashed", which
+//     drives different UX (block-pill vs retry-banner).
+//
+// Both functions share the same prompt + schema. askSecurityMonitor is
+// a thin error-swallowing wrapper around askSecurityMonitorVerbose to
+// keep the LLM call defined exactly once.
+const SECURITY_MONITOR_SYSTEM_PROMPT = `You are an elite Security Monitor for an autonomous coding agent.
     Your ONLY job is to evaluate bash/terminal commands before they are executed.
 
     THREAT MODEL:
@@ -1235,18 +1421,49 @@ export async function askSecurityMonitor(command: string): Promise<boolean> {
     Return JSON: { "allowed": true|false, "reason": "<one-sentence justification>" }
     Set "allowed" to false to BLOCK the command, true to ALLOW.`;
 
+/**
+ * Verbose-verdict version of the security monitor. Throws on
+ * infrastructure failure (LLM provider crash, malformed response,
+ * timeout). Returns a discriminated union on success.
+ *
+ * Callers should wrap in try/catch; thrown errors mean "monitor
+ * unreachable" not "monitor declined". The securityHook factory uses
+ * this distinction to render the M-8 actionable banner.
+ */
+export async function askSecurityMonitorVerbose(
+    command: string
+): Promise<{ kind: 'allow' } | { kind: 'deny'; reason: string }> {
+    const result = await jsonRequestData<{ allowed: boolean, reason: string }>({
+        messages: [
+            { role: "system", content: SECURITY_MONITOR_SYSTEM_PROMPT },
+            { role: "user", content: `Command to evaluate: ${command}` }
+        ],
+        schema: securityDecisionSchema,
+        temperature: 0.0
+    });
+    if (result.allowed) {
+        return { kind: 'allow' };
+    }
+    return {
+        kind: 'deny',
+        reason: typeof result.reason === 'string' && result.reason.trim()
+            ? result.reason
+            : 'Security Monitor declined the command.'
+    };
+}
+
+/**
+ * Legacy boolean contract. Returns true to BLOCK, false to ALLOW.
+ * Fails closed: any error (provider down, malformed response) returns
+ * true so the command is blocked. Stable public API — do not change
+ * the signature without updating call sites.
+ */
+export async function askSecurityMonitor(command: string): Promise<boolean> {
     try {
-        const result = await jsonRequestData<{ allowed: boolean, reason: string }>({
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `Command to evaluate: ${command}` }
-            ],
-            schema: securityDecisionSchema,
-            temperature: 0.0
-        });
-        return !result.allowed; // returns true if it should be blocked
+        const verdict = await askSecurityMonitorVerbose(command);
+        return verdict.kind === 'deny'; // true means block
     } catch (e) {
-        return true; // Fail-safe: If the security monitor crashes, BLOCK the command!
+        return true; // Fail-safe: monitor crash = block.
     }
 }
 

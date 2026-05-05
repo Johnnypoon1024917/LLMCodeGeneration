@@ -1,0 +1,43 @@
+id: 001-node-fizzbuzz
+title: Node CLI that prints fizzbuzz to stdout
+tier: easy
+
+# Deliberately trivial. If the agent can't handle this, the harness or
+# the agent are broken — not the fixture. Use this as a smoke test
+# before running the harder fixtures.
+requirement: |
+  Build a small Node.js CLI that prints fizzbuzz from 1 to 100 to
+  stdout. Each number on its own line. Multiples of 3 print "Fizz",
+  multiples of 5 print "Buzz", multiples of both print "FizzBuzz".
+  The CLI should be runnable as `node index.js`.
+
+rubric:
+  - kind: file_exists
+    description: package.json was created
+    path: package.json
+
+  - kind: file_exists
+    description: entry point exists
+    path: index.js
+
+  - kind: command
+    description: runs without crashing
+    cmd: node index.js
+    timeout_ms: 5000
+
+  - kind: command_output_contains
+    description: output includes "FizzBuzz" at line 15
+    cmd: node index.js
+    expect_line: 15
+    expect_text: FizzBuzz
+
+  - kind: command_output_contains
+    description: output includes "Buzz" at line 5
+    cmd: node index.js
+    expect_line: 5
+    expect_text: Buzz
+
+has_reference: false
+
+modes: [interactive, autopilot]
+budget_seconds: 300

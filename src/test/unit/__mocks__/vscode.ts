@@ -89,8 +89,38 @@ export const workspace = {
     asRelativePath: jest.fn((uriOrString: { fsPath: string } | string) => {
         const path = typeof uriOrString === 'string' ? uriOrString : uriOrString.fsPath;
         return path.replace(/^\/repo\//, '');
-    })
+    }),
+    // P2.1: file watcher mock. Returns a watcher whose onDidChange /
+    // onDidCreate / onDidDelete are no-ops by default. Tests that need
+    // to simulate file events override the implementation per-test
+    // by capturing the registered listeners.
+    createFileSystemWatcher: jest.fn(() => ({
+        onDidChange: jest.fn(),
+        onDidCreate: jest.fn(),
+        onDidDelete: jest.fn(),
+        dispose: jest.fn(),
+        ignoreCreateEvents: false,
+        ignoreChangeEvents: false,
+        ignoreDeleteEvents: false
+    }))
 };
+
+/**
+ * P2.1: RelativePattern constructor. Real VS Code accepts (workspace
+ * folder, glob string) and exposes baseUri + pattern. Tests don't
+ * inspect the result deeply — they just need the constructor not to
+ * crash when McpManager creates a pattern for the watcher.
+ */
+export class RelativePattern {
+    base: { fsPath: string };
+    pattern: string;
+    baseUri: { fsPath: string };
+    constructor(base: { fsPath: string }, pattern: string) {
+        this.base = base;
+        this.baseUri = base;
+        this.pattern = pattern;
+    }
+}
 
 export const Uri = {
     file: (p: string) => ({ fsPath: p, scheme: 'file', path: p }),

@@ -210,7 +210,7 @@ export async function findProjectTsconfig(
         }
 
         // Stop when we've reached workspaceRoot or above.
-        if (dir === normRoot) return null;
+        if (dir === normRoot) { return null; }
         const parent = path.dirname(dir);
         if (parent === dir) return null; // reached filesystem root
         dir = parent;
@@ -240,7 +240,7 @@ export function parseTscOutput(rawOutput: string): ParsedTscError[] {
     const lines = rawOutput.split(/\r?\n/);
     for (const line of lines) {
         const m = pattern.exec(line.trim());
-        if (!m) continue;
+        if (!m) { continue; }
         errors.push({
             file: m[1]!.trim(),
             line: parseInt(m[2]!, 10),
@@ -295,7 +295,7 @@ export function isErrorRelevant(
             // Even without suffix alignment, if the path tail is just
             // the basename, treat as relevant — common when tsc emits
             // bare basenames for files not under the project root.
-            if (errFileNorm === errBase) return true;
+            if (errFileNorm === errBase) { return true; }
         }
 
         // Likely relevant: error message mentions a module path that
@@ -324,8 +324,8 @@ export function partitionErrors(
     const relevant: ParsedTscError[] = [];
     const unrelated: ParsedTscError[] = [];
     for (const e of errors) {
-        if (isErrorRelevant(e, touchedFiles)) relevant.push(e);
-        else unrelated.push(e);
+        if (isErrorRelevant(e, touchedFiles)) { relevant.push(e); }
+        else { unrelated.push(e); }
     }
     return { relevant, unrelated };
 }
@@ -352,14 +352,14 @@ export function extractMissingModules(
         // files referencing missing modules are NOT our problem to
         // fix even if they're related to our changes; they're the
         // project's pre-existing brokenness.
-        if (!isErrorInTouchedFile(err, touchedFiles)) continue;
+        if (!isErrorInTouchedFile(err, touchedFiles)) { continue; }
 
         // Run the install regex against the message text.
         const r = new RegExp(missingPkgRegex.source, missingPkgRegex.flags);
         const m = r.exec(err.message);
-        if (!m || m[1] === undefined) continue;
+        if (!m || m[1] === undefined) { continue; }
         const moduleName = m[1].trim();
-        if (moduleName.startsWith('.') || moduleName.startsWith('/')) continue;
+        if (moduleName.startsWith('.') || moduleName.startsWith('/')) { continue; }
         out.add(moduleName);
     }
     return Array.from(out);
@@ -393,7 +393,7 @@ function isErrorInTouchedFile(
  * suitable for feeding back to the Coder's next attempt.
  */
 export function formatErrorsForCritique(errors: ParsedTscError[]): string {
-    if (errors.length === 0) return "";
+    if (errors.length === 0) { return ""; }
     return errors.map(e => e.raw).join('\n');
 }
 
@@ -559,12 +559,143 @@ export interface VerificationResult {
 
     /** Human-readable explanation of the result. On failure, contains
      *  the critique fed back to the next CoderAgent attempt. On success,
-     *  a brief success summary. */
+     *  a brief success summary.
+     *
+     *  Note: P1.1 introduced `failures` (below) as the structured
+     *  alternative to `critique`. `critique` is kept for backwards
+     *  compatibility with call sites that don't yet consume structured
+     *  data, and as a fallback when structured failures aren't
+     *  available (LLM PRD review failures, for example, only have
+     *  prose feedback). Prefer `failures` when present. */
     critique: string;
+
+    /** P1.1: structured failure data from the compile + test stages.
+     *
+     *  When present and non-empty, callers can build a more focused
+     *  retry prompt enumerating individual issues (file, line, error
+     *  code, message) instead of pasting the verifier's prose blob.
+     *  The Coordinator's retry loop uses this to produce cleaner
+     *  context for the next CoderAgent attempt.
+     *
+     *  Empty when:
+     *  - The run passed (no failures to report)
+     *  - The failure was at the LLM PRD-review stage (no structured
+     *    output — the LLM gave prose, that's all)
+     *  - The failure was something we don't yet structure (e.g. a
+     *    timeout from `env.runCommand`)
+     *
+     *  In those cases, callers should fall back to `critique`. */
+    failures?: VerifierFailure[];
 
     /** Optional token usage from the LLM PRD-review step. Forwarded
      *  to the orchestrator's usageCallback when present. */
     usage?: unknown;
+}
+
+/**
+ * P1.1: structured verifier failure. One per actionable issue —
+ * a tsc compile error, a failing test, a review violation.
+ *
+ * Coordinator's retry loop builds the next attempt's user-message
+ * from these instead of the prose critique. The Coder can then
+ * reason about specific errors rather than parsing free-text.
+ */
+export interface VerifierFailure {
+    /** Which stage of the verifier produced this failure. */
+    kind: 'compile' | 'test' | 'review';
+
+    /** Path of the file containing the failure, relative to workspace
+     *  root. `null` for project-wide failures (e.g., a missing tsconfig,
+     *  or an "uncategorized" review failure). */
+    file: string | null;
+
+    /** 1-indexed line number when known. Compile errors usually have
+     *  one; test failures sometimes do; review failures rarely do. */
+    line?: number;
+
+    /** 1-indexed column number when known. */
+    column?: number;
+
+    /** Error code without language prefix:
+     *    - tsc errors: '2304', '2552', etc. (no 'TS' prefix)
+     *    - test failures: undefined
+     *    - review failures: a short tag like 'missing-acceptance-criteria'
+     */
+    code?: string;
+
+    /** Human-readable error message. The single most important field —
+     *  this is what the next Coder retry sees. */
+    message: string;
+
+    /** Severity classification.
+     *
+     *  - 'error': default; needs Coder attention
+     *  - 'unambiguous_typo': single-shot self-heal candidate. The error
+     *    pattern (missing import, typo with "Did you mean X?", undeclared
+     *    variable) is one the Coder should fix cleanly on retry without
+     *    user intervention. Tracked separately so we can measure how
+     *    often single-shot self-heal actually succeeds — which is the
+     *    P1.1 exit criterion.
+     *  - 'warning': non-blocking but worth flagging. Currently unused;
+     *    reserved for future use (e.g., lint warnings).
+     */
+    severity: 'error' | 'unambiguous_typo' | 'warning';
+}
+
+/**
+ * P1.1: classify a parsed tsc error into structured `VerifierFailure`,
+ * detecting unambiguous-typo patterns for single-shot self-heal.
+ *
+ * The set of "unambiguous" patterns is deliberately small: we'd rather
+ * miss a self-heal opportunity than wrongly flag a hard problem as
+ * easily-fixable. Adding patterns here is OK; removing them is a
+ * regression risk because the metric counts on consistent definition.
+ *
+ * Patterns currently flagged as unambiguous_typo:
+ *   - TS2304: "Cannot find name 'foo'" — usually a typo or missing import
+ *   - TS2305: "Module 'X' has no exported member 'Y'" — typo on import
+ *   - TS2307: "Cannot find module 'X'" — missing dependency or wrong path
+ *   - TS2552: "Cannot find name 'foo'. Did you mean 'Foo'?" — explicit typo
+ *
+ * NOT flagged as unambiguous (these are real errors that need thought):
+ *   - TS2322: type assignment errors — implies design-level mismatch
+ *   - TS2345: argument type errors — same
+ *   - TS2554: wrong number of arguments — could be either typo or design
+ *
+ * Exported for unit testing and so other agents (a future SmartCoder
+ * with its own retry policy) can reuse the same classification.
+ */
+export function classifyTscError(err: ParsedTscError, workspaceRoot: string): VerifierFailure {
+    const UNAMBIGUOUS_CODES = new Set(['2304', '2305', '2307', '2552']);
+    const severity: VerifierFailure['severity'] =
+        UNAMBIGUOUS_CODES.has(err.code) ? 'unambiguous_typo' : 'error';
+
+    // Normalize the file path to be relative to workspace when possible.
+    // tsc emits paths that may be absolute or relative depending on
+    // tsconfig and cwd; the Coder's retry context is easier to read
+    // when paths are workspace-relative.
+    //
+    // Always use forward slashes in the result. tsc itself emits paths
+    // with forward slashes regardless of platform; this keeps the
+    // verifier's output consistent on Windows (where path.relative
+    // returns backslash separators) and POSIX.
+    let file: string | null = err.file;
+    if (file && path.isAbsolute(file)) {
+        const rel = path.relative(workspaceRoot, file);
+        if (rel && !rel.startsWith('..')) {
+            file = rel.replace(/\\/g, '/');
+        }
+    }
+
+    return {
+        kind: 'compile',
+        file,
+        line: err.line,
+        column: err.column,
+        code: err.code,
+        message: err.message,
+        severity
+    };
 }
 
 /**
@@ -932,7 +1063,7 @@ export class VerifierAgent {
                             const missingPackages = new Set<string>(); 
                             
                             for (const match of matches) {
-                                if (match[1] === undefined) continue;
+                                if (match[1] === undefined) { continue; }
                                 const moduleName = match[1].trim();
                                 if (!moduleName.startsWith('.') && !moduleName.startsWith('/')) {
                                     missingPackages.add(moduleName);
@@ -979,10 +1110,23 @@ export class VerifierAgent {
                 // Skipping here avoids a redundant no-op write
                 // (originalContent IS post-mod when finalContent is set).
                 if (!isOptionC) {
-                    if (fileExisted) await env.writeFile(absolutePath, originalContent);
-                    else await env.deleteFile(absolutePath);
+                    if (fileExisted) { await env.writeFile(absolutePath, originalContent); }
+                    else { await env.deleteFile(absolutePath); }
                 }
-                return { passed: false, critique: `🚨 COMPILER ERROR DETECTED 🚨\n\n${compilerOutput}\n\nYou MUST fix these exact errors in your next attempt.` };
+                // P1.1: parse the compiler output into structured
+                // failures for the Coordinator's retry loop. The
+                // critique blob is kept for backwards compat (and as
+                // a fallback when parsing produces zero results, e.g.
+                // a non-tsc compiler with output we don't recognize).
+                const parsedErrors = parseTscOutput(compilerOutput);
+                const structuredFailures: VerifierFailure[] = parsedErrors.map(
+                    (err) => classifyTscError(err, workspaceRoot)
+                );
+                return {
+                    passed: false,
+                    critique: `🚨 COMPILER ERROR DETECTED 🚨\n\n${compilerOutput}\n\nYou MUST fix these exact errors in your next attempt.`,
+                    ...(structuredFailures.length > 0 ? { failures: structuredFailures } : {})
+                };
             }
     
             if (testCommand) {
@@ -1001,10 +1145,26 @@ export class VerifierAgent {
                     const failureLog = execErrorOutput(testErr);
                     // Component 2B-3c: see compile-failure branch for rationale.
                     if (!isOptionC) {
-                        if (fileExisted) await env.writeFile(absolutePath, originalContent);
-                        else await env.deleteFile(absolutePath);
+                        if (fileExisted) { await env.writeFile(absolutePath, originalContent); }
+                        else { await env.deleteFile(absolutePath); }
                     }
-                    return { passed: false, critique: `🚨 TDD TEST FAILURE 🚨\n\nYour code compiled, but it FAILED the PRD Business Rules.\n\nTest Output:\n${failureLog}\n\nYou MUST rewrite the logic to make the tests pass.` };
+                    // P1.1: surface a single structured test-failure.
+                    // Per-test extraction across runners (Jest, Vitest,
+                    // Mocha, pytest) is its own piece of work and not
+                    // in P1.1 scope — for now we attach one failure
+                    // summarizing the entire test run so the Coordinator's
+                    // structured retry path doesn't fall back to prose.
+                    const testFailure: VerifierFailure = {
+                        kind: 'test',
+                        file: draftDiff.filepath || null,
+                        message: failureLog.slice(0, 2000),  // cap to keep prompt size sane
+                        severity: 'error'
+                    };
+                    return {
+                        passed: false,
+                        critique: `🚨 TDD TEST FAILURE 🚨\n\nYour code compiled, but it FAILED the PRD Business Rules.\n\nTest Output:\n${failureLog}\n\nYou MUST rewrite the logic to make the tests pass.`,
+                        failures: [testFailure]
+                    };
                 }
             }
     
@@ -1017,8 +1177,8 @@ export class VerifierAgent {
             // legacy flow the verifier always works in a sandbox, so it
             // restores here so SidebarProvider can do the real apply.
             if (!isOptionC) {
-                if (fileExisted) await env.writeFile(absolutePath, originalContent);
-                else await env.deleteFile(absolutePath);
+                if (fileExisted) { await env.writeFile(absolutePath, originalContent); }
+                else { await env.deleteFile(absolutePath); }
             }
     
             return { passed: llmVerification.verified, critique: llmVerification.reasoning, usage: llmVerification.usage };
@@ -1032,8 +1192,8 @@ export class VerifierAgent {
             // because the flag is scoped above; but draftDiff.finalContent
             // is the source of truth, check that instead.
             if (draftDiff.finalContent === undefined) {
-                if (fileExisted) await env.writeFile(absolutePath, originalContent);
-                else await env.deleteFile(absolutePath);
+                if (fileExisted) { await env.writeFile(absolutePath, originalContent); }
+                else { await env.deleteFile(absolutePath); }
             }
             return { passed: false, critique: `Catastrophic Patch Error: ${errorMessage(err)}` };
         }

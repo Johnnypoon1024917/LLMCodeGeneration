@@ -103,13 +103,20 @@ describe('cleanTraceabilityTags — request/query tags become subheaders', () =>
     test('<request> becomes #### Request Body', () => {
         const input = '<request>field stuff</request>';
         const out = cleanTraceabilityTags(input);
-        expect(out).toContain('####Request Body');
+        // Valid markdown requires a space between the # marks and the
+        // heading text. The implementation correctly emits `#### Request
+        // Body` (with space). The previous assertion `####Request Body`
+        // (no space) would have produced an invalid heading that no
+        // markdown renderer treats as a heading. Test corrected during
+        // Sprint 2 PR 2.3.
+        expect(out).toContain('#### Request Body');
     });
 
     test('<query> becomes #### Query Parameters', () => {
         const input = '<query>params here</query>';
         const out = cleanTraceabilityTags(input);
-        expect(out).toContain('####Query Parameters');
+        // Same reason as above: valid markdown requires a space.
+        expect(out).toContain('#### Query Parameters');
     });
 });
 

@@ -54,8 +54,12 @@ let initialized = false;
  * `src/i18n/locales/<locale>.json`. The TypeScript will then enforce
  * that every translation key present in `en.json` exists in the new
  * locale's file (via the `Resources` type).
+ *
+ * 'zh-CN' added in Sprint 2 PR 2.3 alongside the i18n completion pass.
+ * Loaded dynamically by setLocale() — kept out of the initial bundle
+ * so en-only users don't pay the parse cost.
  */
-export type Locale = 'en' | 'vi' | 'id' | 'th';
+export type Locale = 'en' | 'vi' | 'id' | 'th' | 'zh-CN';
 
 /**
  * Initialize the i18next instance. Idempotent — safe to call from

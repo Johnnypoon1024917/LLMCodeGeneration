@@ -33,7 +33,13 @@ export type AuditEventKind =
     /** Spec workflow change: requirement edit, plan revision, task status. */
     | 'spec_edit'
     /** User config change: API endpoint, model, autopilot toggles. */
-    | 'config_change';
+    | 'config_change'
+    /** Hook fire: a .nexus/hooks/*.md hook was triggered. P1.4 added
+     *  this so security-conscious users can audit hook activity
+     *  separately from agent activity. Hooks are a different category
+     *  of write because they fire automatically (file save / schedule)
+     *  rather than as part of an explicit user-initiated agent run. */
+    | 'hook_fire';
 
 /**
  * A single audit record. Written one-per-line as JSON.
@@ -83,7 +89,7 @@ export interface AuditRecord {
  * construct payloads with the right shape.
  */
 export interface LlmCallPayload {
-    /** Model name as the user would recognize it (e.g. "qwen2.5-coder"). */
+    /** Model name as the user would recognize it (e.g. "qwen3.6-27b"). */
     model: string;
     /** API endpoint URL hit (no auth tokens included). */
     endpoint: string;
@@ -138,6 +144,34 @@ export interface ConfigChangePayload {
     oldValue?: string;
     /** New value (redacted for sensitive keys). */
     newValue?: string;
+}
+
+/**
+ * P1.4: hook fire audit payload.
+ *
+ * Captures enough detail for compliance review: which hook ran, what
+ * triggered it, what file (if any), how long, terminal status. The
+ * full hook prompt and full output are NOT included by default — they
+ * can be large and may contain sensitive content; hook-output content
+ * is best surfaced via chat UI, not the audit log. If a customer needs
+ * full prompt/output capture they can extend this payload with an
+ * explicit opt-in.
+ */
+export interface HookFirePayload {
+    /** Hook id (filename without `.md`). */
+    hookId: string;
+    /** Human-readable hook name from frontmatter. */
+    hookName: string;
+    /** What triggered the fire. */
+    triggerType: 'onFileSave' | 'onCommand' | 'onSchedule';
+    /** File that triggered (workspace-relative), when applicable. */
+    filePath?: string;
+    /** Wall-clock duration ms. */
+    durationMs: number;
+    /** Terminal status. Mirrors HookFireCompletedEvent.status. */
+    status: 'success' | 'error' | 'timeout' | 'skipped';
+    /** Cause string for error/timeout/skipped. Absent for success. */
+    errorMessage?: string;
 }
 
 /**

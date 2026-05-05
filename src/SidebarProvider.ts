@@ -7,9 +7,30 @@ import { getSmartASTContext, getGraphJSON, buildWorkspaceGraph } from './context
 import { runTask } from './agents/Coordinator';
 import { PlannerAgent } from './agents/PlannerAgent';
 import { ToolEventEmitter } from './agents/toolEventEmitter';
+import { HookEventEmitter } from './hooks/hookEventEmitter';
 import { ToolAuditCorrelator } from './audit/toolAuditCorrelator';
 import { SpecManager, type Phase } from './specs/SpecManager';
+// PR 3.2: hooks panel messages route through HookManager.
+import { HookManager } from './hooks/HookManager';
+// PR 3.3: steering rules panel messages route through SteeringManager.
+import { SteeringManager } from './specs/SteeringManager';
+import { McpManager } from './mcp/mcpManager';
 import { VSCodeEnvironment } from './adapters/VSCodeEnvironment';
+// V2.1.1 — project scaffolder. detectGreenfield is pure heuristic
+// (workspace shape + prompt), discoverTemplates lists workspace
+// .nexus/scaffolds/ and extension built-in scaffolds/. Used by the
+// requestScaffoldDecision case to populate the webview confirmation
+// dialog. V2.1.2 / V2.1.3 will add the apply path.
+import { detectGreenfield } from './scaffold/greenfieldDetector';
+import { discoverTemplates } from './scaffold/templateLoader';
+import {
+    listSessions,
+    buildSessionBundle,
+    summarizeSession,
+    buildTimeline,
+    computeTokenBreakdown,
+} from './audit/sessionDiagnostics';
+import { getMarks, getMarksRelative } from './diagnostics/startupTiming';
 import { runProjectTestAgent } from './agents/testAgent';
 import { errorMessage, isAbortError } from './utilities/errors';
 import { applyBlock } from './utilities/searchReplace';
@@ -99,6 +120,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _activeDesign: string = "";
     private _isMetaMode: boolean = false;
 
+    /**
+     * PR 2.4b: disposer for the AuditLog subscription. Set in
+     * resolveWebviewView when the webview attaches; called from the
+     * webview's onDidDispose so we don't leak subscriptions across
+     * webview reloads. AuditLog itself outlives the webview (it's
+     * workspace-scoped); the subscription is per-webview-instance.
+     *
+     * Type note: explicit `| undefined` (not just `?`) because the
+     * project's tsconfig has `exactOptionalPropertyTypes: true`, which
+     * disallows assigning `undefined` to `?` fields. We need to assign
+     * `undefined` to clear the disposer reference after teardown.
+     */
+    private _auditUnsubscribe: (() => void) | undefined = undefined;
+
+    /**
+     * PR 3.2: disposer for the HookManager list-changes subscription.
+     * Same lifecycle as _auditUnsubscribe — per-webview-instance,
+     * cleaned up on onDidDispose. Same type-shape rules apply
+     * (exactOptionalPropertyTypes).
+     */
+    private _hooksUnsubscribe: (() => void) | undefined = undefined;
+
+    /**
+     * PR 3.3: disposer for the SteeringManager list-changes subscription.
+     * Same lifecycle as the audit and hooks subscriptions above.
+     */
+    private _steeringUnsubscribe: (() => void) | undefined = undefined;
+
+    /**
+     * P2.1: disposer for the McpManager status subscription. Same
+     * lifecycle as the other manager subscriptions — per-webview-
+     * instance, torn down by onDidDispose.
+     */
+    private _mcpUnsubscribe: (() => void) | undefined = undefined;
+
     private _undoStack = new Map<string, { filepath: string, originalContent: string }>();
     private _pendingCommandResolver: ((approved: boolean) => void) | undefined;
 
@@ -119,6 +175,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      */
     private _toolEventEmitter?: ToolEventEmitter;
     private _toolAuditCorrelator?: ToolAuditCorrelator;
+
+    /**
+     * P1.4: hook lifecycle emitter. Same pattern as the tool emitter.
+     * The sink posts `{type: 'hookEvent', event}` to the webview so
+     * the React side can render inline hook cards. When no webview
+     * is attached the events drop silently — fine for the agent.
+     */
+    private _hookEventEmitter?: HookEventEmitter;
 
     /**
      * Get (or lazily construct) the per-session tool event emitter.
@@ -160,6 +224,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return this._toolEventEmitter;
     }
 
+    /**
+     * P1.4: lazy-construct the hook event emitter and wire HookManager
+     * to use it. Called during webview resolution so hooks that fire
+     * after the webview opens land as cards in chat.
+     *
+     * Idempotent: subsequent calls return the same emitter and re-wire
+     * HookManager harmlessly (HookManager.setEmitter just replaces the
+     * reference).
+     *
+     * The audit log path for hooks is wired separately in extension.ts
+     * (HookManager.setAuditLog), independent of this emitter — auditing
+     * works headless, even with no webview attached.
+     */
+    public getHookEventEmitter(): HookEventEmitter {
+        if (!this._hookEventEmitter) {
+            this._hookEventEmitter = new HookEventEmitter((event) => {
+                // Drop events to webview when no view is attached. The
+                // hook still ran and the audit record was written —
+                // we just lose the inline card. Reasonable tradeoff:
+                // hooks should be visible in real-time when the user
+                // is watching, but they shouldn't queue up when nobody's
+                // looking.
+                this._view?.webview.postMessage({
+                    type: 'hookEvent',
+                    event
+                });
+            });
+            // Wire HookManager NOW so any subsequent fire emits cards.
+            // HookManager.setEmitter is idempotent.
+            HookManager.getInstance().setEmitter(this._hookEventEmitter);
+        }
+        return this._hookEventEmitter;
+    }
+
     constructor(private readonly _extensionUri: vscode.Uri) {
     }
 
@@ -198,8 +296,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      */
     private specs(): SpecManager | null {
         const folders = vscode.workspace.workspaceFolders;
-        if (this._isMetaMode) return new SpecManager(this._extensionUri);
-        if (!folders || folders.length === 0) return null;
+        if (this._isMetaMode) { return new SpecManager(this._extensionUri); }
+        if (!folders || folders.length === 0) { return null; }
         return new SpecManager(folders[0]!.uri); // length > 0 guarded
     }
 
@@ -298,6 +396,142 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         };
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
+        // P1.4: wire the hook event emitter to the webview. Lazy-construct
+        // (no harm if no hook ever fires this session) and let the getter
+        // call HookManager.setEmitter for us. Fires that happen between
+        // extension activation and the first webview resolution drop
+        // their events silently — that's a small window and the
+        // OutputChannel still captures them.
+        this.getHookEventEmitter();
+
+        // PR 2.4b: subscribe to AuditLog so newly-emitted records stream
+        // to the webview in real time. The AuditLogPanel renders them
+        // via useAuditLog. If the webview reloads, onDidDispose tears
+        // down the old subscription before resolveWebviewView re-runs
+        // and registers a fresh one — no double-emission.
+        if (this._auditUnsubscribe) {
+            this._auditUnsubscribe();
+            this._auditUnsubscribe = undefined;
+        }
+        try {
+            const audit = getDeps().audit;
+            this._auditUnsubscribe = audit.subscribe((record) => {
+                // Best-effort post. If the webview is mid-teardown the
+                // postMessage call may throw; we don't want that to
+                // poison subsequent subscribers, so swallow with a warn.
+                try {
+                    this._view?.webview.postMessage({
+                        type: 'auditEntryAppended',
+                        record
+                    });
+                } catch (e: unknown) {
+                    console.warn('[SidebarProvider] auditEntryAppended postMessage failed:', e);
+                }
+            });
+        } catch (e: unknown) {
+            // getDeps().audit may not be wired in some test contexts.
+            // Don't block the webview from loading because audit isn't
+            // available — the panel just won't see live records.
+            console.warn('[SidebarProvider] audit subscription unavailable:', e);
+        }
+
+        webviewView.onDidDispose(() => {
+            if (this._auditUnsubscribe) {
+                this._auditUnsubscribe();
+                this._auditUnsubscribe = undefined;
+            }
+            if (this._hooksUnsubscribe) {
+                this._hooksUnsubscribe();
+                this._hooksUnsubscribe = undefined;
+            }
+            if (this._steeringUnsubscribe) {
+                this._steeringUnsubscribe();
+                this._steeringUnsubscribe = undefined;
+            }
+            if (this._mcpUnsubscribe) {
+                this._mcpUnsubscribe();
+                this._mcpUnsubscribe = undefined;
+            }
+        });
+
+        // PR 3.2: subscribe to HookManager list changes. Same lifecycle
+        // as the audit subscription. Initial hook list is auto-delivered
+        // by subscribeListChanges so we don't need to also call
+        // requestHookList from the host side — the webview gets the
+        // current state synchronously on subscribe.
+        if (this._hooksUnsubscribe) {
+            this._hooksUnsubscribe();
+            this._hooksUnsubscribe = undefined;
+        }
+        try {
+            const hm = HookManager.getInstance();
+            this._hooksUnsubscribe = hm.subscribeListChanges((summaries) => {
+                try {
+                    this._view?.webview.postMessage({
+                        type: 'hookListUpdated',
+                        hooks: summaries
+                    });
+                } catch (e: unknown) {
+                    log.warn('hookListUpdated postMessage failed:', e);
+                }
+            });
+        } catch (e: unknown) {
+            log.warn('hooks subscription unavailable:', e);
+        }
+
+        // PR 3.3: subscribe to SteeringManager list changes. Same shape
+        // as the hooks subscription above. We also kick off the manager's
+        // start() here so its FS watcher is active for the webview's
+        // lifetime. Idempotent — calling start() twice tears down the
+        // old watcher cleanly.
+        if (this._steeringUnsubscribe) {
+            this._steeringUnsubscribe();
+            this._steeringUnsubscribe = undefined;
+        }
+        try {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (workspaceFolders && workspaceFolders[0]) {
+                const sm = SteeringManager.getInstance();
+                sm.start(workspaceFolders[0].uri);
+                this._steeringUnsubscribe = sm.subscribeListChanges((summaries) => {
+                    try {
+                        this._view?.webview.postMessage({
+                            type: 'steeringListUpdated',
+                            items: summaries
+                        });
+                    } catch (e: unknown) {
+                        log.warn('steeringListUpdated postMessage failed:', e);
+                    }
+                });
+            }
+        } catch (e: unknown) {
+            log.warn('steering subscription unavailable:', e);
+        }
+
+        // P2.1: subscribe to McpManager status changes. The manager
+        // is started during extension activation (extension.ts) so
+        // we don't call start() here — just hook into status changes.
+        // Initial state is delivered synchronously by subscribe().
+        if (this._mcpUnsubscribe) {
+            this._mcpUnsubscribe();
+            this._mcpUnsubscribe = undefined;
+        }
+        try {
+            this._mcpUnsubscribe = McpManager.getInstance().subscribe((views, error) => {
+                try {
+                    this._view?.webview.postMessage({
+                        type: 'mcpStatusUpdated',
+                        servers: views,
+                        configError: error
+                    });
+                } catch (e: unknown) {
+                    log.warn('mcpStatusUpdated postMessage failed:', e);
+                }
+            });
+        } catch (e: unknown) {
+            log.warn('mcp subscription unavailable:', e);
+        }
+
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
 
@@ -335,6 +569,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         }
                     }
 
+                    // Read the three per-agent thinking-mode flags so the
+                    // webview can render the inline toggle. V2.0 created
+                    // these settings; this is the first surface that
+                    // exposes them via the chat UI. Per-agent control
+                    // remains in VS Code settings (Cmd+,) — the inline
+                    // pill is a single bulk toggle.
+                    const cfg = vscode.workspace.getConfiguration('nexuscode');
+                    const thinkingPlanner  = cfg.get<boolean>('thinkingPlanner')  ?? true;
+                    const thinkingCoder    = cfg.get<boolean>('thinkingCoder')    ?? true;
+                    const thinkingVerifier = cfg.get<boolean>('thinkingVerifier') ?? true;
+
                     this._view?.webview.postMessage({
                         type: 'initState',
                         messages: chatHistory,
@@ -346,7 +591,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         tasks: savedTasks,
                         nexusRules: savedRules,
                         phaseState: savedPhaseState,
-                        hasKey: hasApiKey
+                        hasKey: hasApiKey,
+                        thinkingMode: {
+                            planner:  thinkingPlanner,
+                            coder:    thinkingCoder,
+                            verifier: thinkingVerifier,
+                        },
                     });
                     break;
                 }
@@ -383,7 +633,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         log.debug("[DEBUG-MAP] 🟡 3. Normalizing AST Dictionary...");
                         let normalizedCodeGraph: { nodes: any[], edges: any[] } = { nodes: [], edges: [] };
                         Object.entries(codeGraph).forEach(([filepath, data]: [string, any]) => {
-                            if (filepath === 'nodes' || filepath === 'edges') return;
+                            if (filepath === 'nodes' || filepath === 'edges') { return; }
 
                             normalizedCodeGraph.nodes.push({ id: filepath, label: filepath.split('/').pop(), group: 'file' });
 
@@ -498,9 +748,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const taskQuery = data.prompt || data.task;
                         const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
 
+                        // P1.3: load steering exclude patterns so the
+                        // graph correlator skips paths the project
+                        // says not to read (legacy/, generated/, etc.).
+                        // Empty when no steering file declares any —
+                        // behavior unchanged for projects without
+                        // exclusions.
+                        const excludePatterns = await SteeringManager.getInstance().getExcludePatterns();
+
                         const [astContext, hybridContext] = await Promise.all([
-                            getSmartASTContext(taskQuery),
-                            retrieveHybridContext(taskQuery, 5)
+                            getSmartASTContext(taskQuery, { excludePatterns }),
+                            retrieveHybridContext(taskQuery, 5, excludePatterns)
                         ]);
                         const fullContext = `${astContext}\n\n${hybridContext}`;
 
@@ -702,12 +960,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     try {
                         const projectContext = await getProjectContext(rootUri.fsPath);
+                        // P1.2: load active steering rules so the planner
+                        // generates tasks consistent with project conventions
+                        // ("always use Result<T,E>", "tests live next to
+                        // their source"). buildSteeringPromptBlock returns
+                        // empty string when no steering files have content,
+                        // so this is a no-op for projects without steering.
+                        const steeringBlock = await SteeringManager.getInstance().buildSteeringPromptBlock();
 
                         const plan = await generateTasks(
                             this._activeRequirements,
                             this._activeDesign,
                             projectContext,
-                            this._activeTaskController.signal
+                            this._activeTaskController.signal,
+                            steeringBlock
                         );
 
                         const specs = new SpecManager(rootUri);
@@ -946,11 +1212,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // anchor.
                             const projectStructure = await getProjectContext(workspacePath);
 
+                            // P1.3: load steering exclude patterns
+                            // alongside the other context sources, then
+                            // pass them into getSmartASTContext.
+                            const excludePatterns = await SteeringManager.getInstance().getExcludePatterns();
+
                             const [lspContext, styleGuideMsgs, astContext, hybridContext] = await Promise.all([
                                 getLspContext(data.text),
                                 getProjectStyleGuides(),
-                                getSmartASTContext(data.text),
-                                retrieveHybridContext(data.text, 5)
+                                getSmartASTContext(data.text, { excludePatterns }),
+                                retrieveHybridContext(data.text, 5, excludePatterns)
                             ]);
                             const styleGuide = styleGuideMsgs.map(m => m.content).join('\n');
 
@@ -1140,7 +1411,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 case "executeTask": {
                     const originalTaskQuery = data.prompt || data.task;
                     const workspaceFolders = vscode.workspace.workspaceFolders;
-                    if (!workspaceFolders) return;
+                    if (!workspaceFolders) { return; }
 
                     const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                     this._activeTaskController = new AbortController();
@@ -1168,7 +1439,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             let finalMergedFilepath = "";
 
                             for (let i = 0; i < approaches.length; i++) {
-                                if (success || token.isCancellationRequested) break;
+                                if (success || token.isCancellationRequested) { break; }
 
                                 const approachNum = i + 1;
                                 const isMCTSActive = approaches.length > 1;
@@ -1230,6 +1501,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         activeDesign: this._activeDesign,
                                         previousFailures,
                                         globalRules,
+                                        // P2.2: route per-Coder steering through
+                                        // SteeringManager so the Coder gets:
+                                        //   - Template-stripped content
+                                        //   - Custom steering files (not just
+                                        //     product/structure/tech)
+                                        //   - Scope filtering ("## Applies to")
+                                        //
+                                        // The Coordinator caches the result per
+                                        // file across retries, so this closure
+                                        // is invoked at most once per filepath
+                                        // per task.
+                                        perFileSteering: async (filepath: string) =>
+                                            SteeringManager.getInstance().buildSteeringPromptBlock({
+                                                targetFilepath: filepath
+                                            }),
                                         log: (msg: string, stepType?: string, details?: string) => {
                                             this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
                                             if (stepType && details) {
@@ -1257,7 +1543,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         toolEventEmitter: this.getToolEventEmitter(),
                                     });
 
-                                    if (!finalDiffs || finalDiffs.length === 0) throw new Error("Swarm failed to generate verified code.");
+                                    if (!finalDiffs || finalDiffs.length === 0) { throw new Error("Swarm failed to generate verified code."); }
 
                                     // 🚀 UPGRADED: Loop through every diff generated by the Swarm and apply them!
                                     for (const finalDiff of finalDiffs) {
@@ -1428,13 +1714,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         const files = await vscode.workspace.fs.readDirectory(workspaceFolders[0]!.uri);
                         const fileNames = files.map(f => f[0]);
 
-                        if (fileNames.includes('pom.xml')) buildCommand = "mvn clean compile";
-                        else if (fileNames.includes('build.gradle')) buildCommand = "gradle build -x test";
-                        else if (fileNames.includes('go.mod')) buildCommand = "go build ./...";
-                        else if (fileNames.includes('requirements.txt')) buildCommand = "python -m compileall .";
-                        else if (fileNames.includes('tsconfig.json')) buildCommand = "npx -p typescript tsc --noEmit";
-                        else if (fileNames.includes('package.json')) buildCommand = "npm run build";
-                        else buildCommand = "echo 'No standard build file found (e.g., tsconfig.json, pom.xml). Skipping build.'";
+                        if (fileNames.includes('pom.xml')) { buildCommand = "mvn clean compile"; }
+                        else if (fileNames.includes('build.gradle')) { buildCommand = "gradle build -x test"; }
+                        else if (fileNames.includes('go.mod')) { buildCommand = "go build ./..."; }
+                        else if (fileNames.includes('requirements.txt')) { buildCommand = "python -m compileall ."; }
+                        else if (fileNames.includes('tsconfig.json')) { buildCommand = "npx -p typescript tsc --noEmit"; }
+                        else if (fileNames.includes('package.json')) { buildCommand = "npm run build"; }
+                        else { buildCommand = "echo 'No standard build file found (e.g., tsconfig.json, pom.xml). Skipping build.'"; }
                     } catch (e) {
                         // 🚀 FIX: Do not assume TypeScript if the environment is completely unknown!
                         buildCommand = "echo 'No standard build system detected (e.g., tsconfig.json, pom.xml). Skipping global compilation.'";
@@ -1551,7 +1837,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 case "openFile": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
-                    if (!workspaceFolders) return;
+                    if (!workspaceFolders) { return; }
                     const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
 
                     //  THE FIX: Safely handle Windows absolute paths vs relative paths!
@@ -1695,7 +1981,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         if (await vscode.workspace.applyEdit(workspaceEdit)) {
                             const dirtyDocs = vscode.workspace.textDocuments.filter(d => d.isDirty);
-                            for (const doc of dirtyDocs) await doc.save();
+                            for (const doc of dirtyDocs) { await doc.save(); }
 
                             this._view?.webview.postMessage({ type: 'allTasksCompleted', status: 'approved' });
                             vscode.window.showInformationMessage(t("transactions.atomic_committed"));
@@ -1754,11 +2040,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             // 🚀 POLYGLOT TEST NAMING: Adapt to exact language conventions
                             let testFileName = `${parsedPath.name}.test${parsedPath.ext}`; // Default JS/TS/General
-                            if (parsedPath.ext === '.go') testFileName = `${parsedPath.name}_test.go`;
-                            else if (parsedPath.ext === '.py') testFileName = `test_${parsedPath.name}.py`;
-                            else if (parsedPath.ext === '.rs') testFileName = `${parsedPath.name}_test.rs`;
-                            else if (parsedPath.ext === '.java') testFileName = `${parsedPath.name.charAt(0).toUpperCase() + parsedPath.name.slice(1)}Test.java`;
-                            else if (parsedPath.ext === '.rb') testFileName = `test_${parsedPath.name}.rb`;
+                            if (parsedPath.ext === '.go') { testFileName = `${parsedPath.name}_test.go`; }
+                            else if (parsedPath.ext === '.py') { testFileName = `test_${parsedPath.name}.py`; }
+                            else if (parsedPath.ext === '.rs') { testFileName = `${parsedPath.name}_test.rs`; }
+                            else if (parsedPath.ext === '.java') { testFileName = `${parsedPath.name.charAt(0).toUpperCase() + parsedPath.name.slice(1)}Test.java`; }
+                            else if (parsedPath.ext === '.rb') { testFileName = `test_${parsedPath.name}.rb`; }
 
                             // Hardcode the route to the root 'tests/' directory
                             const deterministicPath = path.join('tests', cleanDir, testFileName);
@@ -1836,7 +2122,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 case "executeCommand": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
-                    if (!workspaceFolders) return;
+                    if (!workspaceFolders) { return; }
                     const workspacePath = workspaceFolders[0]!.uri.fsPath;
 
                     const maxRetries = 3;
@@ -1858,7 +2144,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             }
                         );
 
-                        if (!result) break;
+                        if (!result) { break; }
 
                         if (result.success) {
                             success = true;
@@ -1893,7 +2179,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                                 // Save files so the next terminal run sees the changes!
                                 const dirtyDocs = vscode.workspace.textDocuments.filter(d => d.isDirty);
-                                for (const doc of dirtyDocs) await doc.save();
+                                for (const doc of dirtyDocs) { await doc.save(); }
 
                                 this._view?.webview.postMessage({ type: 'agentStep', task: data.task, stepType: 'heal', description: `Auto-Heal Applied to ${fixes.length} files.` });
                             } else {
@@ -1929,19 +2215,202 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
+                case "setThinkingMode": {
+                    // Inline thinking-mode toggle. Payload is
+                    // { planner?: boolean, coder?: boolean, verifier?: boolean }.
+                    // Each present key is written to the matching VS Code
+                    // config; absent keys are unchanged. The inline UI
+                    // currently sends all three as a bulk toggle, but
+                    // the API supports per-agent updates so a future
+                    // power-user UI (or an admin portal) can drive
+                    // single-agent changes through the same path.
+                    const cfg = vscode.workspace.getConfiguration('nexuscode');
+                    const target = vscode.ConfigurationTarget.Global;
+                    if (typeof data.planner === 'boolean') {
+                        await cfg.update('thinkingPlanner', data.planner, target);
+                    }
+                    if (typeof data.coder === 'boolean') {
+                        await cfg.update('thinkingCoder', data.coder, target);
+                    }
+                    if (typeof data.verifier === 'boolean') {
+                        await cfg.update('thinkingVerifier', data.verifier, target);
+                    }
+                    // Echo the new state back so the webview can confirm
+                    // (and any concurrently-open second webview can sync).
+                    const newCfg = vscode.workspace.getConfiguration('nexuscode');
+                    this._view?.webview.postMessage({
+                        type: 'thinkingModeChanged',
+                        mode: {
+                            planner:  newCfg.get<boolean>('thinkingPlanner')  ?? true,
+                            coder:    newCfg.get<boolean>('thinkingCoder')    ?? true,
+                            verifier: newCfg.get<boolean>('thinkingVerifier') ?? true,
+                        },
+                    });
+                    break;
+                }
+
+                case "openThinkingSettings": {
+                    // Inline "Advanced" link → opens VS Code settings
+                    // filtered to the per-agent thinking keys. Lets
+                    // power users customize per-agent without us
+                    // building inline UI for it.
+                    await vscode.commands.executeCommand(
+                        'workbench.action.openSettings',
+                        'nexuscode.thinking'
+                    );
+                    break;
+                }
+
+                case "requestScaffoldDecision": {
+                    // V2.1.1 — entry point for the greenfield-scaffolding
+                    // confirmation flow. Webview calls this when the
+                    // user submits a chat prompt; we:
+                    //   1. List top-level workspace files (cheap)
+                    //   2. Run pure greenfield detection
+                    //   3. Discover available templates (workspace
+                    //      .nexus/scaffolds/ + extension built-ins)
+                    //   4. Send results back as scaffoldDecisionAvailable
+                    //
+                    // The webview's dialog uses the result to either
+                    // (a) skip — proceed straight to generateRequirements,
+                    // or (b) show the stack picker — let user choose
+                    // template, then proceed with scaffolding-aware
+                    // request flow (V2.1.3 adds the planner integration).
+                    //
+                    // V2.1.1 ships ONLY the decision plumbing; the
+                    // actual scaffold-apply (file copy) and planner
+                    // adjustment ship in V2.1.2 / V2.1.3.
+                    try {
+                        const userPrompt = typeof data.prompt === 'string' ? data.prompt : '';
+                        const workspaceFolders = vscode.workspace.workspaceFolders;
+                        const workspaceRoot = workspaceFolders?.[0]?.uri.fsPath;
+
+                        // Inventory: top-level filenames + total count.
+                        // We bound the recursion + count to avoid stalling
+                        // on huge workspaces — the detector only needs
+                        // to know "are there many files" at the top.
+                        let topLevelFilenames: string[] = [];
+                        let totalFileCount = 0;
+                        if (workspaceRoot) {
+                            try {
+                                const entries = await vscode.workspace.fs.readDirectory(
+                                    vscode.Uri.file(workspaceRoot)
+                                );
+                                topLevelFilenames = entries
+                                    .filter(([_, kind]) => kind === vscode.FileType.File)
+                                    .map(([name]) => name);
+                                // Count files up to a cap of 100; past
+                                // that we know it's a real project. We
+                                // recurse 1 level deep into top-level
+                                // dirs (excluding common ignored ones)
+                                // to catch projects where the marker
+                                // is in a subdir (rare but possible).
+                                totalFileCount = topLevelFilenames.length;
+                                const COUNT_CAP = 100;
+                                const SKIP_DIRS = new Set([
+                                    'node_modules', '.git', '.nexus', 'dist',
+                                    'build', 'out', '__pycache__', '.venv',
+                                    'venv', 'target', '.next', '.gradle',
+                                ]);
+                                for (const [name, kind] of entries) {
+                                    if (totalFileCount >= COUNT_CAP) { break; }
+                                    if (kind !== vscode.FileType.Directory) { continue; }
+                                    if (SKIP_DIRS.has(name)) { continue; }
+                                    try {
+                                        const sub = await vscode.workspace.fs.readDirectory(
+                                            vscode.Uri.file(path.join(workspaceRoot, name))
+                                        );
+                                        totalFileCount += sub.filter(
+                                            ([_, k]) => k === vscode.FileType.File
+                                        ).length;
+                                    } catch {
+                                        // Subdir read failed (permission,
+                                        // race) — treat as 0 contribution.
+                                    }
+                                }
+                            } catch (e) {
+                                log.warn(`[Scaffold] Could not list workspace: ${errorMessage(e)}`);
+                            }
+                        }
+
+                        const detection = detectGreenfield({
+                            prompt: userPrompt,
+                            topLevelFilenames,
+                            totalFileCount,
+                        });
+
+                        const templates = discoverTemplates(
+                            workspaceRoot,
+                            this._extensionUri.fsPath
+                        );
+
+                        this._view?.webview.postMessage({
+                            type: 'scaffoldDecisionAvailable',
+                            detection: {
+                                isGreenfield: detection.isGreenfield,
+                                confidence: detection.confidence,
+                                stackHint: detection.stackHint,
+                            },
+                            templates: templates.map(t => ({
+                                id: t.id,
+                                displayName: t.displayName,
+                                description: t.description,
+                                stackTags: t.stackTags,
+                                source: t.source,
+                            })),
+                        });
+                    } catch (e) {
+                        log.error(`[Scaffold] requestScaffoldDecision failed: ${errorMessage(e)}`);
+                        // Don't leave the webview waiting — send an
+                        // empty decision so the dialog can fail open
+                        // (i.e., proceed without scaffolding).
+                        this._view?.webview.postMessage({
+                            type: 'scaffoldDecisionAvailable',
+                            detection: { isGreenfield: false, confidence: 'low' },
+                            templates: [],
+                        });
+                    }
+                    break;
+                }
+
+                case "scaffoldDecisionMade": {
+                    // V2.1.1 — webview reports the user's choice. Today
+                    // we just log and acknowledge; the actual scaffolding
+                    // (template file copy + Planner prompt adjustment)
+                    // lands in V2.1.2 / V2.1.3. Logging now lets us
+                    // verify the decision flow end-to-end during V2.1.1
+                    // QA before V2.1.2 introduces filesystem effects.
+                    const action = typeof data.action === 'string' ? data.action : 'skip';
+                    const templateId = typeof data.templateId === 'string' ? data.templateId : null;
+                    log.info(
+                        `[Scaffold] User decision: action=${action}` +
+                        (templateId ? ` templateId=${templateId}` : '')
+                    );
+                    // Echo back so the webview can release its waiting
+                    // state and proceed with the user's prompt as
+                    // normal (or with scaffolding context once V2.1.2
+                    // lands).
+                    this._view?.webview.postMessage({
+                        type: 'scaffoldDecisionAcknowledged',
+                        action,
+                        templateId,
+                    });
+                    break;
+                }
+
                 case "approveCommand": {
-                    if (this._pendingCommandResolver) this._pendingCommandResolver(true);
+                    if (this._pendingCommandResolver) { this._pendingCommandResolver(true); }
                     break;
                 }
 
                 case "rejectCommand": {
-                    if (this._pendingCommandResolver) this._pendingCommandResolver(false);
+                    if (this._pendingCommandResolver) { this._pendingCommandResolver(false); }
                     break;
                 }
 
                 case "generateProjectTests": {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
-                    if (!workspaceFolders) return;
+                    if (!workspaceFolders) { return; }
                     const rootUri = workspaceFolders[0]!.uri;
 
                     vscode.window.withProgress({
@@ -1983,6 +2452,209 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             vscode.window.showErrorMessage(`TDD Generation Error: ${errorMessage(error)}`);
                         }
                     });
+                    break;
+                }
+
+                // PR 3.2: hooks panel messages. The HookManager owns
+                // hook state on the host; we just delegate. Updates flow
+                // back through the subscription wired in resolveWebviewView.
+                case "requestHookList": {
+                    try {
+                        const hm = HookManager.getInstance();
+                        const summaries = hm.getHookSummaries();
+                        this._view?.webview.postMessage({
+                            type: 'hookListUpdated',
+                            hooks: summaries
+                        });
+                    } catch (e: unknown) {
+                        log.warn('requestHookList failed:', e);
+                    }
+                    break;
+                }
+                case "toggleHook": {
+                    const id = (data as { id?: unknown }).id;
+                    const enabled = (data as { enabled?: unknown }).enabled;
+                    if (typeof id !== 'string' || typeof enabled !== 'boolean') {
+                        break;
+                    }
+                    try {
+                        await HookManager.getInstance().toggleHook(id, enabled);
+                    } catch (e: unknown) {
+                        log.warn('toggleHook failed:', e);
+                    }
+                    break;
+                }
+                case "runHook": {
+                    const id = (data as { id?: unknown }).id;
+                    if (typeof id !== 'string') {
+                        break;
+                    }
+                    try {
+                        await HookManager.getInstance().runHookManually(id);
+                    } catch (e: unknown) {
+                        log.warn('runHook failed:', e);
+                    }
+                    break;
+                }
+                case "openHookFile": {
+                    const id = (data as { id?: unknown }).id;
+                    if (typeof id !== 'string') {
+                        break;
+                    }
+                    try {
+                        await HookManager.getInstance().openHookFile(id);
+                    } catch (e: unknown) {
+                        log.warn('openHookFile failed:', e);
+                    }
+                    break;
+                }
+
+                // PR 3.3: steering rules panel messages. Delegate to
+                // SteeringManager. Updates round-trip via the
+                // subscription wired in resolveWebviewView.
+                case "requestSteeringList": {
+                    try {
+                        const sm = SteeringManager.getInstance();
+                        const summaries = await sm.getSteeringSummaries();
+                        this._view?.webview.postMessage({
+                            type: 'steeringListUpdated',
+                            items: summaries
+                        });
+                    } catch (e: unknown) {
+                        log.warn('requestSteeringList failed:', e);
+                    }
+                    break;
+                }
+                case "createSteeringFile": {
+                    const id = (data as { id?: unknown }).id;
+                    if (typeof id !== 'string') {
+                        break;
+                    }
+                    try {
+                        await SteeringManager.getInstance().ensureSteeringFile(id);
+                    } catch (e: unknown) {
+                        log.warn('createSteeringFile failed:', e);
+                    }
+                    break;
+                }
+                case "openSteeringFile": {
+                    const id = (data as { id?: unknown }).id;
+                    if (typeof id !== 'string') {
+                        break;
+                    }
+                    try {
+                        await SteeringManager.getInstance().openSteeringFile(id);
+                    } catch (e: unknown) {
+                        log.warn('openSteeringFile failed:', e);
+                    }
+                    break;
+                }
+                case "requestMcpStatus": {
+                    // P2.1: webview asks for the current snapshot — used
+                    // when the panel is opened/remounted. The subscription
+                    // also delivers initial state synchronously, but a
+                    // remount can happen without re-subscribing (e.g. tab
+                    // switch in the webview), so this message gives the
+                    // panel a way to refetch on demand.
+                    try {
+                        const mgr = McpManager.getInstance();
+                        this._view?.webview.postMessage({
+                            type: 'mcpStatusUpdated',
+                            servers: mgr.getServerViews(),
+                            configError: mgr.getConfigError()
+                        });
+                    } catch (e: unknown) {
+                        log.warn('requestMcpStatus failed:', e);
+                    }
+                    break;
+                }
+                case "mcpReload": {
+                    // P2.1: user clicked "Reload config" in the MCP
+                    // panel. Forces a re-read of .nexus/mcp-servers.json
+                    // and a diff against current state. Subscribers are
+                    // notified by the manager itself, so we don't need
+                    // to post here.
+                    try {
+                        await McpManager.getInstance().reloadConfig();
+                    } catch (e: unknown) {
+                        log.warn('mcpReload failed:', e);
+                    }
+                    break;
+                }
+                case "requestSessionList": {
+                    // P3.1 panel: webview asks for the list of known
+                    // audit sessions. This drives the session-picker
+                    // dropdown in the diagnostics panel. We read all
+                    // historical records via audit.readRecords() —
+                    // bounded by date range if the panel asks for it.
+                    try {
+                        const audit = getDeps().audit;
+                        const records = await audit.readRecords();
+                        const sessions = listSessions(records);
+                        this._view?.webview.postMessage({
+                            type: 'sessionListUpdated',
+                            sessions
+                        });
+                    } catch (e: unknown) {
+                        log.warn('requestSessionList failed:', e);
+                        // Send an empty list on error so the UI can
+                        // distinguish "loading" from "no sessions"
+                        this._view?.webview.postMessage({
+                            type: 'sessionListUpdated',
+                            sessions: []
+                        });
+                    }
+                    break;
+                }
+                case "requestSessionBundle": {
+                    // P3.1 panel: webview asks for the full diagnostic
+                    // bundle for a specific session. The bundle is the
+                    // data side of the support-ticket export — same
+                    // shape returned, panel renders + offers download.
+                    const sessionId = (data as { sessionId?: unknown }).sessionId;
+                    if (typeof sessionId !== 'string') { break; }
+                    try {
+                        const audit = getDeps().audit;
+                        const records = await audit.readRecords();
+                        const summary = summarizeSession(records, sessionId);
+                        const timeline = buildTimeline(records, { sessionId });
+                        const breakdown = computeTokenBreakdown(records, sessionId);
+                        const bundle = buildSessionBundle(records, sessionId);
+                        this._view?.webview.postMessage({
+                            type: 'sessionBundleUpdated',
+                            sessionId,
+                            summary,
+                            timeline,
+                            breakdown,
+                            bundle
+                        });
+                    } catch (e: unknown) {
+                        log.warn('requestSessionBundle failed:', e);
+                        this._view?.webview.postMessage({
+                            type: 'sessionBundleUpdated',
+                            sessionId,
+                            summary: null,
+                            timeline: [],
+                            breakdown: null,
+                            bundle: null,
+                            error: e instanceof Error ? e.message : String(e)
+                        });
+                    }
+                    break;
+                }
+                case "requestStartupTiming": {
+                    // P3.2 panel: webview asks for the host-side
+                    // activation phase marks. Cheap operation — just
+                    // copies the in-process buffer.
+                    try {
+                        this._view?.webview.postMessage({
+                            type: 'startupTimingUpdated',
+                            marks: getMarks(),
+                            relative: getMarksRelative()
+                        });
+                    } catch (e: unknown) {
+                        log.warn('requestStartupTiming failed:', e);
+                    }
                     break;
                 }
             }

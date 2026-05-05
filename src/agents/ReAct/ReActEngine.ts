@@ -27,6 +27,8 @@
 // Differences are configurable through ReActConfig.
 
 import { getProvider } from '../../llm';
+import { extractFallbackToolCalls } from '../../llm/toolCallFallback';
+import { recordToolUsageResult } from '../../llm/OpenAICompatibleProvider';
 import type {
     ChatMessage,
     ToolCall,
@@ -98,12 +100,26 @@ export async function runReAct(config: ReActConfig): Promise<ReActResult> {
 
     for (let step = 0; step < config.maxSteps; step++) {
         // ─── 1. Call the LLM ─────────────────────────────────────────
+        // Effective temperature: explicit config.temperature wins;
+        // otherwise the thinking profile contributes; otherwise the
+        // historical 0.2 default.
+        const effectiveTemperature =
+            config.temperature ??
+            config.thinkingProfile?.temperature ??
+            0.2;
         const completionOpts: CompletionOptions = {
             tools: config.tools,
             toolChoice: 'auto',
-            temperature: config.temperature ?? 0.2
+            temperature: effectiveTemperature
         };
-        if (config.abortSignal) completionOpts.signal = config.abortSignal;
+        if (config.thinkingProfile) {
+            completionOpts.enableThinking = config.thinkingProfile.enableThinking;
+            completionOpts.preserveThinking = config.thinkingProfile.preserveThinking;
+            completionOpts.topP = config.thinkingProfile.topP;
+            completionOpts.topK = config.thinkingProfile.topK;
+            completionOpts.presencePenalty = config.thinkingProfile.presencePenalty;
+        }
+        if (config.abortSignal) { completionOpts.signal = config.abortSignal; }
         if (config.usageCallback) {
             completionOpts.onUsage = (usage) => config.usageCallback!(usage);
         }
@@ -174,7 +190,7 @@ export async function runReAct(config: ReActConfig): Promise<ReActResult> {
             // Record budget AFTER dispatch so the next turn's check
             // reflects what actually ran (including dedup-shortcircuited
             // calls — they still count as model intent).
-            if (budget) budget.record(aiMessage.tool_calls.length);
+            if (budget) { budget.record(aiMessage.tool_calls.length); }
             totalToolCalls += aiMessage.tool_calls.length;
 
             // Last-step-with-tool-calls case: the legacy swarmDraftCode
@@ -203,7 +219,7 @@ export async function runReAct(config: ReActConfig): Promise<ReActResult> {
         }
 
         // ─── 3. No tool calls — termination check ───────────────────
-        if (stuckDetector) stuckDetector.reset();
+        if (stuckDetector) { stuckDetector.reset(); }
         const content = (aiMessage.content ?? '').trim();
 
         if (config.isDone(content)) {
@@ -327,12 +343,30 @@ export async function runReActStreaming(config: ReActConfig): Promise<ReActResul
 
     for (let step = 0; step < config.maxSteps; step++) {
         // ─── 1. Stream the LLM response and accumulate the turn ──────
+        // Streaming path: forward sampling params from the thinking
+        // profile if present, but FORCE enableThinking=false. The SSE
+        // parser doesn't yet handle `delta.reasoning_content` —
+        // surfacing reasoning to streaming consumers is a separate PR.
+        // For now, streaming users see the final answer only; users
+        // who want to see reasoning use the non-streaming path
+        // (PlannerAgent / VerifierAgent in V2.0).
+        const streamingTemperature =
+            config.temperature ??
+            config.thinkingProfile?.temperature ??
+            0.2;
         const completionOpts: CompletionOptions = {
             tools: config.tools,
             toolChoice: 'auto',
-            temperature: config.temperature ?? 0.2
+            temperature: streamingTemperature
         };
-        if (config.abortSignal) completionOpts.signal = config.abortSignal;
+        if (config.thinkingProfile) {
+            // Forward sampling params, but keep thinking off for stream.
+            completionOpts.enableThinking = false;
+            completionOpts.topP = config.thinkingProfile.topP;
+            completionOpts.topK = config.thinkingProfile.topK;
+            completionOpts.presencePenalty = config.thinkingProfile.presencePenalty;
+        }
+        if (config.abortSignal) { completionOpts.signal = config.abortSignal; }
         if (config.usageCallback) {
             completionOpts.onUsage = (usage) => config.usageCallback!(usage);
         }
@@ -347,11 +381,64 @@ export async function runReActStreaming(config: ReActConfig): Promise<ReActResul
         for await (const delta of stream) {
             if (delta.kind === 'text') {
                 assistantText += delta.content;
-                if (config.streamCallback) config.streamCallback(delta.content);
+                if (config.streamCallback) { config.streamCallback(delta.content); }
             } else if (delta.kind === 'tool_call') {
                 assistantToolCalls.push(delta.toolCall);
             } else if (delta.kind === 'finish') {
                 finishReason = delta.reason;
+            }
+        }
+
+        // V2.0 follow-up: client-side fallback for inference servers
+        // that didn't surface tool calls in the native delta channel.
+        // When (a) the stream emitted no native tool_calls, and
+        // (b) the accumulated text contains a fallback-parseable
+        // structure, synthesize tool_calls and clean the text.
+        //
+        // Why HERE in the engine, not in the SSE parser:
+        //   - The SSE parser stays pure: yields deltas as they arrive,
+        //     no buffering, no second-guessing
+        //   - The engine has all info at the right point (post-stream)
+        //   - The user already saw the raw text via streamCallback,
+        //     which is OK behavior — they SEE what the agent decided
+        //     to do, and we still dispatch the action
+        //
+        // This is invisible to all downstream code: aiMessage looks
+        // exactly like a normal tool-call response would.
+        // Snapshot the native tool-call count BEFORE the fallback
+        // parser potentially synthesizes more. We want the capability
+        // tracker to see "did the server's native tool-call channel
+        // produce anything", not "did the fallback path also work".
+        // Fallback-recovered calls are a sign the endpoint is
+        // misconfigured even if the agent succeeded.
+        const nativeToolCallCount = assistantToolCalls.length;
+
+        if (assistantToolCalls.length === 0 && assistantText.length > 0) {
+            const fallback = extractFallbackToolCalls(assistantText);
+            if (fallback.toolCalls.length > 0) {
+                for (const tc of fallback.toolCalls) { assistantToolCalls.push(tc); }
+                assistantText = fallback.cleanContent;
+                config.log(
+                    `Tool-call fallback parser recovered ${fallback.toolCalls.length} call(s) ` +
+                    `from format(s): ${fallback.formatsDetected.join(', ')}. ` +
+                    `Inference server's --tool-call-parser is likely misconfigured for this model.`
+                );
+            } else {
+                // Diagnostic: when no tool_calls AND no fallback match,
+                // log a preview of what the model actually emitted. This
+                // is the only signal a remote debugger has when an agent
+                // run fails with "no modifying tool calls" — without it,
+                // you can't tell whether the model emitted nothing, or
+                // an unrecognized format, or the wrong format silently.
+                //
+                // 500-char preview keeps log size bounded; full text
+                // lives in the audit log via the regular llm_call entry.
+                const preview = assistantText.length > 500
+                    ? assistantText.slice(0, 500) + '\n...(truncated, ' + assistantText.length + ' total chars)'
+                    : assistantText;
+                config.log(
+                    `[DIAGNOSTIC] No tool_calls + no fallback match. assistantText preview:\n${preview}`
+                );
             }
         }
 
@@ -361,6 +448,18 @@ export async function runReActStreaming(config: ReActConfig): Promise<ReActResul
         };
         if (assistantToolCalls.length > 0) {
             aiMessage.tool_calls = assistantToolCalls;
+        }
+
+        // Record native tool-calling success/failure for this endpoint.
+        // We use the snapshot taken BEFORE fallback ran — fallback
+        // recovery is itself a signal of degradation, so counting it
+        // as a success would mask the problem and keep the endpoint
+        // out of text-injection mode forever.
+        try {
+            recordToolUsageResult(provider.endpoint, nativeToolCallCount > 0);
+        } catch {
+            // Defensive: tracking is observability, not load-bearing.
+            // A failure here must NOT abort the engine run.
         }
 
         assistantMessages.push(aiMessage);
@@ -388,7 +487,7 @@ export async function runReActStreaming(config: ReActConfig): Promise<ReActResul
                 stuckDetector.checkAndRecord(signature);
             }
 
-            if (budget) budget.record(aiMessage.tool_calls.length);
+            if (budget) { budget.record(aiMessage.tool_calls.length); }
             totalToolCalls += aiMessage.tool_calls.length;
 
             // Same last-step-with-tool-calls handling as runReAct: the
@@ -413,7 +512,7 @@ export async function runReActStreaming(config: ReActConfig): Promise<ReActResul
         }
 
         // ─── 3. No tool calls — termination check ───────────────────
-        if (stuckDetector) stuckDetector.reset();
+        if (stuckDetector) { stuckDetector.reset(); }
         const content = (aiMessage.content ?? '').trim();
 
         // Streaming-specific: if the model hit the token limit, treat
@@ -566,7 +665,7 @@ async function dispatchOneCall(
     };
     if (config.emitter) {
         dispatchOpts.emitter = config.emitter;
-        if (config.taskId) dispatchOpts.taskId = config.taskId;
+        if (config.taskId) { dispatchOpts.taskId = config.taskId; }
     }
 
     const dispatchResult: ToolDispatchResult = await dispatchWithEvents(

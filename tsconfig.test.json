@@ -1,0 +1,46 @@
+{
+    // Test-specific tsconfig used by vscode-test to compile the
+    // Mocha-driven tests at the top level of src/test/ (the suites
+    // that run inside the Extension Host).
+    //
+    // The main tsconfig.json excludes src/test entirely so that
+    // npm run compile produces a clean extension build without any
+    // test code in out/. This config inverts that — it includes
+    // production sources PLUS top-level src/test/*.test.ts files,
+    // and uses Mocha + node types instead of Jest's globals.
+    //
+    // Usage:
+    //   tsc -p tsconfig.test.json    # compiles to out/test/*.test.js
+    //
+    // Then:
+    //   npx vscode-test --label fixtures
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "rootDir": "src",
+        "outDir": "out",
+        // Mocha for vscode-test, NOT jest. The Jest unit tests under
+        // src/test/unit/ use ts-jest which has its own type resolution
+        // and isn't compiled by this config.
+        "types": ["node", "mocha"]
+    },
+    "include": [
+        // Production sources
+        "src/**/*.ts"
+    ],
+    "exclude": [
+        "node_modules",
+        ".vscode-test",
+        "webview-ui",
+        // The Jest unit tests have their own runner (ts-jest). They
+        // must not be compiled by this config or we'd get global-name
+        // collisions between mocha and jest types.
+        "src/test/unit",
+        "src/test/__mocks__",
+        // Webview vitest setup file. If it ended up under src/test/
+        // by mistake (it belongs at webview-ui/src/test/setup.ts),
+        // exclude it so this config doesn't try to type-check it
+        // against the host's type packages (vitest isn't installed
+        // at the host level).
+        "src/test/setup.ts"
+    ]
+}

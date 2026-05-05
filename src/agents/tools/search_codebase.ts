@@ -112,20 +112,20 @@ const executor: ToolExecutor = async (args, _ctx) => {
     const llmSnippets: string[] = [];
 
     for (const uri of uris) {
-        if (matches.length >= MAX_RESULTS) break;
+        if (matches.length >= MAX_RESULTS) { break; }
         try {
             const fileData = await vscode.workspace.fs.readFile(uri);
             const content = new TextDecoder().decode(fileData);
 
             // Fast pre-filter: skip files that don't contain the keyword
             // anywhere. Avoids splitting lines for irrelevant files.
-            if (!content.includes(keyword)) continue;
+            if (!content.includes(keyword)) { continue; }
 
             const lines = content.split('\n');
             for (let i = 0; i < lines.length; i++) {
-                if (matches.length >= MAX_RESULTS) break;
+                if (matches.length >= MAX_RESULTS) { break; }
                 const line = lines[i];
-                if (line === undefined || !line.includes(keyword)) continue;
+                if (line === undefined || !line.includes(keyword)) { continue; }
 
                 const relativePath = vscode.workspace.asRelativePath(uri);
                 const snippet = lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 3)).join('\n');

@@ -25,7 +25,7 @@ function normalizePath(p: string): string {
 export async function getProjectContext(rootPath?: string): Promise<string> {
     // Determine the root directory: Use the argument if provided (Meta-Mode), otherwise use workspace (User-Mode)
     const rawRootDir = rootPath || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 ? vscode.workspace.workspaceFolders[0]!.uri.fsPath : "");
-    if (!rawRootDir) return "No workspace open.";
+    if (!rawRootDir) { return "No workspace open."; }
 
     const rootDir = normalizePath(rawRootDir);
 
@@ -68,7 +68,7 @@ export async function getRepoContent(tokenBudgetChars: number = 200000, rootPath
     let currentChars = 0;
     
     const rawRootDir = rootPath || (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0 ? vscode.workspace.workspaceFolders[0]!.uri.fsPath : "");
-    if (!rawRootDir) return "";
+    if (!rawRootDir) { return ""; }
 
     const rootDir = normalizePath(rawRootDir);
 
@@ -97,23 +97,23 @@ export async function getRepoContent(tokenBudgetChars: number = 200000, rootPath
     filesToRead.sort((a, b) => {
         const getPriority = (p: string) => {
             const lower = p.toLowerCase();
-            if (lower.includes('app.')) return -3;
-            if (lower.includes('main.')) return -2;
-            if (lower.includes('index.')) return -2;
-            if (p.startsWith('src/')) return -1;
+            if (lower.includes('app.')) { return -3; }
+            if (lower.includes('main.')) { return -2; }
+            if (lower.includes('index.')) { return -2; }
+            if (p.startsWith('src/')) { return -1; }
             return 0;
         };
         return getPriority(a) - getPriority(b);
     });
 
     for (const relativePath of filesToRead) {
-        if (currentChars >= tokenBudgetChars) break;
+        if (currentChars >= tokenBudgetChars) { break; }
         
         const fullPath = path.join(rootDir, relativePath);
         const content = await readFile(fullPath);
         
         // Skip files that are likely minified or irrelevant boilerplate
-        if (content.length > 35000 || content.length < 5) continue; 
+        if (content.length > 35000 || content.length < 5) { continue; } 
 
         const fileBlock = `\n--- START OF FILE: ${relativePath} ---\n${content}\n--- END OF FILE: ${relativePath} ---\n`;
 
@@ -133,7 +133,7 @@ function crawlDirectory(dir: string, baseDir: string = dir): string[] {
         const files = fs.readdirSync(dir);
         for (const file of files) {
             // Ignore common junk and binary folders
-            if (['node_modules', 'dist', 'out', 'build', '.git', '.vscode', 'assets'].includes(file)) continue;
+            if (['node_modules', 'dist', 'out', 'build', '.git', '.vscode', 'assets'].includes(file)) { continue; }
             
             const fullPath = path.join(dir, file);
             const stat = fs.statSync(fullPath);
@@ -168,7 +168,7 @@ function generateAsciiTree(paths: string[]): string {
         const parts = p.split(/[\\\/]/); // Support both slash types
         let currentLevel = tree;
         parts.forEach(part => {
-            if (!currentLevel[part]) currentLevel[part] = {};
+            if (!currentLevel[part]) { currentLevel[part] = {}; }
             currentLevel = currentLevel[part];
         });
     });

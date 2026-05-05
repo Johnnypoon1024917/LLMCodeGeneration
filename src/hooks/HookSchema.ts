@@ -97,16 +97,16 @@ export interface HookContext {
  */
 export function parseHookFile(content: string, sourceUri: string, fallbackId: string): HookDefinition | null {
     const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
-    if (!match) return null;
+    if (!match) { return null; }
 
     const frontmatterRaw = match[1];
     const body = match[2];
-    if (frontmatterRaw === undefined || body === undefined) return null;
+    if (frontmatterRaw === undefined || body === undefined) { return null; }
     const fm = parseSimpleYaml(frontmatterRaw);
-    if (!fm) return null;
+    if (!fm) { return null; }
 
     const trigger = parseTrigger(fm['trigger']);
-    if (!trigger) return null;
+    if (!trigger) { return null; }
 
     const description = typeof fm['description'] === 'string' ? fm['description'] : undefined;
     return {
@@ -144,7 +144,7 @@ function parseSimpleYaml(text: string): Record<string, any> | null {
         if (indent !== 0) { i++; continue; } // top-level only
 
         const colonIdx = line.indexOf(':');
-        if (colonIdx === -1) return null;
+        if (colonIdx === -1) { return null; }
 
         const key = line.substring(0, colonIdx).trim();
         const value = line.substring(colonIdx + 1).trim();
@@ -158,7 +158,7 @@ function parseSimpleYaml(text: string): Record<string, any> | null {
                 if (childLine === undefined) { i++; continue; } // bounded by length; defensive
                 if (!childLine.trim()) { i++; continue; }
                 const childIndent = childLine.length - childLine.trimStart().length;
-                if (childIndent === 0) break;
+                if (childIndent === 0) { break; }
 
                 const childColon = childLine.indexOf(':');
                 if (childColon === -1) { i++; continue; }
@@ -183,14 +183,14 @@ function coerceScalar(raw: string): any {
         (raw.startsWith("'") && raw.endsWith("'"))) {
         return raw.slice(1, -1);
     }
-    if (raw === 'true')  return true;
-    if (raw === 'false') return false;
-    if (/^-?\d+$/.test(raw)) return parseInt(raw, 10);
+    if (raw === 'true') { return true; }
+    if (raw === 'false') { return false; }
+    if (/^-?\d+$/.test(raw)) { return parseInt(raw, 10); }
     return raw;
 }
 
 function parseTrigger(t: any): HookTrigger | null {
-    if (!t || typeof t !== 'object') return null;
+    if (!t || typeof t !== 'object') { return null; }
     if (t.type === 'onFileSave' && typeof t.pattern === 'string') {
         return { type: 'onFileSave', pattern: t.pattern };
     }

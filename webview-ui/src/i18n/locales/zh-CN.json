@@ -1,0 +1,309 @@
+{
+  "api_key": {
+    "cleared": "NexusCode:API 密钥已清除。",
+    "saved_securely": "NexusCode:API 密钥已安全保存!",
+    "saved_to_secret_storage": "NexusCode:API 密钥已存入 SecretStorage。"
+  },
+  "bash_approval": {
+    "allow": "允许本次",
+    "allow_always": "本次任务全部允许",
+    "allow_always_tooltip": "本次任务的所有 bash 命令都允许执行。下一条用户消息时重置。",
+    "block": "阻止",
+    "body": "Agent 希望执行一条 shell 命令。该命令已通过静态拒绝清单和 LLM 安全监视器,你的批准是最后一道关。",
+    "title": "批准命令?"
+  },
+  "build_healer": {
+    "compiler_failed": "❌ 全局编译失败。Build-Healer 启动中……",
+    "compiler_passed": "✅ 全局编译通过!应用结构完好。",
+    "no_safe_patch": "⚠️ Build-Healer 未能找到安全的补丁。需要人工介入。"
+  },
+  "buttons": {
+    "auto_execute": "自动执行任务",
+    "auto_run_tests": "为当前打开的文件自动生成并运行测试",
+    "clear_chat": "清空对话历史",
+    "code_ast": "代码 AST",
+    "compare_changes": "比较改动",
+    "open_in_editor": "在编辑器中打开",
+    "refresh_ui": "刷新界面",
+    "stop_generation": "停止生成",
+    "strict_compile": "运行严格的项目级编译检查",
+    "tdd_master_suite": "在 /nexuscode 中生成主 TDD 套件(Markdown 计划 + 代码)",
+    "undo_edit": "撤销编辑",
+    "verify_manual": "校验手动代码",
+    "visualize_graph": "可视化工作区上下文图谱"
+  },
+  "chat": {
+    "assistant_label": "Nexus",
+    "compacted_summary": "上下文已压缩(旧消息已概括以节省 token)",
+    "empty": {
+      "hint": "描述一个功能、粘贴一段错误,或对你的代码库提问。NexusCode 会跨文件规划改动、写出代码、运行校验器,你只需审阅 diff。",
+      "shortcut_attach": "@ 附加文件",
+      "shortcut_newline": "Shift+Enter 换行",
+      "shortcut_send": "Enter 发送",
+      "title": "规划、编码、校验。"
+    },
+    "input": {
+      "placeholder": "提问、描述功能,或粘贴错误……",
+      "placeholder_meta_mode": "修改源代码……"
+    },
+    "loading_nexus": "正在加载 Nexus……",
+    "swarm_execution_logs": "群组执行日志",
+    "tool_activity_count_tooltip": "工具调用",
+    "tool_activity_unscoped": "工具活动",
+    "user_label": "我",
+    "view_prompt_instructions": "查看提示词",
+    "working": "正在处理……"
+  },
+  "codelens": {
+    "manually_refreshed": "NexusCode:CodeLens 已手动刷新!"
+  },
+  "commands": {
+    "command_blocked_by_user": "命令执行已被用户阻止。",
+    "highlight_code_to_review": "请选中需要审查的代码。",
+    "open_sidebar_first": "请先打开 NexusCode 侧边栏。",
+    "switched_mode": "已切换到:{{mode}}"
+  },
+  "common": {
+    "appName": "NexusCode",
+    "cancel": "取消",
+    "loading": "加载中……",
+    "no": "否",
+    "ok": "确定",
+    "retry": "重试",
+    "save": "保存",
+    "send": "发送",
+    "yes": "是"
+  },
+  "errors": {
+    "spec_not_found": "未找到规范 '{{name}}'"
+  },
+  "hooks": {
+    "no_hooks_defined": "NexusCode:尚未定义钩子。请在工作区根目录创建 .nexus/hooks/<n>.md 来定义钩子。",
+    "title": "钩子",
+    "close": "关闭钩子面板",
+    "loading": "正在加载钩子…",
+    "empty_title": "暂无钩子",
+    "empty_hint": "钩子可在文件保存、命令触发或定时计划时执行提示词。在 .nexus/hooks/<名称>.md 创建 Markdown 文件即可添加。",
+    "hook_singular": "个钩子",
+    "hook_plural": "个钩子",
+    "enabled_label": "已启用",
+    "enable": "启用钩子",
+    "disable": "停用钩子",
+    "run_now": "立即运行钩子",
+    "open_in_editor": "在编辑器中打开",
+    "last_fired": "上次触发",
+    "activity_label": "钩子活动",
+    "fire_running": "运行中",
+    "fire_succeeded": "已成功",
+    "fire_errored": "已出错",
+    "fire_timed_out": "已超时",
+    "fire_skipped": "已跳过",
+    "fire_waiting_output": "等待输出…",
+    "fire_file_label": "文件"
+  },
+  "mention": {
+    "attach_file_context": "附加文件上下文"
+  },
+  "meta_context": {
+    "no_backup": "未找到可恢复的备份!",
+    "restore_failed": "严重错误:恢复失败。可能需要手动修复源代码。",
+    "restored_from_backup": "安全护栏:已从备份恢复源代码。"
+  },
+  "node_details": {
+    "classes_label": "类:",
+    "exports_label": "导出:",
+    "functions_label": "函数:"
+  },
+  "onboarding": {
+    "save_key_button": "保存密钥至系统密钥库",
+    "save_key_prompt": "要使用企业功能,请安全存储您的 API 密钥。",
+    "skip_local_button": "使用本地 LLM(跳过)",
+    "welcome_andromeda": "欢迎使用 Andromeda"
+  },
+  "project": {
+    "describe_idea": "描述你的应用构想。附加 API 文档或参考文件以确保精确的载荷格式。",
+    "start_new": "新建项目"
+  },
+  "search": {
+    "header": "搜索工作区",
+    "no_files_found": "未找到文件。",
+    "placeholder_files": "按文件名搜索(如:stripe.ts)……",
+    "scanning_workspace": "正在扫描工作区结构……"
+  },
+  "security": {
+    "access_denied_swarm": "🛡️ Nexus 安全:访问被拒绝。请登录以使用群组功能。",
+    "firewall_blocked": "🚨 Nexus 安全防火墙阻止了一条恶意命令:{{command}}"
+  },
+  "security_banner": {
+    "already_disabled": "本会话已禁用",
+    "body": "安全监视器模型未响应,所有命令默认被阻止。请在模型恢复后重试,或在设置中切换其他模型,或为本会话禁用此闸。",
+    "confirm_disable": "为本会话禁用安全闸?在你重新加载 VS Code 前,Agent 执行的命令将不再经过 LLM 安全检查。",
+    "disable_session": "为本会话禁用",
+    "disabled_label": "安全闸已禁用",
+    "dismiss": "关闭",
+    "last_command": "上次被阻止的命令",
+    "retry": "重试",
+    "title": "安全闸离线"
+  },
+  "security_strip": {
+    "aria_label": "安全姿态",
+    "audit_chain": "审计链完整",
+    "autopilot": "自动模式",
+    "awaiting_approval": "等待批准",
+    "coder_model": "编码",
+    "confirm_on_bash": "命令需确认",
+    "denylist": "拒绝清单生效",
+    "denylist_tooltip": "静态正则拒绝清单先于 LLM 评判执行。可拦截 rm -rf /、fork 炸弹、curl|sh 等模式。",
+    "monitor_offline": "监视器离线",
+    "monitor_online": "监视器在线",
+    "monitor_tooltip": "LLM 安全监视器在用户确认前审查每条 bash_exec 命令。",
+    "planner_model": "规划"
+  },
+  "skills": {
+    "header": "Agent 技能与指令"
+  },
+  "steering": {
+    "rules_saved": "✨ NexusCode 导向规则已保存至 .nexus/steering/structure.md",
+    "save_failed": "导向规则保存失败",
+    "title": "导向规则",
+    "close": "关闭导向规则面板",
+    "loading": "正在加载导向规则…",
+    "empty_title": "暂无导向规则",
+    "empty_hint": "导向规则在每次任务中都会指导 Agent。创建标准文件之一(product、structure、tech)或在 .nexus/steering/ 中添加自定义 .md 文件。",
+    "active": "已启用",
+    "total": "共计",
+    "create": "创建",
+    "open_in_editor": "在编辑器中打开",
+    "kind_canonical": "标准",
+    "kind_custom": "自定义",
+    "modified": "修改于",
+    "not_created": "尚未创建"
+  },
+  "terminal": {
+    "extension_updated": "扩展已更新。正在重新加载……",
+    "self_evolution_failed": "自我进化失败:编译错误。详情请查看输出。"
+  },
+  "tests": {
+    "all_passed": "所有测试一次性通过!",
+    "auto_heal_parse_failed": "自动修复无法解析 LLM 输出。",
+    "auto_heal_still_failing": "已尝试自动修复,但测试仍然失败。",
+    "dependency_install_failed": "依赖安装失败。测试已中止。",
+    "generation_failed": "测试生成或运行失败。"
+  },
+  "tokens": {
+    "task_input": "任务输入 token",
+    "task_output": "任务输出 token",
+    "total_input": "总输入 token",
+    "total_output": "总输出 token"
+  },
+  "traceability": {
+    "header": "可追溯性矩阵",
+    "loading_3d": "正在加载 3D 引擎……",
+    "matrix_computing": "图谱当前显示物理文件。语义 AI 关联正在后台计算,稍后将显示在此处。",
+    "matrix_computing_label": "矩阵计算中:",
+    "subheader": "点击 3D 节点可查看其结构化文本数据。"
+  },
+  "transactions": {
+    "atomic_committed": "原子事务已提交,带有 AI 元数据。"
+  },
+  "ui_evolution": {
+    "build_failed": "💥 构建失败!请查看输出。",
+    "evolution_applied": "🧬 进化已应用。重新加载窗口以查看变更。",
+    "ui_build_failed": "💥 UI 构建失败!请查看输出。",
+    "ui_rebuilt": "🎨 UI 已重新构建!正在刷新 Webview……"
+  },
+  "undo": {
+    "failed_to_undo": "撤销文件编辑失败。",
+    "no_history": "本任务未找到撤销历史。"
+  },
+  "unknown": {
+    "key": "未知键"
+  },
+  "workspace": {
+    "no_folder_open": "请先打开一个工作区文件夹。"
+  },
+  "audit": {
+    "title": "审计日志",
+    "entries": "条记录",
+    "chain_valid": "链完整",
+    "chain_broken": "链已破损",
+    "chain_broken_warning": "哈希链完整性校验失败。请立即检查磁盘上的日志文件。",
+    "close": "关闭审计面板",
+    "clear": "清空审计面板",
+    "clear_tooltip": "清空面板(不影响磁盘日志)",
+    "empty_title": "暂无活动",
+    "empty_hint": "Agent 运行工具、编辑文件或调用 LLM 时,事件会显示在此处。.nexus/audit/ 下的磁盘日志会记录全部事件以供合规审查。"
+  },
+  "nav": {
+    "workspace": "工作区",
+    "specs": "规范",
+    "hooks": "钩子",
+    "steering": "导向规则",
+    "map": "代码图谱",
+    "audit": "审计日志",
+    "settings": "设置",
+    "mcp": "MCP 服务器",
+    "diagnostics": "诊断"
+  },
+  "specs": {
+    "phase_stepper_aria": "规范工作流进度",
+    "phase_requirements": "需求",
+    "phase_design": "设计",
+    "phase_tasks": "任务",
+    "status_approved": "已批准",
+    "status_draft": "草稿",
+    "status_not_started": "未开始",
+    "ears_toolbar_aria": "EARS 关键字插入器",
+    "ears_label": "EARS",
+    "ears_about": "关于 EARS",
+    "ears_explanation": "EARS(Easy Approach to Requirements Syntax)是一种用于编写可测试需求的结构化模式。关键字在所有语言下都保持英文大写,以便 grep 与工具链识别。"
+  },
+  "mcp": {
+    "title": "MCP 服务器",
+    "reload": "重新加载",
+    "reload_tooltip": "重新读取 .nexus/mcp-servers.json",
+    "loading": "正在加载 MCP 服务器…",
+    "empty_title": "未配置 MCP 服务器",
+    "empty_hint": "在 .nexus/mcp-servers.json 中添加服务器条目，可为代理扩展外部工具。",
+    "config_error_title": "配置错误",
+    "config_error_server_label": "服务器",
+    "tools_label": "工具",
+    "status_disabled": "已禁用",
+    "status_configured": "已配置",
+    "status_connecting": "连接中",
+    "status_connected": "已连接",
+    "status_error": "错误"
+  },
+  "diagnostics": {
+    "title": "诊断",
+    "refresh": "刷新",
+    "refresh_tooltip": "刷新会话和计时数据",
+    "section_sessions": "会话",
+    "section_summary": "概要",
+    "section_tokens": "令牌",
+    "section_tools": "工具",
+    "section_timeline": "时间线",
+    "section_timing": "启动阶段（主机）",
+    "sessions_loading": "正在加载会话…",
+    "sessions_empty": "尚未记录任何审计会话。",
+    "session_pick_prompt": "— 选择一个会话 —",
+    "bundle_error_title": "加载会话失败",
+    "bundle_loading": "正在加载会话详情…",
+    "summary_started": "开始",
+    "summary_duration": "持续时间",
+    "summary_events": "事件",
+    "summary_errors": "错误",
+    "tokens_prompt": "提示",
+    "tokens_completion": "回应",
+    "tokens_call": "次调用",
+    "tokens_calls": "次调用",
+    "tokens_total": "总计",
+    "agent_planner": "规划器",
+    "agent_coder": "编码器",
+    "agent_verifier": "验证器",
+    "agent_hook": "钩子",
+    "agent_unknown": "未知",
+    "copy_bundle": "复制 JSON 包",
+    "copy_bundle_tooltip": "复制完整会话包为 JSON，便于提交支持工单"
+  }
+}

@@ -39,7 +39,7 @@ function vectorizeText(text: string): Map<string, number> {
     const stopWords = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'src', 'epic', 'story', 'task']);
 
     for (const w of words) {
-        if (stopWords.has(w)) continue;
+        if (stopWords.has(w)) { continue; }
         vector.set(w, (vector.get(w) || 0) + 1);
     }
     return vector;
@@ -60,12 +60,12 @@ function calculateCosineSimilarity(textA: string, textB: string): number {
     }
 
     let magnitudeA = 0;
-    for (const count of vecA.values()) magnitudeA += count * count;
+    for (const count of vecA.values()) { magnitudeA += count * count; }
 
     let magnitudeB = 0;
-    for (const count of vecB.values()) magnitudeB += count * count;
+    for (const count of vecB.values()) { magnitudeB += count * count; }
 
-    if (magnitudeA === 0 || magnitudeB === 0) return 0;
+    if (magnitudeA === 0 || magnitudeB === 0) { return 0; }
     
     // The Cosine Similarity Equation: (A • B) / (||A|| * ||B||)
     return dotProduct / (Math.sqrt(magnitudeA) * Math.sqrt(magnitudeB));
@@ -76,9 +76,9 @@ function calculateCosineSimilarity(textA: string, textB: string): number {
 // ============================================================================
 
 export async function parseRequirementGraph(prdContent: string): Promise<GraphData> {
-    if (!prdContent) return { nodes: [], edges: [] };
+    if (!prdContent) { return { nodes: [], edges: [] }; }
     const currentHash = hashString(prdContent);
-    if (cachedReqGraph && cachedPrdHash === currentHash) return cachedReqGraph;
+    if (cachedReqGraph && cachedPrdHash === currentHash) { return cachedReqGraph; }
 
     const systemPrompt = `You are a System Architecture Graphing Agent.
     Extract a strict Bipartite Graph of the Epics, Stories, and Acceptance Criteria.
@@ -108,8 +108,8 @@ export async function parseRequirementGraph(prdContent: string): Promise<GraphDa
         const jsonStr = fullText.replace(/```json\n?/g, '').replace(/```/g, '').trim();
         const graphData = safeParseJSON<GraphData>(jsonStr);
 
-        if (!graphData.nodes) graphData.nodes = [];
-        if (!graphData.edges) graphData.edges = [];
+        if (!graphData.nodes) { graphData.nodes = []; }
+        if (!graphData.edges) { graphData.edges = []; }
 
         cachedPrdHash = currentHash;
         cachedReqGraph = graphData;
@@ -121,9 +121,9 @@ export async function parseRequirementGraph(prdContent: string): Promise<GraphDa
 }
 
 export async function parseDesignGraph(designContent: string): Promise<GraphData> {
-    if (!designContent) return { nodes: [], edges: [] };
+    if (!designContent) { return { nodes: [], edges: [] }; }
     const currentHash = hashString(designContent);
-    if (cachedDesignGraph && cachedDesignHash === currentHash) return cachedDesignGraph;
+    if (cachedDesignGraph && cachedDesignHash === currentHash) { return cachedDesignGraph; }
 
     const systemPrompt = `You are a System Architecture Graphing Agent.
     Read the System Design Document and extract a graph of the Architecture Components, Data Models, and API Routes.
@@ -148,8 +148,8 @@ export async function parseDesignGraph(designContent: string): Promise<GraphData
         const jsonStr = fullText.replace(/```json\n?/g, '').replace(/```/g, '').trim();
         const graphData = safeParseJSON<GraphData>(jsonStr);
 
-        if (!graphData.nodes) graphData.nodes = [];
-        if (!graphData.edges) graphData.edges = [];
+        if (!graphData.nodes) { graphData.nodes = []; }
+        if (!graphData.edges) { graphData.edges = []; }
 
         cachedDesignHash = currentHash;
         cachedDesignGraph = graphData;
@@ -176,13 +176,13 @@ export function buildCombinedGraph(codeGraph: GraphData, reqGraph: GraphData, de
 
                 if (task.file) {
                     const fileNode = combinedNodes.find(n => n.id.includes(task.file));
-                    if (fileNode) combinedEdges.push({ source: taskId, target: fileNode.id, color: 'rgba(51, 154, 240, 0.9)' });
+                    if (fileNode) { combinedEdges.push({ source: taskId, target: fileNode.id, color: 'rgba(51, 154, 240, 0.9)' }); }
                 }
                 
                 if (task.relatedRequirement) {
                     const reqName = task.relatedRequirement.replace('Epic: ', '').trim();
                     const epicNode = combinedNodes.find(n => n.group === 'epic' && (n.label.includes(reqName) || n.id.includes(reqName)));
-                    if (epicNode) combinedEdges.push({ source: epicNode.id, target: taskId, color: 'rgba(245, 66, 141, 0.8)' });
+                    if (epicNode) { combinedEdges.push({ source: epicNode.id, target: taskId, color: 'rgba(245, 66, 141, 0.8)' }); }
                 }
             }
         }

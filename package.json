@@ -22,12 +22,12 @@
       "properties": {
         "nexuscode.apiEndpoint": {
           "type": "string",
-          "default": "http://192.168.192.125:8001/v1/chat/completions",
+          "default": "http://192.168.191.41:8000/v1/chat/completions",
           "description": "%configuration.nexuscode.apiEndpoint.description%"
         },
         "nexuscode.model": {
           "type": "string",
-          "default": "qwen2.5-coder",
+          "default": "qwen3.6-27b",
           "description": "%configuration.nexuscode.model.description%"
         },
         "nexuscode.modelPlanner": {
@@ -43,7 +43,27 @@
         "nexuscode.modelVerifier": {
           "type": "string",
           "default": "",
-          "description": "Model identifier for the Verifier agent (PRD-review LLM call). Leave empty to use the global `nexuscode.model`. Verification is short, deterministic, and tolerant of smaller/faster models \u2014 useful for cost optimization."
+          "description": "Model identifier for the Verifier agent (PRD-review LLM call). Leave empty to use the global `nexuscode.model`. Verification is short, deterministic, and tolerant of smaller/faster models — useful for cost optimization."
+        },
+        "nexuscode.thinkingPlanner": {
+          "type": "boolean",
+          "default": true,
+          "description": "V2.0: enable thinking mode for the Planner agent on Qwen 3.6 / DeepSeek R1 / similar reasoning models. When the endpoint doesn't support thinking mode, this flag is ignored (sent as opaque pass-through). Default true — the planner benefits most from explicit reasoning."
+        },
+        "nexuscode.thinkingCoder": {
+          "type": "boolean",
+          "default": true,
+          "description": "V2.0: enable thinking mode for the Coder agent. Default true. Disable if your Coder model is non-thinking and you want to skip the extra_body overhead."
+        },
+        "nexuscode.thinkingVerifier": {
+          "type": "boolean",
+          "default": true,
+          "description": "V2.0: enable thinking mode for the Verifier agent. Default true."
+        },
+        "nexuscode.preserveThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "V2.0: enable Thinking Preservation across conversation turns (Qwen 3.6 feature). Improves KV cache reuse and reduces redundant reasoning in long autonomous sessions. Has effect only when at least one role's thinking mode is enabled. Default true."
         },
         "nexuscode.apiKey": {
           "type": "string",
@@ -56,6 +76,11 @@
           "minimum": 1,
           "maximum": 5,
           "description": "%configuration.nexuscode.maxVerificationRetries.description%"
+        },
+        "nexuscode.experimental.treeSitter": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use Tree-Sitter for source-code symbol extraction instead of the default regex parser. Tree-Sitter handles re-exports, dynamic imports, renamed imports, and other patterns the regex parser misses, but adds ~3.6MB of WASM grammar files to the extension bundle. Enable to validate before this becomes the default in a future release."
         },
         "nexuscode.rateLimits.maxToolCallsPerTask": {
           "type": "number",
@@ -196,21 +221,27 @@
     ]
   },
   "scripts": {
-    "validate": "node scripts/validate-manifest.js",
     "compile": "npm run validate && tsc -p ./",
-    "vscode:prepublish": "npm run compile",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
+    "fixtures": "npm run fixtures:compile && vscode-test --label fixtures",
+    "fixtures:compile": "tsc -p tsconfig.test.json",
     "lint": "eslint src",
+    "pretest": "npm run compile && npm run lint",
     "test": "vscode-test",
-    "test:unit": "jest --config jest.config.js"
+    "test:unit": "jest --config jest.config.js",
+    "validate": "node scripts/validate-manifest.js",
+    "vscode:prepublish": "npm run compile",
+    "watch": "tsc -watch -p ./"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^12.1.0",
-    "i18next": "^26.0.8"
+    "i18next": "^26.0.8",
+    "tree-sitter-typescript": "^0.23.2",
+    "web-tree-sitter": "^0.26.8"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.19.17",
     "@types/vscode": "^1.85.0",
@@ -218,6 +249,7 @@
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.2",
     "jest": "^29.7.0",
+    "js-yaml": "^4.1.0",
     "ts-jest": "^29.2.5",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.54.0"

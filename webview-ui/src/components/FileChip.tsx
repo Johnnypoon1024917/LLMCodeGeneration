@@ -99,7 +99,7 @@ function deriveBadgeLabel(language: string | undefined, filepath: string): strin
     if (language) {
         // Lowercase common-form check first
         const norm = language.toLowerCase();
-        if (LANG_BADGES[norm]) return LANG_BADGES[norm]!;
+        if (LANG_BADGES[norm]) { return LANG_BADGES[norm]!; }
         // Some VS Code language ids are spelled out — map a few common ones
         const verboseMap: Record<string, string> = {
             'typescript': 'TS',
@@ -110,7 +110,7 @@ function deriveBadgeLabel(language: string | undefined, filepath: string): strin
             'rust': 'RS',
             'csharp': 'C#'
         };
-        if (verboseMap[norm]) return verboseMap[norm]!;
+        if (verboseMap[norm]) { return verboseMap[norm]!; }
         // Fall through to extension lookup
     }
     // Derive from extension

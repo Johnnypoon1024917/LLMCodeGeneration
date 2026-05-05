@@ -1,0 +1,69 @@
+id: 003-react-form-component
+title: Reusable React form component with tests
+tier: hard
+
+# Expected to fail at v1 baseline. Tracking it gives us a v2 north star
+# fixture — when this passes hands-off, we're approaching real Kiro grade.
+requirement: |
+  Build a reusable React component called <ContactForm /> in TypeScript.
+  Props: onSubmit(data: { name, email, message }) => Promise<void>, and
+  optional initialValues. The component must:
+  - Render fields for name, email, message
+  - Validate email format and require all fields before submit
+  - Show inline error messages under invalid fields
+  - Disable the submit button while onSubmit is in progress
+  - Show a success message when onSubmit resolves; show the error message
+    if it rejects
+  - Reset to initial values after successful submit
+  Use modern React (hooks, no class components). Style with plain CSS.
+  Include vitest tests covering: validation errors, successful submit
+  flow, in-flight submit state, error recovery. Tests should pass.
+
+rubric:
+  - kind: file_exists
+    description: package.json with react and vitest
+    path: package.json
+
+  - kind: file_exists
+    description: ContactForm component file
+    path: src/ContactForm.tsx
+
+  - kind: file_exists
+    description: ContactForm test file
+    path: src/ContactForm.test.tsx
+
+  - kind: command
+    description: install succeeds
+    cmd: npm install
+    timeout_ms: 90000
+
+  - kind: command
+    description: typecheck passes
+    cmd: npx tsc --noEmit
+    timeout_ms: 30000
+
+  - kind: command
+    description: tests pass
+    cmd: npx vitest run
+    timeout_ms: 60000
+
+  - kind: semantic
+    description: component handles in-flight submit state
+    rubric: |
+      The implementation must disable the submit button (or show a loading
+      indicator) while the onSubmit promise is pending. A submit handler
+      that fires onSubmit and immediately re-enables the button is NOT
+      sufficient — there must be state that tracks pending status.
+
+  - kind: semantic
+    description: tests cover error recovery
+    rubric: |
+      At least one test must simulate onSubmit rejecting and verify the
+      error message appears AND the form remains usable (not stuck in
+      submitting state). A test that only verifies the error appears
+      without checking recoverability does not pass this check.
+
+has_reference: true
+
+modes: [interactive, autopilot]
+budget_seconds: 900

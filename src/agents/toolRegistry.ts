@@ -108,6 +108,20 @@ export function registerTool(definition: ToolDefinition, executor: ToolExecutor)
 }
 
 /**
+ * P2.1 SDK: remove a tool from the registry. Symmetric to registerTool.
+ *
+ * Returns true if a tool with that name was present (and is now
+ * removed); false if the name wasn't in the registry.
+ *
+ * Use case: when an MCP server disconnects, its tools should no
+ * longer be advertised to the LLM or dispatchable. Built-in tools
+ * never call this — they're registered once at startup and stay.
+ */
+export function unregisterTool(name: string): boolean {
+    return registry.delete(name);
+}
+
+/**
  * Run a tool by name. Used by Coordinator (2B-3) and by the
  * back-compat `executeAgentTool` shim in `agentTools.ts`.
  *
@@ -157,7 +171,7 @@ export async function dispatchTool(
             kind: 'error',
             message: msg
         };
-        if (stack) errorPayload.stack = stack;
+        if (stack) { errorPayload.stack = stack; }
         return {
             llmContent: `Error executing ${toolCall.function.name}: ${msg}`,
             uiPayload: errorPayload
@@ -192,7 +206,7 @@ export function getToolDefinitions(names: string[]): ToolDefinition[] {
     const out: ToolDefinition[] = [];
     for (const name of names) {
         const entry = registry.get(name);
-        if (entry) out.push(entry.definition);
+        if (entry) { out.push(entry.definition); }
     }
     return out;
 }
