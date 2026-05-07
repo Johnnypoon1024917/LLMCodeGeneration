@@ -160,8 +160,13 @@ function buildBuildSystemPrompt(opts: {
     failures: string;
     globalRules: string;
 }): string {
+    // P1.2 (2026-05): stronger steering directive. Old language was a
+    // soft "must be obeyed"; now the planner must explicitly check
+    // for conflicts and stop if it can't reconcile them. This catches
+    // "my plan is fine but it violates a project convention" earlier
+    // — before the Coder writes code, not after the Verifier rejects.
     const rulesBlock = opts.globalRules
-        ? `\n--- PROJECT STEERING RULES (must be obeyed) ---\n${opts.globalRules}\n-----------------------------------------------\n`
+        ? `\n--- PROJECT STEERING RULES (NON-NEGOTIABLE) ---\n${opts.globalRules}\n\nIf any rule above CONFLICTS with the user's request, do NOT silently pick one. Emit <rules_conflict>describe which rule conflicts with what part of the request</rules_conflict> as a top-level tag instead of <execution_plan>, and stop. The user resolves the conflict.\n-----------------------------------------------\n`
         : "";
 
     const prdBlock      = opts.prd      ? `\n<prd>\n${opts.prd}\n</prd>\n`                                : "";
@@ -175,6 +180,7 @@ CRITICAL DIRECTIVES:
 2. DO NOT RE-READ. Each file should be read AT MOST ONCE per planning session. The exploration tools have a budget; redundant reads waste it. If you need to recall what was in a file, scroll back through your prior tool results.
 3. STOP WHEN READY. As soon as you have enough information to write the plan, EMIT IT. You do not need to read every file in the codebase — only the ones directly relevant to this task.
 4. EMIT THE PLAN AS YOUR NEXT MESSAGE'S CONTENT (not as a tool call). The XML below is the plan format.
+5. P1.2 — STRUCTURED FILE-IMPACT REASONING. For every file you list, you must justify WHY it's touched: what role does it play today, what specifically changes, what risk does the change carry, what does it depend on. A senior engineer reviewing your plan should be able to assess each file independently without re-reading the whole spec.
 
 CONTEXT PROVIDED:
 - Initial codebase context:
@@ -183,9 +189,35 @@ ${prdBlock}${designBlock}${failuresBlock}
 
 OUTPUT FORMAT (strict XML — every tag is required):
 <analysis>One paragraph: how the requirements map onto the existing code structure.</analysis>
+
+<file_impact_analysis>
+  <!--
+    P1.2: per-file structured reasoning. For each file the plan
+    touches, emit one <file> entry with all four sub-tags.
+    risk values: low | medium | high
+      - low: localized change, no API contract impact
+      - medium: changes a function used elsewhere, or adds new public API
+      - high: changes core types, schemas, or contracts crossing module boundaries
+    depends_on: comma-separated list of OTHER files in this plan that
+    must land before this one. Use the empty string when there are no
+    in-plan dependencies. External libraries do NOT belong here.
+  -->
+  <file path="path/to/exact/file.ext">
+    <existing_role>What this file does today, in one sentence.</existing_role>
+    <planned_change>What this plan modifies — function added, signature changed, etc.</planned_change>
+    <risk>low|medium|high</risk>
+    <depends_on>path/to/other/file.ts, path/to/another.ts</depends_on>
+  </file>
+  <!-- repeat <file> per file -->
+</file_impact_analysis>
+
 <files_to_modify>
+  <!-- Flat list of paths. MUST contain exactly the same paths as
+       <file_impact_analysis> above. This block exists for backward
+       compatibility with downstream parsers; do not omit it. -->
   <file>path/to/exact/file.ext</file>
 </files_to_modify>
+
 <execution_plan>
   Step-by-step technical instructions for the Coder agent. Describe exactly what logic to add, modify, or remove in each file.
   Write deterministic behavioral specs — do NOT write the raw code here.
@@ -200,7 +232,9 @@ const BUILD_USER_PROMPT_SUFFIX =
 
 const BUILD_REPROMPT =
     "You must either call a tool to explore further, or emit the final plan using the exact XML tags: " +
-    "<analysis>, <files_to_modify>, <execution_plan>, <verification_rules>. No prose outside those tags.";
+    "<analysis>, <file_impact_analysis>, <files_to_modify>, <execution_plan>, <verification_rules>. " +
+    "If steering rules conflict with the request, emit <rules_conflict> instead and stop. " +
+    "No prose outside those tags.";
 
 // ─── Per-tool-call log emission (legacy CLI parity) ──────────────────
 

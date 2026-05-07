@@ -643,11 +643,11 @@ export function extractExcludePatternsFromContent(raw: string): string[] {
  * Steering files WITHOUT a scope section apply globally — that's the
  * default and matches P1.2's behavior (backwards compatible).
  *
- * Why prefix-substring instead of glob: same trade-off as exclude
- * paths. Globs would be more powerful but add a dep (minimatch / picomatch)
- * and the common cases are all "src/server/", "src/api/v2/", "tests/",
- * etc. Steering authors who need glob-level precision can write
- * multiple substring patterns.
+ * Pattern matching: P2.2 (2026-05) extended `steeringScopeMatches` to
+ * support glob patterns when the scope entry contains glob metacharacters
+ * (e.g., "src/server/**"). Plain strings without globs still match by
+ * substring inclusion (backward compatible). See steeringScopeMatches
+ * below for full semantics.
  *
  * Returns the deduplicated list of scope prefixes, empty when no
  * scope section is declared (= globally applicable).
@@ -657,14 +657,31 @@ export function extractApplyToScopesFromContent(raw: string): string[] {
 }
 
 /**
- * P2.2: returns true when a steering file's scope patterns match the
- * given target filepath. Patterns match via forward-slash-normalized
- * substring inclusion (same semantics as `pathMatchesAnyExclude` in
- * codeGraph.ts).
+ * P2.2 (2026-05): returns true when a steering file's scope patterns
+ * match the given target filepath. Two matching modes, chosen per
+ * pattern:
  *
- * Empty patterns array is treated as "globally applicable" (matches
- * everything) — that's the default for steering files without an
- * `## Applies to` section.
+ *   - GLOB MODE — when the pattern contains glob metacharacters
+ *     (`*`, `?`, `[`, `!`, `{`, `@`, `+`), we route through picomatch
+ *     for proper glob matching. Examples:
+ *       "src/server/**"             → matches src/server/foo.ts but
+ *                                      NOT src/client/server-stub.ts
+ *       "**\/*.test.ts"             → matches any test file
+ *       "src/{api,server}/**"       → matches API or server files
+ *
+ *   - SUBSTRING MODE (legacy/default) — when the pattern is a plain
+ *     string with no glob characters, we fall back to forward-slash-
+ *     normalized substring inclusion (same as before P2.2). This
+ *     preserves backward compatibility with steering files written
+ *     as plain prefixes like "src/server/".
+ *
+ * Why this hybrid approach and not "always glob": existing steering
+ * files use plain prefixes. Always-glob would silently break them
+ * (a literal `src/server/` is NOT a valid glob pattern). Mode
+ * selection by syntax is opt-in: authors who write globs get globs,
+ * authors who write prefixes get prefixes.
+ *
+ * Empty patterns array is "globally applicable" (matches everything).
  */
 export function steeringScopeMatches(
     targetFilepath: string,
@@ -675,8 +692,36 @@ export function steeringScopeMatches(
     return scopePatterns.some((p) => {
         const trimmed = p.trim();
         if (!trimmed) { return false; }
-        return normalized.includes(trimmed.replace(/\\/g, '/'));
+        const normalizedPattern = trimmed.replace(/\\/g, '/');
+        if (containsGlobChars(normalizedPattern)) {
+            // Lazy-load picomatch — it's a transitive dep, present
+            // in node_modules but not in package.json. We could add
+            // it as a direct dep; for now lazy-load tolerates the
+            // (rare) case where the transitive resolution is gone.
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const picomatch = require('picomatch') as (pattern: string, opts?: object) => (s: string) => boolean;
+                const matcher = picomatch(normalizedPattern, { dot: true });
+                return matcher(normalized);
+            } catch {
+                // picomatch unavailable — fall back to substring
+                // match, which is wrong for a glob pattern but at
+                // least won't throw. Log via console because we
+                // don't have logger context in this pure helper.
+                return normalized.includes(normalizedPattern.replace(/\*+/g, ''));
+            }
+        }
+        // Non-glob — substring match (legacy behavior preserved).
+        return normalized.includes(normalizedPattern);
     });
+}
+
+/** Detect glob metacharacters that signal "this is a glob pattern,
+ *  not a literal substring." Conservative — we want false negatives
+ *  (treat-as-substring) to be safe; false positives (treat-as-glob)
+ *  on a plain string is a bug because picomatch interprets it. */
+function containsGlobChars(s: string): boolean {
+    return /[*?[\]{}!@+]/.test(s);
 }
 
 /**

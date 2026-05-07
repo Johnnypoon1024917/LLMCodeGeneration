@@ -1,0 +1,143 @@
+/* webview-ui/src/components/AttachmentPreview.css
+ *
+ * Chip-row preview for spec-page attachments. Each chip is fixed
+ * height with a small thumbnail, name, metadata, and remove button.
+ */
+
+.attachment-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 0;
+    margin-top: 8px;
+}
+
+.attachment-chip {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px 6px 6px;
+    background: var(--vscode-input-background);
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+    border-radius: 6px;
+    max-width: 260px;
+    min-width: 180px;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.attachment-chip:hover {
+    border-color: var(--vscode-focusBorder);
+}
+
+/* ── Thumbnail area ──────────────────────────────────────────────── */
+
+.attachment-chip__thumb {
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-input-border, transparent);
+}
+
+.attachment-chip__thumb--image,
+.attachment-chip__thumb--pdf {
+    background: var(--vscode-editor-background);
+}
+
+.attachment-chip__thumb--image img,
+.attachment-chip__thumb--pdf img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.attachment-chip__thumb--icon {
+    color: var(--vscode-descriptionForeground);
+}
+
+/* ── Body (name + meta) ──────────────────────────────────────────── */
+
+.attachment-chip__body {
+    flex: 1 1 auto;
+    min-width: 0; /* allow text-overflow ellipsis */
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.attachment-chip__name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--vscode-foreground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.attachment-chip__meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground);
+}
+
+.attachment-chip__size {
+    /* nothing extra; just a hook in case we want to style differently */
+}
+
+.attachment-chip__badge {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    line-height: 1.4;
+    white-space: nowrap;
+    cursor: help;
+}
+
+.attachment-chip__badge--warning {
+    background: var(--vscode-inputValidation-warningBackground, rgba(255, 178, 36, 0.15));
+    color: var(--vscode-inputValidation-warningForeground, #cca700);
+    border: 1px solid var(--vscode-inputValidation-warningBorder, rgba(204, 167, 0, 0.4));
+}
+
+/* ── Remove button ───────────────────────────────────────────────── */
+
+.attachment-chip__remove {
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    border: none;
+    background: transparent;
+    color: var(--vscode-descriptionForeground);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.attachment-chip__remove:hover {
+    background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+    color: var(--vscode-foreground);
+}
+
+.attachment-chip__remove:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder);
+    outline-offset: 1px;
+}

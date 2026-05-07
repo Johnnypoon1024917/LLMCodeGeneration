@@ -51,8 +51,14 @@ export type McpServerStatus =
 /** P2.1: per-server view object surfaced to the webview's MCP panel. */
 export interface McpServerView {
     id: string;
-    command: string;
-    args: string[];
+    /** Transport type — discriminator the UI uses to decide what
+     *  fields to display. P2.1 streamable-http (2026-05) added 'http'. */
+    transport: 'stdio' | 'http';
+    /** Stdio-only: command + args. Populated when transport === 'stdio'. */
+    command?: string;
+    args?: string[];
+    /** HTTP-only: target URL. Populated when transport === 'http'. */
+    url?: string;
     /** Status timestamp, for "connected 2 min ago" / "errored 5s ago". */
     statusChangedAt: number;
     status: McpServerStatus;
@@ -270,12 +276,17 @@ export class McpManager {
         for (const state of this.servers.values()) {
             const view: McpServerView = {
                 id: state.entry.id,
-                command: state.entry.command,
-                args: [...state.entry.args],
+                transport: state.entry.transport,
                 status: state.status,
                 statusChangedAt: state.statusChangedAt,
                 tools: [...state.tools]
             };
+            if (state.entry.transport === 'stdio') {
+                view.command = state.entry.command;
+                view.args = [...state.entry.args];
+            } else {
+                view.url = state.entry.url;
+            }
             if (state.errorMessage !== undefined) {
                 view.errorMessage = state.errorMessage;
             }
@@ -330,18 +341,34 @@ export class McpManager {
     }
 
     private entryChanged(a: McpServerEntry, b: McpServerEntry): boolean {
-        if (a.command !== b.command) { return true; }
+        // P2.1 streamable-http (2026-05): transport switch is a change.
+        if (a.transport !== b.transport) { return true; }
         if (a.disabled !== b.disabled) { return true; }
-        if (a.args.length !== b.args.length) { return true; }
-        for (let i = 0; i < a.args.length; i++) {
-            if (a.args[i] !== b.args[i]) { return true; }
+        if (a.transport === 'stdio' && b.transport === 'stdio') {
+            if (a.command !== b.command) { return true; }
+            if (a.args.length !== b.args.length) { return true; }
+            for (let i = 0; i < a.args.length; i++) {
+                if (a.args[i] !== b.args[i]) { return true; }
+            }
+            const aEnvKeys = Object.keys(a.env);
+            const bEnvKeys = Object.keys(b.env);
+            if (aEnvKeys.length !== bEnvKeys.length) { return true; }
+            for (const k of aEnvKeys) {
+                if (a.env[k] !== b.env[k]) { return true; }
+            }
+            return false;
         }
-        const aEnvKeys = Object.keys(a.env);
-        const bEnvKeys = Object.keys(b.env);
-        if (aEnvKeys.length !== bEnvKeys.length) { return true; }
-        for (const k of aEnvKeys) {
-            if (a.env[k] !== b.env[k]) { return true; }
+        if (a.transport === 'http' && b.transport === 'http') {
+            if (a.url !== b.url) { return true; }
+            const aHeaderKeys = Object.keys(a.headers);
+            const bHeaderKeys = Object.keys(b.headers);
+            if (aHeaderKeys.length !== bHeaderKeys.length) { return true; }
+            for (const k of aHeaderKeys) {
+                if (a.headers[k] !== b.headers[k]) { return true; }
+            }
+            return false;
         }
+        // Unreachable given the discriminator check above, but TS needs it.
         return false;
     }
 
@@ -384,11 +411,16 @@ export class McpManager {
             connection = await connectMcpServer(state.entry);
         } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
-            // Common failure: ENOENT when command isn't on PATH. Surface
-            // that specifically so the user knows what to fix.
-            const friendlyMsg = message.includes('ENOENT')
-                ? `Command not found: '${state.entry.command}'. Check it's installed and on PATH.`
-                : message;
+            // Common failure: ENOENT when stdio command isn't on PATH.
+            // Network failures (HTTP transport) look different.
+            // Surface each specifically so the user knows what to fix.
+            let friendlyMsg = message;
+            if (state.entry.transport === 'stdio' && message.includes('ENOENT')) {
+                friendlyMsg = `Command not found: '${state.entry.command}'. Check it's installed and on PATH.`;
+            } else if (state.entry.transport === 'http' &&
+                       (message.includes('ECONNREFUSED') || message.includes('ENOTFOUND'))) {
+                friendlyMsg = `Cannot reach MCP server at '${state.entry.url}'. Check URL + network.`;
+            }
 
             // Re-fetch state in case the server was removed during the
             // async window. Treat that as "nothing to do".

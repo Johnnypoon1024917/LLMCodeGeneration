@@ -83,15 +83,7 @@
     "disable": "Disable hook",
     "run_now": "Run hook now",
     "open_in_editor": "Open in editor",
-    "last_fired": "last fired",
-    "activity_label": "Hook activity",
-    "fire_running": "Running",
-    "fire_succeeded": "Succeeded",
-    "fire_errored": "Errored",
-    "fire_timed_out": "Timed out",
-    "fire_skipped": "Skipped",
-    "fire_waiting_output": "Waiting for output…",
-    "fire_file_label": "File"
+    "last_fired": "last fired"
   },
   "mention": {
     "attach_file_context": "Attach File Context"
@@ -240,10 +232,9 @@
     "hooks": "Hooks",
     "steering": "Steering",
     "map": "Code map",
+    "timeline": "Timeline",
     "audit": "Audit log",
-    "settings": "Settings",
-    "mcp": "MCP servers",
-    "diagnostics": "Diagnostics"
+    "settings": "Settings"
   },
   "specs": {
     "phase_stepper_aria": "Spec workflow progress",
@@ -257,53 +248,5 @@
     "ears_label": "EARS",
     "ears_about": "About EARS",
     "ears_explanation": "EARS (Easy Approach to Requirements Syntax) is a structured pattern for writing testable requirements. Keywords stay UPPERCASE ENGLISH in every locale to anchor grep + tooling."
-  },
-  "mcp": {
-    "title": "MCP Servers",
-    "reload": "Reload",
-    "reload_tooltip": "Re-read .nexus/mcp-servers.json",
-    "loading": "Loading MCP servers…",
-    "empty_title": "No MCP servers configured",
-    "empty_hint": "Add server entries to .nexus/mcp-servers.json to extend the agent with external tools.",
-    "config_error_title": "Config error",
-    "config_error_server_label": "Server",
-    "tools_label": "Tools",
-    "status_disabled": "Disabled",
-    "status_configured": "Configured",
-    "status_connecting": "Connecting",
-    "status_connected": "Connected",
-    "status_error": "Error"
-  },
-  "diagnostics": {
-    "title": "Diagnostics",
-    "refresh": "Refresh",
-    "refresh_tooltip": "Refresh sessions and timing data",
-    "section_sessions": "Sessions",
-    "section_summary": "Summary",
-    "section_tokens": "Tokens",
-    "section_tools": "Tools",
-    "section_timeline": "Timeline",
-    "section_timing": "Startup phases (host)",
-    "sessions_loading": "Loading sessions…",
-    "sessions_empty": "No audit sessions recorded yet.",
-    "session_pick_prompt": "— pick a session —",
-    "bundle_error_title": "Failed to load session",
-    "bundle_loading": "Loading session details…",
-    "summary_started": "Started",
-    "summary_duration": "Duration",
-    "summary_events": "Events",
-    "summary_errors": "Errors",
-    "tokens_prompt": "prompt",
-    "tokens_completion": "completion",
-    "tokens_call": "call",
-    "tokens_calls": "calls",
-    "tokens_total": "total",
-    "agent_planner": "planner",
-    "agent_coder": "coder",
-    "agent_verifier": "verifier",
-    "agent_hook": "hook",
-    "agent_unknown": "unknown",
-    "copy_bundle": "Copy bundle as JSON",
-    "copy_bundle_tooltip": "Copy full session bundle as JSON for support tickets"
   }
 }

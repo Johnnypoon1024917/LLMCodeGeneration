@@ -203,6 +203,24 @@ export interface CompletionOptions {
      */
     onUsage?: (usage: Record<string, unknown>) => void;
     /**
+     * V2.1.2 spec-fix-15: when true, the provider strips
+     * `reasoning_content` / `reasoning` fields from streamed output and
+     * yields only `content` tokens. Used by chat-style callers
+     * (`streamChat`) where the user expects a clean answer, not the
+     * model's internal chain-of-thought.
+     *
+     * Default false (preserves existing behavior for all other callers
+     * — verifier, planner, etc., which may consume reasoning either as
+     * forensic context or via separate channels).
+     *
+     * Caveat: some Qwen builds occasionally emit the actual answer in
+     * `reasoning_content` instead of `content` (Qwen issue #26 / #89).
+     * When that happens, dropping reasoning leaves the user with no
+     * output. The chat path detects and handles this — see streamChat
+     * for the empty-completion path.
+     */
+    excludeReasoning?: boolean;
+    /**
      * Tool definitions the model may call. Component 2A. When provided,
      * `chatCompletion` includes these in the request body so the model
      * can emit `tool_calls` in its response.

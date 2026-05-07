@@ -1,0 +1,137 @@
+id: 008-multi-file-feature-add
+title: Multi-file TypeScript REST API with shared types
+tier: hard
+
+# Probes cross-file coherence. The V2.2 cross-task remediation work
+# was specifically aimed at "task B's output causes task A to break."
+# This fixture surfaces the same failure mode at greenfield: can the
+# agent produce three files whose interfaces line up?
+#
+# The classic failure: types.ts defines Task with field `dueDate?: Date`,
+# taskService.ts assumes it's a string, server.ts assumes ISO format.
+# Each file compiles standalone; the integration breaks. The /search
+# integration check below catches this.
+#
+# Calibration vs 003-react-form-component: 003 is hard because of
+# stateful UI + tests + edge cases in one component. THIS is hard
+# because of cross-file integration with no single file owning the
+# whole behavior. Different axis of difficulty.
+
+requirement: |
+  Build a TypeScript REST API for a simple task tracker. Split across
+  three files:
+
+  1. `src/types.ts` — exports interface Task with fields:
+       id (string), title (string), done (boolean), createdAt (string ISO date)
+     and type CreateTaskInput = Omit<Task, 'id' | 'createdAt'> with done
+     optional (default false).
+
+  2. `src/taskService.ts` — in-memory task store. Exports:
+       createTask(input: CreateTaskInput): Task
+       listTasks(): Task[]
+       getTask(id: string): Task | undefined
+       searchTasks(query: string): Task[]    // case-insensitive substring match on title
+     Use crypto.randomUUID() for ids. Use new Date().toISOString() for createdAt.
+
+  3. `src/server.ts` — Express server on port 3000 with these routes:
+       POST   /tasks         body: CreateTaskInput; returns 201 + created Task
+       GET    /tasks         returns 200 + Task[]
+       GET    /tasks/:id     returns 200 + Task, or 404 if not found
+       GET    /tasks/search?q=<query>   returns 200 + Task[] (matching results)
+
+     Server.ts imports BOTH types.ts AND taskService.ts and uses them
+     correctly — the route handlers must accept and return the EXACT
+     types defined, no `any`, no assertions.
+
+  Use Express 4. Include package.json, tsconfig.json. Server runnable
+  via `npm run start`.
+
+rubric:
+  - kind: file_exists
+    description: types module
+    path: src/types.ts
+
+  - kind: file_exists
+    description: task service module
+    path: src/taskService.ts
+
+  - kind: file_exists
+    description: server entry point
+    path: src/server.ts
+
+  - kind: file_exists
+    description: package.json
+    path: package.json
+
+  - kind: command
+    description: install succeeds
+    cmd: npm install
+    timeout_ms: 120000
+
+  - kind: command
+    description: typecheck passes (proves types align across the three files)
+    cmd: npx tsc --noEmit
+    timeout_ms: 30000
+
+  - kind: integration
+    description: POST /tasks creates a task and returns it
+    setup: |
+      npm run start > /tmp/server.log 2>&1 &
+      echo $! > /tmp/server.pid
+      sleep 3
+    request:
+      method: POST
+      path: /tasks
+      body: { "title": "Buy milk" }
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 201
+      body_includes: ["Buy milk", "id", "createdAt"]
+    teardown: |
+      kill $(cat /tmp/server.pid) 2>/dev/null || true
+
+  - kind: integration
+    description: GET /tasks returns array
+    request:
+      method: POST
+      path: /tasks
+      body: { "title": "Walk the dog", "done": false }
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 201
+      body_includes: ["Walk the dog"]
+
+  - kind: integration
+    description: GET /tasks/search?q=milk finds tasks (proves searchTasks integration)
+    request:
+      method: GET
+      path: /tasks/search?q=milk
+    expect:
+      status: 200
+      body_includes: ["Buy milk"]
+
+  - kind: integration
+    description: GET /tasks/nonexistent returns 404
+    request:
+      method: GET
+      path: /tasks/this-id-does-not-exist
+    expect:
+      status: 404
+
+  - kind: semantic
+    description: types are shared correctly across files (no any, no assertions)
+    rubric: |
+      server.ts and taskService.ts must import Task / CreateTaskInput
+      from ./types and use those imported names in their function
+      signatures. A correct implementation has explicit type
+      annotations on route handlers (req.body typed as
+      CreateTaskInput etc). Use of `any`, `unknown` cast to Task,
+      or duplicate inline type definitions in server.ts is a
+      cross-file coherence failure even if the code happens to run.
+
+has_reference: false
+
+modes: [interactive, autopilot]
+budget_seconds: 900

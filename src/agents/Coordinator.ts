@@ -15,6 +15,9 @@ import { VerifierAgent, type VerificationResult, type VerifierFailure } from './
 import { IEnvironment } from '../interfaces/IEnvironment';
 import { errorMessage, isAbortError } from '../utilities/errors';
 import type { ToolEventEmitter } from './toolEventEmitter';
+// V2.1.2 spec-fix-11 #3-DIAG: direct logger import for the wrong-file
+// edit investigation. Will be removed when the diagnostic is concluded.
+import { log } from '../logger';
 
 export interface CodeDiff {
     filepath: string;
@@ -171,7 +174,111 @@ function formatFailure(index: number, f: VerifierFailure): string {
         ? ` [${f.kind === 'compile' ? 'TS' : ''}${f.code}]`
         : '';
     const severityTag = f.severity === 'unambiguous_typo' ? ' [routine fix]' : '';
-    return `${index}. **${location}**${codeTag}${severityTag}\n   ${f.message}`;
+    // V2.3 bundle 2: per-error fix hint based on the TS error code.
+    // Qwen 27B benefits from concrete actionable advice next to each
+    // error rather than just the error text. Hints are templates —
+    // the model still has to apply judgment, but the template scopes
+    // its thinking to the right kind of fix.
+    const hint = formatErrorHint(f);
+    const hintLine = hint ? `\n   💡 ${hint}` : '';
+    return `${index}. **${location}**${codeTag}${severityTag}\n   ${f.message}${hintLine}`;
+}
+
+/**
+ * V2.3 bundle 2: map common compile-error patterns to concrete fix
+ * hints. The hints are TEMPLATES — they don't tell the Coder the
+ * exact fix (which depends on the project), but they scope the
+ * Coder's response to the correct REGION of solutions.
+ *
+ * For each TS error code we've seen in production logs, return a
+ * one-line hint. For codes we don't have a hint for, return null
+ * (no hint line rendered).
+ *
+ * Why this works: Qwen 27B has good reasoning but sometimes loses
+ * the thread when the failure is unfamiliar. "Property X doesn't
+ * exist" can be fixed five different ways (rename X, add X to type,
+ * use a different property, fix a typo, change the type assertion).
+ * The hint narrows the search space.
+ */
+function formatErrorHint(f: VerifierFailure): string | null {
+    if (f.kind !== 'compile' || !f.code) { return null; }
+    const code = String(f.code);
+    const msg = f.message || '';
+
+    // TS2339 — Property does not exist on type.
+    // Common cause: agent assumed a field that isn't in the actual
+    // type definition (e.g., CreateBookingRequest.notes when notes
+    // wasn't added).
+    if (code === '2339') {
+        const propMatch = msg.match(/Property '([^']+)' does not exist on type '([^']+)'/);
+        if (propMatch) {
+            const [, prop, type] = propMatch;
+            return `Property '${prop}' is not defined on '${type}'. Either: (a) add '${prop}' to the type definition in its source file, OR (b) use a property that DOES exist on '${type}' (read the type's source file with read_file to see the actual fields), OR (c) remove this access if it was a mistake. Do NOT just cast to 'any' — that hides the real bug.`;
+        }
+        return `Property doesn't exist on the type. Read the type definition with read_file to see what properties are actually available.`;
+    }
+
+    // TS2307 — Cannot find module.
+    // Common cause: phantom import (importing a package that isn't
+    // installed). Bundle 3 catches this earlier via package.json
+    // hints, but the retry path needs to handle it too.
+    if (code === '2307') {
+        const modMatch = msg.match(/Cannot find module '([^']+)'/);
+        if (modMatch) {
+            const mod = modMatch[1];
+            return `Module '${mod}' is not installed in this project. Either: (a) implement the needed logic INLINE in this file (no external dependency), OR (b) check if a different already-installed package provides similar functionality. If you genuinely need '${mod}', mention it in your one-line summary AFTER the tool call so the orchestrator can install it.`;
+        }
+        return `An imported module can't be found. Either implement the logic inline, use an already-installed package, or note the new dependency in your post-tool-call summary.`;
+    }
+
+    // TS2345 — Argument of type X not assignable to parameter of type Y.
+    if (code === '2345') {
+        return `Type mismatch on a function call argument. Either: (a) convert/cast the argument to the expected type explicitly, OR (b) change the call to pass the correct type, OR (c) update the function signature if YOU control it. Read the function's signature with read_file before deciding.`;
+    }
+
+    // TS7006 — Parameter implicitly has an 'any' type.
+    if (code === '7006') {
+        const paramMatch = msg.match(/Parameter '([^']+)' implicitly has an 'any' type/);
+        if (paramMatch) {
+            const param = paramMatch[1];
+            return `Parameter '${param}' needs an explicit type annotation. Determine the correct type from how the parameter is used (or from the parent function's expected callback signature) and annotate it: '${param}: SomeType'.`;
+        }
+        return `A parameter needs an explicit type annotation. Determine its type from usage context.`;
+    }
+
+    // TS2741 — Property X is missing in type.
+    if (code === '2741') {
+        const missingMatch = msg.match(/Property '([^']+)' is missing in type/);
+        if (missingMatch) {
+            const prop = missingMatch[1];
+            return `When constructing the object, you must include the '${prop}' field. Either: (a) populate it with a real value, OR (b) if it's optional in your domain, mark it optional in the type definition.`;
+        }
+        return `A required property is missing from an object literal. Add it.`;
+    }
+
+    // TS2693 — X only refers to a type, but is being used as a value.
+    if (code === '2693') {
+        const nameMatch = msg.match(/'([^']+)' only refers to a type/);
+        if (nameMatch) {
+            const name = nameMatch[1];
+            return `'${name}' is a type, not a runtime value. You probably want either: (a) a value/enum imported from the same module (e.g., 'SortOrder' the type vs 'Prisma.SortOrder.asc' the value), OR (b) to use this only in type positions ('let x: ${name}', not 'const x = ${name}').`;
+        }
+        return `Used a type as a runtime value. Reference the runtime equivalent (often an enum value or constant), not the type name.`;
+    }
+
+    // TS2694 — Namespace has no exported member.
+    // Phantom Prisma types are the canonical case (Prisma.BookingWhereInput
+    // doesn't exist in newer versions of @prisma/client).
+    if (code === '2694') {
+        const memberMatch = msg.match(/Namespace '[^']*?' has no exported member '([^']+)'/);
+        if (memberMatch) {
+            const member = memberMatch[1];
+            return `'${member}' isn't exported from that namespace in the version installed. Read the actual installed types (e.g., 'node_modules/@prisma/client/index.d.ts' for Prisma) with read_file to find the correct exported name. Common Prisma renames: 'BookingWhereInput' → 'Prisma.BookingWhereInput' (with capital), or it may simply not exist (use the Prisma client method's parameter type directly).`;
+        }
+        return `A namespace member doesn't exist. Read the namespace's actual type definitions with read_file to find the correct name.`;
+    }
+
+    return null;
 }
 
 /**
@@ -221,6 +328,21 @@ export interface RunTaskOptions {
      *  steering at the Coder level. */
     globalRules: string;
 
+    /** V2.3 bundle 3: pre-rendered installed-packages prompt section.
+     *  Optional. When set, the Coder's system prompt includes the
+     *  list so library imports match installed reality. Computed
+     *  by the host once per workspace via detectInstalledPackages
+     *  + renderPackagesPromptSection. Targets phantom-import bugs
+     *  (rrule not installed; Prisma type drift). */
+    installedPackagesSection?: string;
+
+    /** V2.3 bundle 4 (TypeScript-only stepping-stone): pre-rendered
+     *  type-symbols prompt section listing exported names from high-
+     *  value packages. Targets phantom-type-reference bugs (e.g.
+     *  Prisma.BookingWhereInput phantom). Computed by the host via
+     *  detectHighValueSymbols + renderSymbolsPromptSection. */
+    typeSymbolsSection?: string;
+
     /** P2.2: per-file steering callback. When provided, the Coordinator
      *  invokes this with each Coder's target filepath to obtain a
      *  file-scoped steering block. The block REPLACES `globalRules`
@@ -258,6 +380,31 @@ export interface RunTaskOptions {
      *  for the rich-card UI. When absent, dispatch is silent — used
      *  for headless invocations (CLI runtime, tests). */
     toolEventEmitter?: ToolEventEmitter;
+
+    /** V2.2 hotfix #4: notification fired when a task transitions from
+     *  one retry attempt to the next. The host uses this to clear stale
+     *  tool-call cards from the webview before the retry begins, so
+     *  cards from attempt N+1 don't visually stack on top of attempt N's
+     *  cards. Without this, retried tasks accumulated dozens of
+     *  read_file / list_directory cards visually, making it hard to see
+     *  what the current attempt was doing.
+     *
+     *  Called with the taskId being retried just before the new attempt
+     *  dispatches. The host's implementation typically:
+     *    1. Posts a `taskRetry` message to the webview with the taskId
+     *    2. Webview reducer deletes all toolCallState entries whose
+     *       taskId matches (after resolveTaskKey collapsing).
+     *
+     *  When omitted (headless / fixtures), retries proceed without UI
+     *  cleanup — same as pre-V2.2 behavior. */
+    taskRetryCallback?: (taskId: string, attempt: number) => void;
+
+    /** V2.1.2 spec-fix-12 — Bug #1: opt-in approval hook for human-in-
+     *  the-loop gating of write_file / edit_file calls. When provided,
+     *  the dispatch pipeline pauses for user approval before mutating
+     *  the workspace. When omitted, every call auto-approves (legacy
+     *  behavior — fixtures, headless runs, autopilot mode). */
+    approvalHook?: import('./toolDispatchWithEvents').ApprovalHook;
 
     /** P1.1: opt-in callback for verifier failures. Fires once per
      *  verifier rejection, with the structured failure list and the
@@ -311,7 +458,11 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
         abortSignal: signal,
         usageCallback,
         toolEventEmitter,
+        approvalHook,
         verifierFailureCallback,
+        taskRetryCallback,
+        installedPackagesSection,
+        typeSymbolsSection,
     } = opts;
 
     logCallback("Coordinator: Task received. Initiating Swarm Orchestration...", "analyze", "Booting Swarm Agents");
@@ -350,6 +501,13 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
 
         const techSpec = plannerResult.techSpec;
 
+        // ─── #3-DIAG (spec-fix-11) ─────────────────────────────────────
+        // Wrong-file edit investigation. Capture what the Coordinator
+        // sees BEFORE making file-selection decisions.
+        log.info(`[#3-DIAG] Coordinator received task (first 300 chars): "${task.slice(0, 300)}"`);
+        log.info(`[#3-DIAG] Coordinator received techSpec from planner (first 500 chars): "${techSpec.slice(0, 500)}"`);
+        // ───────────────────────────────────────────────────────────────
+
         const filesToModify: string[] = [];
 
         // Strict target lock-on: if the UI already passed a target file in the
@@ -364,6 +522,9 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                 `Coordinator: Strict target detected [${explicitTargetMatch[1].trim()}]. Lock-on engaged.`,
                 "analyze"
             );
+            // ─── #3-DIAG ─────────────────────────────
+            log.info(`[#3-DIAG] Coordinator file-selection mechanism: STRICT_LOCK from task description regex. Selected: "${explicitTargetMatch[1].trim()}"`);
+            // ─────────────────────────────────────────
         } else {
             // Fall back to the planner's <files_to_modify> block.
             const filesMatch = techSpec.match(/<files_to_modify>([\s\S]*?)<\/files_to_modify>/);
@@ -373,6 +534,13 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                 while ((match = fileRegex.exec(filesMatch[1])) !== null) {
                     if (match[1] !== undefined) { filesToModify.push(match[1].trim()); }
                 }
+                // ─── #3-DIAG ─────────────────────────────
+                log.info(`[#3-DIAG] Coordinator file-selection mechanism: PLANNER_TECHSPEC <files_to_modify> regex. Selected: ${JSON.stringify(filesToModify)}`);
+                // ─────────────────────────────────────────
+            } else {
+                // ─── #3-DIAG ─────────────────────────────
+                log.info(`[#3-DIAG] Coordinator file-selection mechanism: NO MATCH — neither task lock-on nor <files_to_modify> regex matched. Will fall back to "unknown".`);
+                // ─────────────────────────────────────────
             }
         }
 
@@ -389,6 +557,9 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
 
         for (const filepath of filesToModify) {
             logCallback(`Coordinator: Spawning Coder Agent for [${filepath}]...`, "code");
+            // ─── #3-DIAG ─────────────────────────────────
+            log.info(`[#3-DIAG] Coordinator dispatching to Coder with filepath: "${filepath}"`);
+            // ─────────────────────────────────────────────
 
             let fileContentStr = "";
             if (filepath !== "unknown") {
@@ -450,6 +621,17 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                     "Coder Agent activated."
                 );
 
+                // V2.2 hotfix #4: clear tool-call cards from the previous
+                // attempt before starting the next one. Without this,
+                // retried tasks accumulated read_file / list_directory
+                // cards from each attempt visually stacked, making it
+                // very hard to see what the current attempt was doing.
+                // Only fire on attempts 2+ — the first attempt has
+                // nothing to clear.
+                if (attempts > 1 && taskRetryCallback) {
+                    taskRetryCallback(`${task}::${filepath}`, attempts);
+                }
+
                 if (streamCallback) {
                     const separator = attempts === 1
                         ? `\n\n### Attempt 1 of ${MAX_RETRIES}\n`
@@ -463,6 +645,8 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                     fileContent: fileContentStr,
                     chatHistory,
                     globalRules: coderSteering,
+                    ...(installedPackagesSection ? { installedPackagesSection } : {}),
+                    ...(typeSymbolsSection ? { typeSymbolsSection } : {}),
                     workspaceRoot,
                     // taskId for lifecycle event seq stamping. The
                     // task descriptor `task` is already a unique
@@ -472,7 +656,13 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                     ...(streamCallback ? { streamCallback } : {}),
                     ...(signal ? { abortSignal: signal } : {}),
                     ...(usageCallback ? { usageCallback } : {}),
-                    ...(toolEventEmitter ? { emitter: toolEventEmitter } : {})
+                    ...(toolEventEmitter ? { emitter: toolEventEmitter } : {}),
+                    // V2.1.2 spec-fix-12 — Bug #1: forward approval hook
+                    // to the Coder. The Coder is where write_file /
+                    // edit_file actually fire; the verifier only runs
+                    // read-only tools (tsc, test runners) so it doesn't
+                    // need the hook.
+                    ...(approvalHook ? { approvalHook } : {})
                 });
 
                 // Component 2B-3c (post-2B audit): short-circuit if
@@ -494,13 +684,82 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
                 // We treat this as a verification failure with a
                 // corrective message to the next attempt's history.
                 if (draftDiff.noModifyingToolCalls) {
+                    // V2.3 bundle 1: build a TARGETED critique that
+                    // diagnoses the specific failure mode in the
+                    // previous response. Generic "use the tool"
+                    // critiques don't work — Qwen 27B has been
+                    // ignoring them. Concrete diagnoses + a literal
+                    // template for the next response work better.
+                    const prev = draftDiff.fullOutputBuffer || '';
+                    const prevSample = prev.length > 800 ? prev.slice(0, 800) + '... [truncated]' : prev;
+                    const diagnoses: string[] = [];
+
+                    // Failure mode A: emitted markdown code blocks
+                    // instead of write_file. Detect by ```language
+                    // fences in the response.
+                    if (/```[a-zA-Z]+\n/.test(prev)) {
+                        diagnoses.push(
+                            '- Your response contains markdown code blocks (```language ... ```). ' +
+                            'These do NOT modify the file. The file system only sees write_file/edit_file tool calls.'
+                        );
+                    }
+
+                    // Failure mode B: stated intent without acting.
+                    // Phrases like "I will create...", "Let me write..."
+                    // followed by no tool call.
+                    if (/\b(I will|Let me|I'll|I am going to|Let's now|Now I will)\b/i.test(prev)) {
+                        diagnoses.push(
+                            '- Your response describes what you intend to do ("I will...", "Let me...") but does not actually do it. ' +
+                            'The phrase "I will write the file" must be IMMEDIATELY FOLLOWED by the write_file tool call in the SAME turn.'
+                        );
+                    }
+
+                    // Failure mode C: nearly empty response.
+                    if (prev.trim().length < 50) {
+                        diagnoses.push(
+                            '- Your response is nearly empty. The model produced no actionable content. ' +
+                            'This usually means the request exceeded your context budget mid-generation, or you decided not to write anything.'
+                        );
+                    }
+
+                    // Failure mode D: contains <tool_call> but malformed.
+                    // We're already in the noModifyingToolCalls branch, so
+                    // if the response has <tool_call> markers, the parser
+                    // failed to extract a valid write_file/edit_file
+                    // invocation. Most common causes: missing closing
+                    // brace, escaped quote sequences, or the closing
+                    // </tool_call> tag is missing.
+                    if (prev.includes('<tool_call>')) {
+                        diagnoses.push(
+                            '- Your response contains <tool_call> tags but the tool call was not parsed successfully. ' +
+                            'The JSON inside the tag may be malformed (missing closing brace, escaped quotes wrong) or the closing </tool_call> tag may be missing. ' +
+                            'In your retry, ensure: (a) the JSON is fully formed, (b) the closing </tool_call> tag is present, (c) string values escape internal quotes correctly.'
+                        );
+                    }
+
+                    const diagnosis = diagnoses.length > 0
+                        ? `\nWhat went wrong (specific diagnosis based on your previous response):\n${diagnoses.join('\n')}\n`
+                        : '\nDiagnosis: your previous response did not contain a recognizable write_file or edit_file tool call.\n';
+
                     const critique =
-                        `Model did not invoke write_file or edit_file. The file on disk was not modified.\n\n` +
-                        `Common causes:\n` +
-                        `  - Tool-call format not recognized by the endpoint (check vLLM --tool-call-parser config)\n` +
-                        `  - Model emitted a malformed tool-call wrapper instead of the expected JSON\n` +
-                        `  - Model wrote code in chat narrative instead of using the tool\n\n` +
-                        `You MUST use the write_file or edit_file tool to modify the file. Do not output code in chat.`;
+                        `🚨 ATTEMPT ${attempts} REJECTED — file was not modified.\n` +
+                        diagnosis +
+                        `\n` +
+                        `═══════════════════════════════════════════════════════════════\n` +
+                        `WHAT YOU MUST DO IN YOUR NEXT RESPONSE:\n` +
+                        `═══════════════════════════════════════════════════════════════\n` +
+                        `Start your response IMMEDIATELY with the write_file tool call.\n` +
+                        `Do not narrate. Do not explain. Do not say "I will write...".\n` +
+                        `Just emit the tool call.\n\n` +
+                        `Concrete template (replace the path and content):\n` +
+                        `<tool_call>\n` +
+                        `{"name": "write_file", "arguments": {"path": "${filepath}", "content": "...your code here..."}}\n` +
+                        `</tool_call>\n\n` +
+                        `After the tool call, you may add a brief one-line summary.\n` +
+                        `═══════════════════════════════════════════════════════════════\n\n` +
+                        `Your previous response (for reference, do not repeat it):\n` +
+                        `---\n${prevSample}\n---\n\n` +
+                        `Now: emit the write_file tool call for ${filepath}. The file content must satisfy the original Technical Spec.`;
 
                     logCallback(
                         `Coder [${filepath}]: No modifying tool calls in attempt ${attempts}.`,
@@ -510,7 +769,7 @@ export async function runTask(opts: RunTaskOptions): Promise<CodeDiff[] | null> 
 
                     if (streamCallback) {
                         streamCallback(
-                            `\n\n> ❌ **Attempt ${attempts} produced no file modifications.** Re-prompting model.\n`
+                            `\n\n> ❌ **Attempt ${attempts} produced no file modifications.** Re-prompting model with targeted diagnosis.\n`
                         );
                     }
 

@@ -270,16 +270,90 @@ export function calculateGraphCorrelation(targetFileQuery: string): ScoredNode[]
 /**
  * Builds the initial workspace graph by scanning the project
  */
+/**
+ * V2.1.2 spec-fix-4: language-aware import extraction for non-TS/JS files.
+ * The full ASTParser only handles TypeScript/JavaScript. For other
+ * common languages we use a regex-based fallback so the code map at
+ * least shows file existence + cross-file dependencies. Imperfect by
+ * design — this is a "show something useful" path, not a parse-perfect
+ * one. Symbol-level data (functions/classes) is left empty for these
+ * files; the symbol-level toggle will only show TS/JS symbols.
+ *
+ * Each entry maps an extension to a regex that captures the imported
+ * path/module. Patterns are conservative — we'd rather miss imports
+ * than produce false matches that confuse the user.
+ */
+const IMPORT_PATTERNS: Record<string, RegExp[]> = {
+    '.py':     [/^\s*from\s+([\w.]+)\s+import/gm, /^\s*import\s+([\w.]+)/gm],
+    '.go':     [/^\s*import\s+"([^"]+)"/gm, /^\s*import\s+\(\s*"([^"]+)"/gm],
+    '.java':   [/^\s*import\s+([\w.]+);/gm],
+    '.rs':     [/^\s*use\s+([\w:]+)/gm],
+    '.html':   [/<script[^>]+src=["']([^"']+)["']/gi, /<link[^>]+href=["']([^"']+\.css)["']/gi],
+    '.css':    [/@import\s+url\(["']?([^"')]+)["']?\)/gi, /@import\s+["']([^"']+)["']/gi],
+    '.vue':    [/import\s+.*?\s+from\s+["']([^"']+)["']/g],
+    '.svelte': [/import\s+.*?\s+from\s+["']([^"']+)["']/g],
+};
+
+/**
+ * Extract imports from a non-AST-parsed file using language-specific
+ * regex patterns. Returns an empty array when the language has no
+ * pattern defined or when the patterns don't match.
+ */
+function extractImportsLite(filepath: string, content: string): string[] {
+    const ext = path.extname(filepath).toLowerCase();
+    const patterns = IMPORT_PATTERNS[ext];
+    if (!patterns) { return []; }
+
+    const imports: string[] = [];
+    for (const re of patterns) {
+        // Reset lastIndex — the regexes are flagged /g and re-using the
+        // same instance across calls would skip matches.
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(content)) !== null) {
+            if (m[1]) { imports.push(m[1]); }
+        }
+    }
+    return imports;
+}
+
 export async function buildWorkspaceGraph(rootUri?: vscode.Uri) {
-    // If a rootUri is provided, scope the search to that folder. Otherwise, search everywhere.
-    const searchPattern = rootUri ? new vscode.RelativePattern(rootUri, '**/*.{ts,tsx,js,jsx}') : '**/*.{ts,tsx,js,jsx}';
-    
+    // V2.1.2 spec-fix-4: extended language coverage. The original glob
+    // only matched JS/TS so any project written in another language
+    // produced an empty code map (which then cascaded — req map and
+    // combined map showed nothing because they merge against codeMap).
+    // Now we scan the common web/backend extensions; for non-TS/JS
+    // files we use regex-based import extraction (extractImportsLite).
+    const exts = '{ts,tsx,js,jsx,mjs,cjs,py,go,java,rs,vue,svelte,html,css}';
+    const searchPattern = rootUri
+        ? new vscode.RelativePattern(rootUri, `**/*.${exts}`)
+        : `**/*.${exts}`;
+
     const files = await vscode.workspace.findFiles(searchPattern, '**/node_modules/**');
-    
+
     for (const file of files) {
         try {
             const doc = await vscode.workspace.openTextDocument(file);
-            await addFileToGraph(file.fsPath, doc.getText());
+            const content = doc.getText();
+            const ext = path.extname(file.fsPath).toLowerCase();
+
+            // TS/JS go through the full AST parser. Everything else
+            // goes through the regex-lite path with empty symbols.
+            if (ext === '.ts' || ext === '.tsx' || ext === '.js' || ext === '.jsx' || ext === '.mjs' || ext === '.cjs') {
+                await addFileToGraph(file.fsPath, content);
+            } else {
+                const imports = extractImportsLite(file.fsPath, content);
+                workspaceGraph.set(file.fsPath, {
+                    filepath: file.fsPath,
+                    imports,
+                    importedNames: {},
+                    exports: [],
+                    classes: [],
+                    functions: [],
+                    interfaces: [],
+                    variables: [],
+                });
+            }
         } catch (e) {
             log.warn(`Failed to parse ${file.fsPath} for GraphRAG`);
         }

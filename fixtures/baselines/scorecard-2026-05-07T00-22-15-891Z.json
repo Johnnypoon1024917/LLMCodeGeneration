@@ -1,0 +1,318 @@
+{
+  "runId": "2026-05-07T00:22:15.891Z",
+  "gitSha": "unknown",
+  "fixtureCount": 16,
+  "results": [
+    {
+      "fixtureId": "001-node-fizzbuzz",
+      "mode": "interactive",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 5,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json was created — agent invoker threw: AbortError",
+        "file_exists: entry point exists — agent invoker threw: AbortError",
+        "command: runs without crashing — agent invoker threw: AbortError",
+        "command_output_contains: output includes \"FizzBuzz\" at line 15 — agent invoker threw: AbortError",
+        "command_output_contains: output includes \"Buzz\" at line 5 — agent invoker threw: AbortError"
+      ]
+    },
+    {
+      "fixtureId": "001-node-fizzbuzz",
+      "mode": "autopilot",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 5,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json was created — agent invoker threw: AbortError",
+        "file_exists: entry point exists — agent invoker threw: AbortError",
+        "command: runs without crashing — agent invoker threw: AbortError",
+        "command_output_contains: output includes \"FizzBuzz\" at line 15 — agent invoker threw: AbortError",
+        "command_output_contains: output includes \"Buzz\" at line 5 — agent invoker threw: AbortError"
+      ]
+    },
+    {
+      "fixtureId": "004-python-csv-aggregator",
+      "mode": "interactive",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 6,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: aggregate.py was created — agent invoker threw: AbortError",
+        "command: script runs with empty input (header-only) without crashing — agent invoker threw: AbortError",
+        "command_output_contains: output preserves header row — agent invoker threw: AbortError",
+        "command_output_contains: aggregates totals correctly (food=15, travel=200) — agent invoker threw: AbortError",
+        "command_output_contains: aggregates totals correctly (travel=200) — agent invoker threw: AbortError",
+        "command_output_contains: categories sorted alphabetically (food before travel) — agent invoker threw: AbortError"
+      ]
+    },
+    {
+      "fixtureId": "004-python-csv-aggregator",
+      "mode": "autopilot",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 6,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: aggregate.py was created — agent invoker threw: terminated",
+        "command: script runs with empty input (header-only) without crashing — agent invoker threw: terminated",
+        "command_output_contains: output preserves header row — agent invoker threw: terminated",
+        "command_output_contains: aggregates totals correctly (food=15, travel=200) — agent invoker threw: terminated",
+        "command_output_contains: aggregates totals correctly (travel=200) — agent invoker threw: terminated",
+        "command_output_contains: categories sorted alphabetically (food before travel) — agent invoker threw: terminated"
+      ]
+    },
+    {
+      "fixtureId": "003-react-form-component",
+      "mode": "interactive",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 8,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json with react and vitest — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: ContactForm component file — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: ContactForm test file — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: tests pass — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: component handles in-flight submit state — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: tests cover error recovery — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "003-react-form-component",
+      "mode": "autopilot",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 8,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json with react and vitest — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: ContactForm component file — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: ContactForm test file — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: tests pass — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: component handles in-flight submit state — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: tests cover error recovery — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "007-cli-with-flags-and-tests",
+      "mode": "interactive",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 11,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: stats.ts implementation — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: stats.test.ts test suite — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: package.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: tsconfig.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: tests pass — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command_output_contains: default output includes mean, min, max — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: empty args exits with code 1 — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: tests are meaningful (exercise CLI as subprocess, not internal calls) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: error cases are tested, not just happy paths — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "007-cli-with-flags-and-tests",
+      "mode": "autopilot",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 11,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: stats.ts implementation — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: stats.test.ts test suite — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: package.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: tsconfig.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: tests pass — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command_output_contains: default output includes mean, min, max — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: empty args exits with code 1 — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: tests are meaningful (exercise CLI as subprocess, not internal calls) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: error cases are tested, not just happy paths — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "008-multi-file-feature-add",
+      "mode": "interactive",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 11,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: types module — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: task service module — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: server entry point — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: package.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes (proves types align across the three files) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: POST /tasks creates a task and returns it — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: GET /tasks returns array — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: GET /tasks/search?q=milk finds tasks (proves searchTasks integration) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: GET /tasks/nonexistent returns 404 — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: types are shared correctly across files (no any, no assertions) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "008-multi-file-feature-add",
+      "mode": "autopilot",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 11,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: types module — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: task service module — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: server entry point — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: package.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes (proves types align across the three files) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: POST /tasks creates a task and returns it — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: GET /tasks returns array — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: GET /tasks/search?q=milk finds tasks (proves searchTasks integration) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: GET /tasks/nonexistent returns 404 — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: types are shared correctly across files (no any, no assertions) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "002-express-validate-endpoint",
+      "mode": "interactive",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 7,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json with express dependency — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: tsconfig.json for typescript — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: rejects invalid email with 400 — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: accepts valid input with 201 + UUID — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: rejects missing required field — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "002-express-validate-endpoint",
+      "mode": "autopilot",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 7,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: package.json with express dependency — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: tsconfig.json for typescript — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: rejects invalid email with 400 — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: accepts valid input with 201 + UUID — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: rejects missing required field — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "005-typescript-prisma-schema",
+      "mode": "interactive",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 9,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: Prisma schema file — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: User service module — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: package.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: tsconfig.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: .env with DATABASE_URL — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: prisma generate succeeds (proves schema is valid + generates types) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes after generate (proves the service uses real types) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: userService.ts uses real Prisma types, not assertions — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "005-typescript-prisma-schema",
+      "mode": "autopilot",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 9,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: Prisma schema file — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: User service module — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: package.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: tsconfig.json — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: .env with DATABASE_URL — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: install succeeds — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: prisma generate succeeds (proves schema is valid + generates types) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: typecheck passes after generate (proves the service uses real types) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: userService.ts uses real Prisma types, not assertions — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "006-go-http-server",
+      "mode": "interactive",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 7,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: main.go was created — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: go.mod was created — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: build succeeds (proves valid Go syntax + stdlib-only imports) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: /health endpoint returns ok — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: /echo returns the submitted message — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: /echo rejects invalid JSON with 400 — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: uses only stdlib (no third-party HTTP routers) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    },
+    {
+      "fixtureId": "006-go-http-server",
+      "mode": "autopilot",
+      "status": "error",
+      "checksPassed": 0,
+      "checksTotal": 7,
+      "interventions": 0,
+      "agentSeconds": 0,
+      "failedChecks": [
+        "file_exists: main.go was created — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "file_exists: go.mod was created — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "command: build succeeds (proves valid Go syntax + stdlib-only imports) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: /health endpoint returns ok — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: /echo returns the submitted message — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "integration: /echo rejects invalid JSON with 400 — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed",
+        "semantic: uses only stdlib (no third-party HTTP routers) — agent invoker threw: Operation failed after 3 retries. Final Error: fetch failed"
+      ]
+    }
+  ],
+  "aggregates": {
+    "interactiveSuccessRate": 0,
+    "autopilotSuccessRate": 0,
+    "meanInterventionsInteractive": 0,
+    "meanInterventionsAutopilot": 0,
+    "completionRate": 0
+  }
+}

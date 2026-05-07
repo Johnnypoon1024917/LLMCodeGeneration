@@ -1,0 +1,96 @@
+id: 006-go-http-server
+title: Go HTTP server with JSON endpoints (stdlib only)
+tier: medium
+
+# Probes Go support and idiomatic patterns. The agent's training data is
+# Node-heavy; this fixture tests whether it can produce a Go service
+# without bringing in inappropriate JS-isms (e.g., trying to import
+# express equivalents, using third-party routers like gin/echo when
+# stdlib suffices).
+#
+# Stdlib-only requirement is intentional: keeps the rubric deterministic
+# (no "did go.mod resolve dependencies?" timing variance) and probes
+# whether the agent CAN write idiomatic Go rather than reaching for
+# familiar npm patterns.
+
+requirement: |
+  Build a Go HTTP server in main.go with two endpoints:
+
+  - GET /health  → returns 200 with JSON body {"status":"ok"}
+  - POST /echo   → reads JSON body {"message": "..."} and returns 200
+                   with JSON body {"echo": "<the message>"}.
+                   On invalid JSON, return 400 with {"error":"invalid json"}.
+
+  Listen on port 8080. Use only the Go standard library (net/http,
+  encoding/json, log). Include go.mod with module name "fixture006"
+  and go directive matching the local Go version.
+
+  Server should be runnable as `go run main.go`.
+
+rubric:
+  - kind: file_exists
+    description: main.go was created
+    path: main.go
+
+  - kind: file_exists
+    description: go.mod was created
+    path: go.mod
+
+  - kind: command
+    description: build succeeds (proves valid Go syntax + stdlib-only imports)
+    cmd: go build -o /tmp/fixture006-bin .
+    timeout_ms: 60000
+
+  - kind: integration
+    description: /health endpoint returns ok
+    setup: |
+      go run main.go > /tmp/server.log 2>&1 &
+      echo $! > /tmp/server.pid
+      sleep 2
+    request:
+      method: GET
+      path: /health
+    expect:
+      status: 200
+      body_includes: ["ok"]
+    teardown: |
+      kill $(cat /tmp/server.pid) 2>/dev/null || true
+
+  - kind: integration
+    description: /echo returns the submitted message
+    request:
+      method: POST
+      path: /echo
+      body: { "message": "hello" }
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 200
+      body_includes: ["hello"]
+
+  - kind: integration
+    description: /echo rejects invalid JSON with 400
+    request:
+      method: POST
+      path: /echo
+      body: "not-json-at-all"
+      headers:
+        Content-Type: application/json
+    expect:
+      status: 400
+      body_includes: ["error"]
+
+  - kind: semantic
+    description: uses only stdlib (no third-party HTTP routers)
+    rubric: |
+      The go.mod must contain ONLY the module declaration and go
+      directive — no `require` block, no external dependencies.
+      main.go's imports must be limited to the standard library
+      (net/http, encoding/json, log, possibly os/fmt). If the agent
+      pulled in gorilla/mux, gin-gonic, or any external router, it
+      missed the stdlib-only constraint.
+
+has_reference: false
+
+modes: [interactive, autopilot]
+budget_seconds: 600

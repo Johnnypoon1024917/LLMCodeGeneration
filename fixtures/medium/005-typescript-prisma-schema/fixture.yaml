@@ -1,0 +1,84 @@
+id: 005-typescript-prisma-schema
+title: TypeScript module using Prisma with correct generated types
+tier: medium
+
+# Probes the V2.3 phantom-type guard. The Coder system prompt was
+# bolstered with the typeSymbolsSection injection specifically because
+# Qwen2.5-Coder loved to invent "Prisma.BookingWhereInput" shapes that
+# don't actually exist in the generated client. This fixture verifies
+# the agent now USES the actual generated types correctly.
+#
+# Setup cost: real Prisma generation runs npx prisma generate, which is
+# heavy. Budget bumped to 600s. If you hit network issues during
+# baseline runs (Prisma sometimes fetches its query engine binary),
+# rerun on a different network.
+
+requirement: |
+  Build a small TypeScript project with Prisma. Create:
+
+  1. `prisma/schema.prisma` defining a User model (id Int @id @default(autoincrement),
+     email String @unique, name String, createdAt DateTime @default(now)) with
+     SQLite as the datasource (provider = "sqlite", url = env("DATABASE_URL")).
+
+  2. `src/userService.ts` exporting two functions:
+     - `findUserByEmail(prisma: PrismaClient, email: string): Promise<User | null>`
+     - `createUser(prisma: PrismaClient, data: { email: string; name: string }): Promise<User>`
+
+  Both functions must use the actual Prisma generated types — User is
+  imported from `@prisma/client`. PrismaClient is the standard import.
+  No type assertions; the code must typecheck cleanly.
+
+  3. `package.json` with dependencies on prisma, @prisma/client, typescript.
+  4. `tsconfig.json` configured for the project.
+  5. `.env` with DATABASE_URL="file:./dev.db"
+
+rubric:
+  - kind: file_exists
+    description: Prisma schema file
+    path: prisma/schema.prisma
+
+  - kind: file_exists
+    description: User service module
+    path: src/userService.ts
+
+  - kind: file_exists
+    description: package.json
+    path: package.json
+
+  - kind: file_exists
+    description: tsconfig.json
+    path: tsconfig.json
+
+  - kind: file_exists
+    description: .env with DATABASE_URL
+    path: .env
+
+  - kind: command
+    description: install succeeds
+    cmd: npm install
+    timeout_ms: 120000
+
+  - kind: command
+    description: prisma generate succeeds (proves schema is valid + generates types)
+    cmd: npx prisma generate
+    timeout_ms: 120000
+
+  - kind: command
+    description: typecheck passes after generate (proves the service uses real types)
+    cmd: npx tsc --noEmit
+    timeout_ms: 30000
+
+  - kind: semantic
+    description: userService.ts uses real Prisma types, not assertions
+    rubric: |
+      The implementation must import User from @prisma/client and use it
+      as the return type. Type assertions (`as User`, `as any`) or use
+      of unknown types to bypass real typing are NOT acceptable.
+      A correct implementation reads exactly like Prisma's documentation
+      examples — `prisma.user.findUnique({ where: { email } })` returns
+      `Promise<User | null>` automatically.
+
+has_reference: false
+
+modes: [interactive, autopilot]
+budget_seconds: 600

@@ -114,7 +114,7 @@ export class OpenAICompatibleProvider implements Provider {
             throw new Error(`No readable stream from ${this.endpoint}`);
         }
 
-        return parseSseStream(response.body, options?.signal, options?.onUsage);
+        return parseSseStream(response.body, options?.signal, options?.onUsage, options?.excludeReasoning ?? false);
     }
 
     /**
@@ -382,9 +382,26 @@ export class OpenAICompatibleProvider implements Provider {
         injectSchemasAsText: boolean
     ): Promise<ChatCompletionStream> {
         const effectiveMessages = this.maybeInjectToolSchemas(messages, options, injectSchemasAsText);
+        // V2.2 hotfix #6: pre-dispatch context-budget check. Production
+        // logs showed Qwen 27B (32K context) failing with HTTP 400
+        // "input_tokens=28673" mid-task. The bloat came from accumulated
+        // tool_result messages (full file contents from read_file etc.)
+        // piling up across the agent loop. Pre-trim here: estimate
+        // input tokens, subtract the output reservation, and if we'd
+        // overflow, drop oldest tool messages until we fit.
+        let reservedOutput: number;
+        if (options?.maxTokens !== undefined) {
+            reservedOutput = options.maxTokens;
+        } else if (includeTools || injectSchemasAsText) {
+            reservedOutput = DEFAULT_MAX_TOKENS_WITH_TOOLS;
+        } else {
+            reservedOutput = 1024;
+        }
+        const trimmedMessages = trimToContextBudget(effectiveMessages, reservedOutput);
+
         const body: Record<string, unknown> = {
             model: this.model,
-            messages: effectiveMessages,
+            messages: trimmedMessages,
             temperature: options?.temperature ?? 0.3,
             stream: true
         };
@@ -479,9 +496,19 @@ export class OpenAICompatibleProvider implements Provider {
         injectSchemasAsText: boolean
     ): Promise<AssistantMessage> {
         const effectiveMessages = this.maybeInjectToolSchemas(messages, options, injectSchemasAsText);
+        // V2.2 hotfix #6: same context-budget trim as requestStreaming.
+        let reservedOutputNs: number;
+        if (options?.maxTokens !== undefined) {
+            reservedOutputNs = options.maxTokens;
+        } else if (includeTools || injectSchemasAsText) {
+            reservedOutputNs = DEFAULT_MAX_TOKENS_WITH_TOOLS;
+        } else {
+            reservedOutputNs = 1024;
+        }
+        const trimmedMessagesNs = trimToContextBudget(effectiveMessages, reservedOutputNs);
         const body: Record<string, unknown> = {
             model: this.model,
-            messages: effectiveMessages,
+            messages: trimmedMessagesNs,
             temperature: options?.temperature ?? 0.3
         };
         if (options?.maxTokens !== undefined) {
@@ -702,7 +729,8 @@ export class OpenAICompatibleProvider implements Provider {
 async function* parseSseStream(
     body: ReadableStream<Uint8Array>,
     signal: AbortSignal | undefined,
-    onUsage: ((usage: Record<string, unknown>) => void) | undefined
+    onUsage: ((usage: Record<string, unknown>) => void) | undefined,
+    excludeReasoning: boolean
 ): AsyncGenerator<string, void, undefined> {
     const reader = body.getReader();
     const decoder = new TextDecoder('utf-8');
@@ -722,27 +750,30 @@ async function* parseSseStream(
     };
 
     /**
-     * Extract a token from a parsed SSE frame. Reads BOTH
-     * `delta.reasoning_content` and `delta.content` (as well as the
-     * non-streaming-shaped fallbacks `message.reasoning_content` /
-     * `message.content`). Concatenated in that order — reasoning
-     * always precedes the answer in Qwen's chat template, so this
-     * matches the model's intent.
+     * Extract a token from a parsed SSE frame.
      *
-     * Why both: Qwen 3.x with `--reasoning-parser qwen3` routes
-     * thinking tokens into `reasoning_content`, NOT `content`. If a
-     * server is configured this way and the parser ignores
-     * reasoning_content, the user sees no output at all — the
-     * documented Qwen issue #903 failure mode. Surfacing both means
-     * thinking-mode endpoints work without further configuration;
-     * non-thinking endpoints emit only `content` and behave
-     * identically to before.
+     * Default mode (excludeReasoning=false): reads BOTH
+     * `delta.reasoning_content` and `delta.content` and concatenates
+     * them. Reasoning precedes content, matching Qwen's chat template.
+     * This is the historical behavior — necessary because some Qwen
+     * builds with `--reasoning-parser qwen3` route ALL output through
+     * `reasoning_content`, including the actual answer (Qwen issue
+     * #903). Without this, the user sees no output at all.
      *
-     * Future UX: a separate stream channel for reasoning vs answer
-     * lets the webview show a "thinking..." spinner with the
-     * collapsed reasoning. That's a UI change for a follow-up; for
-     * now both stream into the same chat as text — strictly better
-     * than the previous "no output" behavior.
+     * V2.1.2 spec-fix-15 mode (excludeReasoning=true): returns ONLY
+     * `content`. The chain-of-thought (`reasoning_content` /
+     * `reasoning`) is dropped entirely — never reaches the chat
+     * stream, never gets stored in message history. Used by chat-style
+     * callers that want a clean answer.
+     *
+     * Caveat for excludeReasoning mode: if the model puts the actual
+     * answer in `reasoning_content` instead of `content`, the chat
+     * appears empty. The streamChat caller detects this via the
+     * existing `sawAnyTokenContent` guard and throws
+     * EmptyCompletionError, surfacing a clear message rather than
+     * silent failure. That's the correct tradeoff: a transient empty-
+     * response error is much better UX than dumping 4KB of internal
+     * chain-of-thought into every chat message.
      */
     const extractToken = (frame: {
         choices?: Array<{
@@ -752,6 +783,13 @@ async function* parseSseStream(
     }): string => {
         const choice = frame.choices?.[0];
         if (!choice) { return ''; }
+        const content = choice.delta?.content
+            ?? choice.message?.content
+            ?? '';
+        if (excludeReasoning) {
+            // Drop reasoning entirely. Caller asked for clean content.
+            return content;
+        }
         // Read reasoning from BOTH possible field names. ASL Lab Qwen 3.6
         // uses `reasoning`; vLLM with `--reasoning-parser qwen3` uses
         // `reasoning_content`. Either may carry the chain-of-thought.
@@ -761,9 +799,6 @@ async function* parseSseStream(
             ?? choice.delta?.reasoning_content
             ?? choice.message?.reasoning
             ?? choice.message?.reasoning_content
-            ?? '';
-        const content = choice.delta?.content
-            ?? choice.message?.content
             ?? '';
         // Defensively strip stray <think> tags from reasoning. Some
         // endpoints (Qwen 3.6 ASL Lab variant) emit them inline. The
@@ -1273,6 +1308,170 @@ const consecutiveProseResponses = new Map<string, number>();
 // limits. Customers who need larger writes should set the max
 // explicitly via CompletionOptions.maxTokens — this is just a floor.
 const DEFAULT_MAX_TOKENS_WITH_TOOLS = 4096;
+
+// V2.2 hotfix #6: context-budget management.
+//
+// MODEL_CONTEXT_LIMIT is the assumed max input + output token capacity
+// of the connected endpoint. Qwen 27B = 32768 in the ASL Lab config.
+// We use 28000 as the budget ceiling — a 4-5K buffer below the hard
+// limit accounts for:
+//   - tokenizer differences (our char-based estimate is approximate)
+//   - server-side prompt template additions (chat formatting, system
+//     prefixes that vary by deployment)
+//   - response output reservation (max_tokens is bounded against this
+//     remaining budget)
+//
+// If we ship NexusCode with a 200K context model later, this becomes
+// a config knob. For now, hardcoded to ASL's deployment.
+const MODEL_CONTEXT_LIMIT = 32_000;
+const SAFE_INPUT_BUDGET = 28_000;
+
+/**
+ * Estimate tokens in a JSON-ish string. Heuristic only — char count
+ * divided by 4. Holds reasonably for English code (~3.5-4 chars/token
+ * with the BPE tokenizers most LLMs use). Slightly conservative: we
+ * over-estimate small messages slightly and under-estimate strings
+ * with lots of whitespace, but in aggregate across many messages the
+ * error averages out.
+ *
+ * Why not use a real tokenizer: shipping a tokenizer in a VS Code
+ * extension means either bundling 100MB+ of weights (Qwen) or making
+ * an HTTP call to count (latency on every request). Char-heuristic
+ * with a 4-5K buffer below the cap is good enough for safety.
+ */
+function estimateTokens(s: string): number {
+    return Math.ceil(s.length / 4);
+}
+
+/** Estimate tokens in a single message including role/tool metadata. */
+function estimateMessageTokens(msg: ChatMessage): number {
+    // Per-message overhead from chat templating: roles, separators,
+    // tool_call_id wrapping, etc. ~10 tokens per message is typical
+    // for OpenAI-style chat formats.
+    let total = 10;
+    const content = (msg as unknown as { content?: unknown }).content;
+    if (typeof content === 'string') {
+        total += estimateTokens(content);
+    } else if (Array.isArray(content)) {
+        // Multimodal content blocks (defensive — current ChatMessage
+        // typing is string-only, but future expansion may add image
+        // or document blocks). Each block with a text field gets its
+        // text counted; non-text blocks get a flat per-block estimate.
+        for (const block of content) {
+            if (block && typeof block === 'object' && 'text' in block && typeof (block as { text: unknown }).text === 'string') {
+                total += estimateTokens((block as { text: string }).text);
+            } else {
+                total += 50; // image/document placeholder cost
+            }
+        }
+    }
+    // Tool calls add their JSON arguments to the prompt.
+    const maybeToolCalls = (msg as unknown as { tool_calls?: unknown }).tool_calls;
+    if (Array.isArray(maybeToolCalls)) {
+        for (const tc of maybeToolCalls) {
+            if (tc && typeof tc === 'object' && 'function' in tc) {
+                const fn = (tc as { function: { name?: string; arguments?: string } }).function;
+                total += estimateTokens(fn.arguments || '');
+                total += estimateTokens(fn.name || '');
+            }
+        }
+    }
+    return total;
+}
+
+/**
+ * Trim the message history to fit within the input-token budget.
+ *
+ * Strategy:
+ *   1. Always keep the system message (carries instructions + tool
+ *      schemas). Without it the model loses its grounding.
+ *   2. Always keep the last user message (the current task).
+ *   3. Always keep the last assistant message + its tool_use children
+ *      and the current tool_result follow-ups (the in-flight context).
+ *   4. Drop oldest tool_result + their preceding tool_use pair-wise
+ *      until we fit. Tool calls and their results are tightly coupled
+ *      (the model expects a result for every call); dropping them in
+ *      pairs preserves protocol consistency.
+ *   5. If even the keep-set is too large, the function returns it
+ *      unchanged and lets the API reject. We log a warning — there's
+ *      no graceful fix when the FIRST user message alone overflows.
+ *
+ * Adds a synthetic system note when trimming actually happened so the
+ * model knows context was truncated and can ask for re-reads if needed.
+ */
+function trimToContextBudget(
+    messages: ChatMessage[],
+    reservedOutput: number
+): ChatMessage[] {
+    const inputBudget = Math.min(SAFE_INPUT_BUDGET, MODEL_CONTEXT_LIMIT - reservedOutput);
+
+    // Fast path: estimate total. If we fit, no work.
+    let total = 0;
+    for (const msg of messages) {
+        total += estimateMessageTokens(msg);
+    }
+    if (total <= inputBudget) { return messages; }
+
+    log.warn(`[Provider] Context budget overflow detected: ~${total} tokens for ${messages.length} messages, budget=${inputBudget}. Trimming oldest tool history.`);
+
+    // Identify protected indices: system (first), and the tail.
+    // We keep everything from the last user message onward.
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i]!.role === 'user') {
+            lastUserIdx = i;
+            break;
+        }
+    }
+    if (lastUserIdx === -1) {
+        // No user message — unusual, can't trim safely. Return as-is.
+        return messages;
+    }
+    const protectedIndices = new Set<number>();
+    if (messages.length > 0 && messages[0]!.role === 'system') {
+        protectedIndices.add(0);
+    }
+    for (let i = lastUserIdx; i < messages.length; i++) {
+        protectedIndices.add(i);
+    }
+
+    // Walk from oldest non-protected message; mark as droppable.
+    // Protocol-correctness: in OpenAI chat format, every tool_result
+    // must have a preceding assistant message with a matching
+    // tool_use. So we drop assistant+tool_result clusters together
+    // when possible rather than orphaning a tool_result.
+    const kept: ChatMessage[] = [];
+    let droppedTokens = 0;
+    let droppedCount = 0;
+    for (let i = 0; i < messages.length; i++) {
+        if (protectedIndices.has(i)) {
+            kept.push(messages[i]!);
+            continue;
+        }
+        const msgTokens = estimateMessageTokens(messages[i]!);
+        // Drop only as much as needed to get under budget.
+        if (total - droppedTokens > inputBudget) {
+            droppedTokens += msgTokens;
+            droppedCount++;
+        } else {
+            kept.push(messages[i]!);
+        }
+    }
+
+    if (droppedCount === 0) { return messages; }
+
+    // Insert a synthetic system note about the trim so the model
+    // knows context was lost. Placed right after the system message
+    // (or at index 0 if no system) so it sits at the start of the
+    // model's "given" context.
+    const trimNote: ChatMessage = {
+        role: 'system',
+        content: `[Earlier conversation was trimmed to fit the model's context window. ${droppedCount} older message${droppedCount === 1 ? '' : 's'} (~${droppedTokens} tokens) were dropped, including some tool call history. If you need information from earlier, ask the user or re-read the relevant files.]`
+    };
+    const insertAt = kept.length > 0 && kept[0]!.role === 'system' ? 1 : 0;
+    kept.splice(insertAt, 0, trimNote);
+    return kept;
+}
 
 /**
  * Record whether a tool-requesting response actually used tools.

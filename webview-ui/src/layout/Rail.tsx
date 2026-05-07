@@ -19,7 +19,7 @@
 import { Tooltip, IconButton, cn } from '../components/ui';
 import { useTranslation } from 'react-i18next';
 
-export type ViewRoute = 'coder' | 'builder' | 'rules' | 'Map';
+export type ViewRoute = 'coder' | 'builder' | 'rules' | 'Map' | 'timeline';
 
 interface RailProps {
     activeRoute: ViewRoute;
@@ -132,6 +132,21 @@ const PRIMARY_NAV: readonly NavItem[] = [
                 <circle cx="12" cy="4" r="1.5" stroke="currentColor" strokeWidth="1.3" />
                 <circle cx="8" cy="12" r="1.5" stroke="currentColor" strokeWidth="1.3" />
                 <path d="M5 5l2 6M11 5l-2 6" stroke="currentColor" strokeWidth="1.3" />
+            </svg>
+        )
+    },
+    {
+        // P3.1: Timeline tab. Per-task retrospective showing tool
+        // calls in order, attempt boundaries, verifier verdicts.
+        // Reads the session event log on demand.
+        id: 'timeline',
+        labelKey: 'nav.timeline',
+        route: 'timeline',
+        icon: (
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
+                <path d="M8 4v4l2.5 1.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                <path d="M2 8h1.5M12.5 8H14" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
         )
     }

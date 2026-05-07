@@ -158,9 +158,14 @@ const STATUS_BORDER: Record<ToolCallState['status'], string> = {
 export function ToolCallCard({ state, defaultExpanded }: ToolCallCardProps): React.ReactElement {
     // Default expansion: running and errored cards expanded so the user
     // sees them; completed-success cards collapsed for chat compactness.
-    // Override via prop if needed.
+    // V2.1.2 spec-fix-12 — Bug #6: write_file / edit_file ALWAYS render
+    // expanded by default. The user explicitly wants to see what
+    // changed without an extra click; that's the whole point of having
+    // the diff in chat. Read tools (read_file, list_directory) stay
+    // collapsed-on-success because their value is just "we looked."
+    const isWriteTool = state.name === 'write_file' || state.name === 'edit_file';
     const initiallyExpanded = defaultExpanded ?? (
-        state.status === 'running' || state.status === 'error'
+        state.status === 'running' || state.status === 'error' || isWriteTool
     );
     const [expanded, setExpanded] = useState(initiallyExpanded);
 

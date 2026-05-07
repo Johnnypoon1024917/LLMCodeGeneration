@@ -15,6 +15,9 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { registerTool, type ToolExecutor } from '../toolRegistry';
 import { validateWorkspacePath } from './_pathGuard';
+// V2.1.2 spec-fix-11 #3-DIAG: direct logger import for the wrong-file
+// edit investigation. Will be removed when the diagnostic is concluded.
+import { log } from '../../logger';
 
 const definition = {
     type: 'function' as const,
@@ -35,6 +38,13 @@ const definition = {
 const executor: ToolExecutor = async (args, ctx) => {
     const filepath = String(args['filepath'] ?? '');
     const content = String(args['content'] ?? '');
+    // ─── #3-DIAG (spec-fix-11) ─────────────────────────────────────
+    // Wrong-file edit investigation. Log the filepath the LLM
+    // actually passed to write_file. Cross-reference against the
+    // Coordinator's dispatch log to detect "Coder ignored its
+    // assigned file" failure mode.
+    log.info(`[#3-DIAG] write_file tool call received with path: "${filepath}" (content length: ${content.length} chars)`);
+    // ───────────────────────────────────────────────────────────────
     if (!filepath) {
         return {
             llmContent: "Error: 'filepath' argument is required.",

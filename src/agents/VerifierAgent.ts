@@ -5,6 +5,7 @@ import { CodeDiff } from './Coordinator';
 import { verifyAgainstSpec } from '../llmService';
 import { IEnvironment } from '../interfaces/IEnvironment';
 import { errorMessage, execErrorOutput } from '../utilities/errors';
+import { parseTestOutput, type PerTestFailure } from '../verifier/testOutputParser';
 import { parseBlocks, applyBlock } from '../utilities/searchReplace';
 import { getDeps } from '../container';
 import type { ToolEventEmitter } from './toolEventEmitter';
@@ -643,6 +644,35 @@ export interface VerifierFailure {
 }
 
 /**
+ * P1.1 (2026-05): build a Coder-readable message from a parsed
+ * per-test failure. Combines test name, assertion message, and
+ * expected/actual diff into a single compact string that the
+ * Coordinator's retry path forwards to the Coder via
+ * formatErrorHint().
+ *
+ * The output deliberately stays under ~300 chars per failure even
+ * when the full failure has long expected/actual values — Coder
+ * retries with N test failures need to fit all of them in the
+ * prompt budget.
+ */
+function buildTestFailureMessage(pt: PerTestFailure): string {
+    const parts: string[] = [];
+    if (pt.testName) {
+        parts.push(`Test failed: ${pt.testName}`);
+    } else {
+        parts.push('Test failed');
+    }
+    if (pt.message) {
+        parts.push(pt.message.slice(0, 200));
+    }
+    if (pt.expected !== undefined && pt.actual !== undefined) {
+        parts.push(`Expected: ${pt.expected.slice(0, 80)}`);
+        parts.push(`Got: ${pt.actual.slice(0, 80)}`);
+    }
+    return parts.join(' — ');
+}
+
+/**
  * P1.1: classify a parsed tsc error into structured `VerifierFailure`,
  * detecting unambiguous-typo patterns for single-shot self-heal.
  *
@@ -1148,22 +1178,42 @@ export class VerifierAgent {
                         if (fileExisted) { await env.writeFile(absolutePath, originalContent); }
                         else { await env.deleteFile(absolutePath); }
                     }
-                    // P1.1: surface a single structured test-failure.
-                    // Per-test extraction across runners (Jest, Vitest,
-                    // Mocha, pytest) is its own piece of work and not
-                    // in P1.1 scope — for now we attach one failure
-                    // summarizing the entire test run so the Coordinator's
-                    // structured retry path doesn't fall back to prose.
-                    const testFailure: VerifierFailure = {
-                        kind: 'test',
-                        file: draftDiff.filepath || null,
-                        message: failureLog.slice(0, 2000),  // cap to keep prompt size sane
-                        severity: 'error'
-                    };
+                    // P1.1 (2026-05): structured per-test failures.
+                    // Parse the runner's raw output (jest / vitest /
+                    // pytest supported) into individual failures so
+                    // formatErrorHint() and Coordinator's retry path
+                    // get specific test names + line numbers + the
+                    // actual assertion error, not a 2KB-truncated
+                    // blob. Falls back to single whole-blob behavior
+                    // when the parser can't detect framework or
+                    // extract any failures (preserves prior behavior).
+                    const perTest = parseTestOutput(failureLog);
+                    let testFailures: VerifierFailure[];
+                    if (perTest.length > 0) {
+                        testFailures = perTest.map(pt => {
+                            const f: VerifierFailure = {
+                                kind: 'test',
+                                file: pt.file ?? draftDiff.filepath ?? null,
+                                message: buildTestFailureMessage(pt),
+                                severity: 'error',
+                            };
+                            if (pt.line !== undefined) { f.line = pt.line; }
+                            return f;
+                        });
+                    } else {
+                        // Fallback: whole-blob. Same shape as before.
+                        const fallback: VerifierFailure = {
+                            kind: 'test',
+                            file: draftDiff.filepath || null,
+                            message: failureLog.slice(0, 2000),
+                            severity: 'error',
+                        };
+                        testFailures = [fallback];
+                    }
                     return {
                         passed: false,
                         critique: `🚨 TDD TEST FAILURE 🚨\n\nYour code compiled, but it FAILED the PRD Business Rules.\n\nTest Output:\n${failureLog}\n\nYou MUST rewrite the logic to make the tests pass.`,
-                        failures: [testFailure]
+                        failures: testFailures,
                     };
                 }
             }

@@ -2,7 +2,7 @@
 //
 // Pure greenfield detection logic for V2.1 project scaffolder.
 //
-// Greenfield = workspace where the user wants to start a new project,
+// Greenfield = workspace where the user wants to start a new task,
 // vs an existing project they want to extend. We detect it from THREE
 // signals, deterministically combinable so callers can decide their
 // own confidence threshold:

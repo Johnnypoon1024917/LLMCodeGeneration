@@ -93,6 +93,25 @@ export interface CoderAgentOptions {
      *  into the system prompt. */
     globalRules: string;
 
+    /** V2.3 bundle 3: pre-rendered installed-packages prompt section.
+     *  When set, injects "INSTALLED PACKAGES (use only these)..." into
+     *  the Coder system prompt so library imports match installed
+     *  reality. Targets the "phantom imports" failure mode (rrule
+     *  not installed; Prisma.BookingWhereInput phantom). The host
+     *  computes this once via detectInstalledPackages() and passes
+     *  in. Empty string is a valid value (means no manifest detected
+     *  or detection failed) — the prompt template skips the section. */
+    installedPackagesSection?: string;
+
+    /** V2.3 bundle 4 (TypeScript-only stepping-stone): pre-rendered
+     *  type-symbols prompt section. When set, the Coder's system
+     *  prompt includes the actual exported type names from high-value
+     *  packages (Prisma, Express, Zod). Targets the "phantom type
+     *  reference" failure mode where Prisma.BookingWhereInput etc.
+     *  are invented from training data. Computed once via
+     *  detectHighValueSymbols + renderSymbolsPromptSection. */
+    typeSymbolsSection?: string;
+
     /** Absolute filesystem path used by tool dispatches. */
     workspaceRoot: string;
 
@@ -117,48 +136,96 @@ export interface CoderAgentOptions {
     /** Lifecycle event emitter for tool calls. When provided, rich
      *  cards render in the webview as the Coder dispatches each tool. */
     emitter?: ToolEventEmitter;
+
+    /** V2.1.2 spec-fix-12 — Bug #1: approval hook for human-in-the-loop
+     *  gating of write_file / edit_file calls. When provided, dispatch
+     *  pauses for user approval before mutating the workspace. */
+    approvalHook?: import('./toolDispatchWithEvents').ApprovalHook;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = (filepath: string, globalRules: string) =>
-    `You are an elite AI Coder Agent executing an autonomous sub-task.
-Your sole purpose is to modify a single file based on the Technical Spec.
+// P1.2-followup (2026-05): Coder system prompt rewritten for Qwen3.6.
+//
+// The previous prompt was tuned for Qwen2.5-Coder, which needed heavy
+// hand-holding around tool-call format and frequent reminders to
+// "actually emit the tool call." Qwen3.6 has:
+//   - Native function calling via the `qwen3_coder` tool-call parser
+//   - Hybrid thinking mode (<think>...</think> blocks supported and
+//     improve quality on complex tasks)
+//   - Better instruction following (Qwen2.5's repeat-the-rule pattern
+//     is no longer necessary; one clear statement is enough)
+//   - 256K context (the verbose reminders no longer "cost nothing"
+//     since longer prompts crowd out useful retrieval)
+//
+// Changes from the previous version:
+//   - Length: ~2500 → ~1000 tokens (60% reduction)
+//   - Removed text-based <tool_call>...</tool_call> fallback format —
+//     was a Qwen2.5 workaround; Qwen3.6 handles native function calls
+//   - Replaced 4× "MUST end with tool call" repetition with single
+//     clear statement; modern Qwen instruction-followers don't need
+//     the reinforcement
+//   - Removed "NEVER emit reasoning-only text" prohibition — Qwen3.6
+//     thinking mode emits useful <think> blocks; we want them
+//   - Surfaced the planner's per-file <file_impact_analysis> so the
+//     Coder reads the targeted file's existing_role / planned_change /
+//     risk before writing
+//   - Steering rules moved AFTER tool listing so they're closer to
+//     the user's task instruction (recency bias of LLM attention)
+//
+// What stayed:
+//   - The single-file modification invariant (NO PHANTOM IMPORTS)
+//   - The package-list and type-symbol injection points
+//   - The signature so all callers work unchanged
+const SYSTEM_PROMPT_TEMPLATE = (filepath: string, globalRules: string, packagesSection: string, typeSymbolsSection: string) =>
+    `You are an elite AI Coder Agent executing one autonomous sub-task: modify a single file based on the Technical Spec from the Planner.
 
---- CRITICAL PROJECT RULES (.nexus/steering) ---
+## Your turn must end with a write_file or edit_file tool call
+
+That's the contract. The verifier checks for actual file modification; a turn without one is rejected.
+
+If you need more information first, that's fine — emit a read_file / list_directory / search_codebase call instead, and the next turn writes the file. Do NOT mix exploration and writing in the same turn; each turn does one thing.
+
+If you have nothing concrete to write because the previous turn already wrote it, emit a brief one-line summary with no tool call — that signals task completion.
+
+## Tools
+
+- read_file: re-read a file's current content
+- list_directory: explore neighboring files
+- search_codebase: find references to a symbol
+- write_file: replace the entire content of a file (preferred for new files or major changes)
+- edit_file: surgical edit of a specific block (preferred for small targeted changes)
+
+## Reading the Planner's spec
+
+The Technical Spec from the Planner contains a <file_impact_analysis> block with per-file reasoning. Find the entry for ${filepath}:
+
+  <file path="${filepath}">
+    <existing_role>...</existing_role>
+    <planned_change>...</planned_change>
+    <risk>low|medium|high</risk>
+    <depends_on>...</depends_on>
+  </file>
+
+The <planned_change> describes WHAT to change. The <existing_role> tells you what the file does today (so you don't break unrelated functionality). <risk> calibrates your care: low-risk = quick edit, high-risk = careful symmetry with existing patterns.
+
+If the spec lacks <file_impact_analysis> (legacy format), use the <execution_plan> block instead — same intent, less structured.
+
+## Constraints
+
+1. SINGLE-FILE MODE. Modify only ${filepath}. Don't refactor logic into other files that don't exist yet — write or keep the logic INLINE.
+
+2. NO PHANTOM LIBRARIES. Don't import packages that aren't in the project's package.json (or equivalent for non-Node projects). If you genuinely need a new dependency, mention it in your one-line summary AFTER the tool call so the build system can install it.
+
+3. NO MARKDOWN CODE BLOCKS as substitutes for tool calls. Code in \`\`\`typescript ... \`\`\` does NOT touch the filesystem. Only write_file / edit_file actually modifies disk.
+
+4. Keep the one-line summary AFTER the tool call brief — what changed, in plain language. Don't explain what you're about to do; the user can see the diff.
+
+${packagesSection}${typeSymbolsSection}## Project rules (.nexus/steering)
+
 ${globalRules ? globalRules : "No custom rules defined. Follow standard best practices and conventions for the language of the target file."}
--------------------------------------------------------
 
-You have tools available:
-  - read_file: re-read a file's current content
-  - list_directory: explore neighboring files
-  - search_codebase: find references to a symbol
-  - write_file: replace the entire content of a file (preferred for new files or major changes)
-  - edit_file: surgical edit of a specific block (preferred for small targeted changes)
+## Final note
 
-TOOL CALL FORMAT — follow this exactly:
-When you decide to call a tool, emit a structured tool call. Your inference server may parse one of these formats. EITHER:
-
-Format A (OpenAI native, preferred when supported):
-The tool call is structured into the response automatically — just decide to call the tool and the runtime handles the wire format.
-
-Format B (text-based, for endpoints without native tool-call parsing):
-\`\`\`
-<tool_call>
-{"name": "write_file", "arguments": {"path": "src/example.ts", "content": "console.log('hello');\\n"}}
-</tool_call>
-\`\`\`
-
-The JSON inside <tool_call>...</tool_call> MUST be a complete, valid object with "name" (the tool to call) and "arguments" (an object containing the tool's parameters as documented). Use real newlines INSIDE the JSON string values (not literal \\n unless the string already contains them).
-
-Example — to write a Hello World C program:
-<tool_call>
-{"name": "write_file", "arguments": {"path": "main.c", "content": "#include <stdio.h>\\n\\nint main() {\\n    printf(\\"Hello, World!\\\\n\\");\\n    return 0;\\n}\\n"}}
-</tool_call>
-
-CRITICAL RULES:
-1. ALWAYS use write_file or edit_file to make your changes — do NOT emit code in chat or markdown blocks. The chat output is for your reasoning only.
-2. ALWAYS emit a COMPLETE tool call. The opening tag, the full JSON, and the closing tag MUST all appear in your response. Do not stop after just the opening tag.
-3. NO PHANTOM IMPORTS: You are in SINGLE-FILE MODE. Modify only ${filepath}. Do NOT refactor logic into other files that don't exist yet. Write or keep the logic INLINE.
-4. When you finish, end with a brief one-line summary of what you changed. Do NOT keep calling tools after the file is written.`;
+Your reasoning belongs INSIDE the file as comments where it adds value, NOT in chat. Use thinking mode to plan your edit; emit the tool call decisively. The user is watching a code editor, not a discussion.`;
 
 /**
  * Restore pre-modification content to disk so each retry attempt
@@ -291,7 +358,7 @@ export class CoderAgent {
         const rateLimiter = new RateLimiter(readRateLimitConfig());
 
         // ─── Prompts ─────────────────────────────────────────────────
-        const systemPrompt = SYSTEM_PROMPT_TEMPLATE(opts.filepath, opts.globalRules);
+        const systemPrompt = SYSTEM_PROMPT_TEMPLATE(opts.filepath, opts.globalRules, opts.installedPackagesSection ?? '', opts.typeSymbolsSection ?? '');
         const userPrompt =
             `Task Spec:\n${opts.techSpec}\n\n` +
             `Target File: ${opts.filepath}\n\n` +
@@ -399,6 +466,9 @@ export class CoderAgent {
             ...(opts.emitter
                 ? { emitter: opts.emitter, taskId: opts.taskId }
                 : {}),
+            // V2.1.2 spec-fix-12 — Bug #1: forward approval hook so the
+            // ReAct engine gates write_file / edit_file dispatch on it.
+            ...(opts.approvalHook ? { approvalHook: opts.approvalHook } : {}),
 
             log: () => undefined, // Coder doesn't surface its own log lines —
                                    // the swarm-logs UI shows tool cards directly.

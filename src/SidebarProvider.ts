@@ -5,11 +5,15 @@ import { getDeps } from './container';
 import { originalContentProvider } from './diffProvider';
 import { getSmartASTContext, getGraphJSON, buildWorkspaceGraph } from './context/codeGraph';
 import { runTask } from './agents/Coordinator';
+// V2.2 cross-task remediation: monitor watches for new tsc errors
+// after each successful task and synthesizes remediation tasks when
+// task B's edits broke task A's compile invariants.
+import { CrossTaskMonitor } from './agents/crossTaskMonitor';
 import { PlannerAgent } from './agents/PlannerAgent';
 import { ToolEventEmitter } from './agents/toolEventEmitter';
 import { HookEventEmitter } from './hooks/hookEventEmitter';
 import { ToolAuditCorrelator } from './audit/toolAuditCorrelator';
-import { SpecManager, type Phase } from './specs/SpecManager';
+import { SpecManager, DEFAULT_FEATURE, type Phase } from './specs/SpecManager';
 // PR 3.2: hooks panel messages route through HookManager.
 import { HookManager } from './hooks/HookManager';
 // PR 3.3: steering rules panel messages route through SteeringManager.
@@ -23,6 +27,13 @@ import { VSCodeEnvironment } from './adapters/VSCodeEnvironment';
 // dialog. V2.1.2 / V2.1.3 will add the apply path.
 import { detectGreenfield } from './scaffold/greenfieldDetector';
 import { discoverTemplates } from './scaffold/templateLoader';
+// V2.1.2b — scaffold application. applyTemplate writes the chosen
+// template's files into the workspace; nodeFsAdapter wraps node:fs
+// for the production filesystem path. Tests use an in-memory fake
+// (see scaffoldApplier.test.ts) — production callers pass the
+// adapter explicitly so the apply logic stays decoupled from fs.
+import { applyTemplate } from './scaffold/scaffoldApplier';
+import { nodeFsAdapter } from './scaffold/nodeFsAdapter';
 import {
     listSessions,
     buildSessionBundle,
@@ -47,6 +58,7 @@ import {
     getAvailableModels,
     determineIntent,
     streamChat,
+    EmptyCompletionError,
     generateRequirements,
     generateDesign,
     generateTasks,
@@ -64,6 +76,8 @@ import { getLspContext } from './context/lspContext';
 import { getProjectStyleGuides, wrapUntrusted } from './context/styleContext';
 import { indexWorkspace } from './context/ragIndexer';
 import { retrieveHybridContext } from './context/hybridSearch';
+import { detectInstalledPackages, renderPackagesPromptSection } from './context/installedPackages';
+import { detectHighValueSymbols, renderSymbolsPromptSection } from './context/typescriptSymbols';
 
 // Utilities
 import { getAIHeader } from './utilities/commentStyles';
@@ -73,6 +87,7 @@ import { resolveCanonicalPaths } from './utilities/pathUtils';
 import { ProvenanceTracker } from "./provenanceTracker";
 import { createWorkspaceStructure } from "./workspaceManager";
 import { TerminalManager } from './terminalManager';
+import { SessionEventStore, isRecordable } from './sessions/SessionEventStore';
 
 /**
  * Apply a SEARCH/REPLACE pair to a file's content.
@@ -121,6 +136,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _isMetaMode: boolean = false;
 
     /**
+     * V2.1.2 spec-fix-4: currently-selected feature slug. Default is
+     * 'main' which matches pre-V2.1.2 behavior (everything saved under
+     * `.nexus/specs/main/`). Users can create or switch features via
+     * the webview, and the choice persists across VS Code sessions
+     * via workspaceState.
+     *
+     * The setter (setCurrentFeature) handles persistence + notifies the
+     * webview via featureChanged so the UI rehydrates from the new
+     * feature's spec files.
+     */
+    private _currentFeature: string = DEFAULT_FEATURE;
+
+    /**
      * PR 2.4b: disposer for the AuditLog subscription. Set in
      * resolveWebviewView when the webview attaches; called from the
      * webview's onDidDispose so we don't leak subscriptions across
@@ -132,6 +160,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
      * disallows assigning `undefined` to `?` fields. We need to assign
      * `undefined` to clear the disposer reference after teardown.
      */
+    /**
+     * V2.2 hotfix #2 (sub-bundle 2a): persistent event log writer.
+     * Records replay-relevant webview messages (tool calls, agent
+     * tokens, plan changes, approvals, etc.) to .nexus/sessions/
+     * <feature>/events-<timestamp>.jsonl on disk, so when VS Code
+     * reloads or the webview reconnects, 2b can replay them and
+     * restore the chat state.
+     *
+     * Lazy-initialized in resolveWebviewView once we have a workspace
+     * root. Lifecycle is per-extension-host (not per-webview), so it
+     * survives webview reloads — that's the whole point.
+     */
+    private _eventStore: SessionEventStore | undefined = undefined;
+
+    /** P3.1 bundle 2: tracks which agent phase is currently active so
+     *  usage callbacks can tag tokenUsage events with planner / coder
+     *  / verifier. Updated when log() callbacks fire with stepType
+     *  hints. Cleared between tasks. Defaults to 'unknown' which the
+     *  reducer treats as un-attributed. */
+    private _activeAgentPhase: 'planner' | 'coder' | 'verifier' | 'unknown' = 'unknown';
+
     private _auditUnsubscribe: (() => void) | undefined = undefined;
 
     /**
@@ -157,6 +206,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     private _undoStack = new Map<string, { filepath: string, originalContent: string }>();
     private _pendingCommandResolver: ((approved: boolean) => void) | undefined;
+
+    // V2.1.2 spec-fix-12 — Bug #1: inline approval before code edits.
+    //
+    // _currentAutopilot: latched at the start of each chat/task. The
+    // approval hook reads this to decide whether to gate write-tool
+    // calls. Default false matches the regulated-industry positioning
+    // ("ASK ME before you change anything").
+    //
+    // _pendingApprovalResolvers: keyed by the tool call's callId. The
+    // LLM can emit multiple write_file / edit_file calls in one
+    // assistant turn, so each pending approval needs its own resolver.
+    // (Commands use a single resolver because they're serialized.)
+    private _currentAutopilot: boolean = false;
+    private _pendingApprovalResolvers = new Map<string, (approved: boolean) => void>();
+
+    // V2.2 cross-task remediation: lazy-init session monitor. Created
+    // on first task completion (we don't need it for explore/chat
+    // sessions). Reset on workspace change or new chat session.
+    // null when no workspace is open or when the session hasn't yet
+    // completed a task.
+    private _crossTaskMonitor: CrossTaskMonitor | null = null;
 
     /**
      * Component 2B-3b: per-session tool event emitter. Used by the
@@ -225,6 +295,229 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     /**
+     * V2.1.2 spec-fix-12 — Bug #1: build an approval hook for the
+     * tool dispatch pipeline. Returns a function shaped like
+     * preDispatchHook that gates write_file / edit_file calls when
+     * AutoPilot is OFF, by posting an approval request to the webview
+     * and awaiting the user's click.
+     *
+     * Decision matrix:
+     *   - AutoPilot ON                  → auto-approve (no UI prompt)
+     *   - Tool not in {write_file, edit_file} → auto-approve (read-only
+     *     tools never need approval; bash_exec is gated by the existing
+     *     confirmAndRunCommand path which has its own UI)
+     *   - AutoPilot OFF + write tool    → post requestToolApproval,
+     *                                     wait for user response
+     *   - User approves                 → returns true (dispatch proceeds)
+     *   - User rejects                  → returns false (dispatch surfaces
+     *                                     a "rejected by user" error to
+     *                                     the LLM, which can adapt or stop)
+     *
+     * The hook is wired in via dispatchWithEvents.options.approvalHook
+     * (added in the same patch). The Coordinator passes this hook through
+     * its execution context.
+     *
+     * This is a method-returning-function rather than a plain method
+     * because the dispatch pipeline expects a stable function reference
+     * with closure over `this`. Calling it once at task start and reusing
+     * is cheaper than rebuilding per dispatch.
+     */
+    public buildApprovalHook(): (toolCall: { id: string; function: { name: string; arguments: string } }, parsedArgs: Record<string, unknown>) => Promise<boolean> {
+        return async (toolCall, parsedArgs) => {
+            // AutoPilot ON: skip the prompt entirely.
+            if (this._currentAutopilot || this._isMetaMode) { return true; }
+
+            const toolName = toolCall.function.name;
+            // Read-only tools and other non-mutating tools don't need
+            // approval. Only the two file-mutation tools are gated.
+            if (toolName !== 'write_file' && toolName !== 'edit_file') { return true; }
+
+            const filepath = String(parsedArgs['filepath'] ?? '(unknown path)');
+            const callId = toolCall.id;
+
+            // Diagnostic log so future "stuck on Drafting" bug reports
+            // can be triaged from the OutputChannel without a debugger.
+            // The user reported a 5-minute hang in spec-fix-12-bug
+            // where the approval card was rendered BELOW the visible
+            // viewport and missed entirely.
+            log.info(`[Approval] requesting user approval for ${toolName} on ${filepath} (callId=${callId})`);
+
+            // Post approval request to webview and wait for the click.
+            const approved = await new Promise<boolean>((resolve) => {
+                this._pendingApprovalResolvers.set(callId, resolve);
+                this._view?.webview.postMessage({
+                    type: 'requestToolApproval',
+                    callId,
+                    toolName,
+                    filepath,
+                    // Send a short snippet of the change so the user has
+                    // context. For write_file: the new content (truncated).
+                    // For edit_file: the old/new text pair (truncated).
+                    preview: toolName === 'write_file'
+                        ? { kind: 'write', content: String(parsedArgs['content'] ?? '').slice(0, 800) }
+                        : { kind: 'edit',
+                            oldText: String(parsedArgs['old_text'] ?? '').slice(0, 400),
+                            newText: String(parsedArgs['new_text'] ?? '').slice(0, 400) }
+                });
+            });
+
+            log.info(`[Approval] resolved ${callId}: ${approved ? 'approved' : 'rejected'}`);
+            this._pendingApprovalResolvers.delete(callId);
+            return approved;
+        };
+    }
+
+    /**
+     * V2.2 cross-task remediation: after a task completes, check
+     * whether the project still compiles. If new tsc errors appeared
+     * that weren't there before this task ran, attribute them to the
+     * task and surface a remediation prompt the user can dispatch.
+     *
+     * Design intentionally observability-only:
+     *   - Never blocks the originating task's success state
+     *   - Never auto-dispatches remediation (V2.6 governance territory)
+     *   - Never modifies workspace state directly
+     *   - Surfaces crossTaskRegression message; webview decides UX
+     *
+     * Scope: TS/JS projects (require tsconfig.json). Python / Go / Rust
+     * skipped silently; per-language equivalents are V2.4+ work.
+     *
+     * Errors during analysis are caught at the call site and logged;
+     * cross-task check is bonus value, not a gate.
+     */
+    private async runCrossTaskAnalysis(
+        completed: import('./agents/crossTaskMonitor').CompletedTask,
+        workspaceRoot: string
+    ): Promise<void> {
+        if (!this._crossTaskMonitor) {
+            const env = new VSCodeEnvironment();
+            const monitor = new CrossTaskMonitor(workspaceRoot, env);
+            if (!monitor.isApplicable()) {
+                this._crossTaskMonitor = monitor;
+                log.info('[CrossTask] not applicable to this workspace (no tsconfig.json)');
+                return;
+            }
+            this._crossTaskMonitor = monitor;
+        }
+        if (!this._crossTaskMonitor.isApplicable()) { return; }
+
+        const analysis = await this._crossTaskMonitor.analyzeAfterTask(completed);
+        if (analysis.healthy) {
+            log.info(`[CrossTask] ${completed.taskKey}: clean`);
+            return;
+        }
+
+        if (!analysis.remediationTask) {
+            log.warn(`[CrossTask] ${completed.taskKey}: ${analysis.newErrors.length} new errors, no attribution`);
+            this._view?.webview.postMessage({
+                type: 'crossTaskRegression',
+                sourceTaskKey: completed.taskKey,
+                newErrorCount: analysis.newErrors.length,
+                attributable: false,
+                summary: `${analysis.newErrors.length} new tsc errors after ${completed.taskTitle}; couldn't attribute to a session task.`,
+            });
+            return;
+        }
+
+        log.info(`[CrossTask] ${completed.taskKey}: ${analysis.newErrors.length} new errors, remediation synthesized for ${analysis.remediationTask.targetFile}`);
+        this._view?.webview.postMessage({
+            type: 'crossTaskRegression',
+            sourceTaskKey: completed.taskKey,
+            newErrorCount: analysis.newErrors.length,
+            attributable: true,
+            remediationTask: analysis.remediationTask,
+            summary: `${analysis.newErrors.length} new tsc errors in ${analysis.remediationTask.targetFile} after ${completed.taskTitle}.`,
+        });
+    }
+
+    /**
+     * V2.1.3: shared greenfield detection + template discovery helper.
+     *
+     * Two call sites:
+     *   1. The existing requestScaffoldDecision case (refactor next).
+     *   2. The build-path generatePlan call — passes the hint to the
+     *      planner so it can emit a scaffold task as task[0] when
+     *      the workspace is empty.
+     *
+     * Returns null when no workspace is open (no greenfield possible)
+     * or detection fails. Callers treat null as "not greenfield."
+     */
+    private async detectGreenfieldForPrompt(userPrompt: string): Promise<{
+        detection: import('./scaffold/greenfieldDetector').GreenfieldDetectionResult;
+        templates: Array<{ id: string; displayName: string; description: string; stackTags: string[]; }>;
+    } | null> {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        const workspaceRoot = workspaceFolders?.[0]?.uri.fsPath;
+        if (!workspaceRoot) { return null; }
+
+        let topLevelFilenames: string[] = [];
+        let totalFileCount = 0;
+        try {
+            const entries = await vscode.workspace.fs.readDirectory(
+                vscode.Uri.file(workspaceRoot)
+            );
+            topLevelFilenames = entries
+                .filter(([_, kind]) => kind === vscode.FileType.File)
+                .map(([name]) => name);
+            totalFileCount = topLevelFilenames.length;
+            const COUNT_CAP = 100;
+            const SKIP_DIRS = new Set([
+                'node_modules', '.git', '.nexus', 'dist',
+                'build', 'out', '__pycache__', '.venv',
+                'venv', 'target', '.next', '.gradle',
+            ]);
+            for (const [name, kind] of entries) {
+                if (totalFileCount >= COUNT_CAP) { break; }
+                if (kind !== vscode.FileType.Directory) { continue; }
+                if (SKIP_DIRS.has(name)) { continue; }
+                try {
+                    const sub = await vscode.workspace.fs.readDirectory(
+                        vscode.Uri.file(path.join(workspaceRoot, name))
+                    );
+                    totalFileCount += sub.filter(
+                        ([_, k]) => k === vscode.FileType.File
+                    ).length;
+                } catch {
+                    // Subdir read failed — treat as 0 contribution.
+                }
+            }
+        } catch (e) {
+            log.warn(`[Scaffold] detectGreenfieldForPrompt: list workspace failed: ${errorMessage(e)}`);
+            return null;
+        }
+
+        const detection = detectGreenfield({
+            prompt: userPrompt,
+            topLevelFilenames,
+            totalFileCount,
+        });
+
+        const allTemplates = discoverTemplates(workspaceRoot, this._extensionUri.fsPath);
+
+        // Filter templates by stackHint when present so the planner
+        // doesn't see (and pick) wildly off-stack templates.
+        let templates = allTemplates;
+        if (detection.stackHint) {
+            const hint = detection.stackHint.toLowerCase();
+            const filtered = allTemplates.filter(t =>
+                t.stackTags.some(tag => tag.toLowerCase().includes(hint)) ||
+                t.id.toLowerCase().includes(hint)
+            );
+            if (filtered.length > 0) { templates = filtered; }
+        }
+
+        return {
+            detection,
+            templates: templates.map(t => ({
+                id: t.id,
+                displayName: t.displayName,
+                description: t.description,
+                stackTags: t.stackTags,
+            })),
+        };
+    }
+
+    /**
      * P1.4: lazy-construct the hook event emitter and wire HookManager
      * to use it. Called during webview resolution so hooks that fire
      * after the webview opens land as cards in chat.
@@ -270,6 +563,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } else {
             vscode.window.showInformationMessage(t("commands.open_sidebar_first"));
         }
+    }
+
+    /**
+     * V2.2 hotfix #2 (2b): replay the active session log to the
+     * connected webview. Called from resolveWebviewView after the
+     * webview attaches. Posts:
+     *   - 'replayBegin'  (count: N)
+     *   - 'replayEvent'  (one per recorded event, in original order,
+     *                     payload is the original recorded message)
+     *   - 'replayEnd'
+     *
+     * Replay events are wrapped in a 'replayEvent' envelope rather
+     * than re-posted as their original type. Why: the postMessage
+     * wrapper installed in resolveWebviewView records every recordable
+     * message, and re-posting original-typed events would create a
+     * recursive duplicate-recording loop. The wrapper checks for
+     * 'replayEvent' / 'replayBegin' / 'replayEnd' in the recordable
+     * whitelist (it's not there), so they bypass recording.
+     *
+     * The webview's reducer for 'replayEvent' unwraps the inner
+     * event and applies it like a live event — taskCallEvent goes
+     * through applyToolEvent, chatToken appends to the active task's
+     * reasoning, etc.
+     *
+     * Failures (no log, parse errors) are silent — replay is
+     * best-effort. The user still gets the live state via initState.
+     */
+    private async replayActiveSessionToWebview(): Promise<void> {
+        if (!this._eventStore || !this._view) { return; }
+        const events = await this._eventStore.readActiveLog();
+        if (!events || events.length === 0) { return; }
+        // Bookend so the webview can show a "restoring..." overlay if
+        // it wants. count helps the UI render a progress indicator.
+        this._view.webview.postMessage({ type: 'replayBegin', count: events.length });
+        for (const e of events) {
+            this._view.webview.postMessage({
+                type: 'replayEvent',
+                ts: e.ts,
+                event: e.payload,
+            });
+        }
+        this._view.webview.postMessage({ type: 'replayEnd' });
     }
 
     public injectTerminalTask(prompt: string) {
@@ -386,7 +721,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         _token: vscode.CancellationToken,
     ) {
         this._view = webviewView;
-        vscode.workspace.registerTextDocumentContentProvider('nexus-diff', originalContentProvider);
+        // V2.2 hotfix #2 (2a): wrap webview.postMessage so any host→
+        // webview message that's in our recordable-event whitelist gets
+        // appended to the session event log on disk. The wrapper is
+        // installed once per webview instance (a reload re-runs
+        // resolveWebviewView and re-installs). All 187+ existing
+        // postMessage call sites in this file are recorded
+        // transparently — no per-site changes needed.
+        //
+        // We attach to the webview object (not the bound method) so
+        // both `this._view.webview.postMessage(...)` and
+        // `webviewView.webview.postMessage(...)` paths are caught.
+        // Recording is fire-and-forget; recording failures never block
+        // the actual postMessage delivery (the original is awaited
+        // first, the recording is dispatched after).
+        const realPostMessage = webviewView.webview.postMessage.bind(webviewView.webview);
+        (webviewView.webview as unknown as { postMessage: (m: unknown) => Thenable<boolean> }).postMessage =
+            (message: unknown) => {
+                const result = realPostMessage(message);
+                if (this._eventStore && isRecordable(message)) {
+                    this._eventStore.recordEvent(message as { type: string; [k: string]: unknown });
+                }
+                return result;
+            };
+        // V2.1.2 spec-fix-12 — Bug #5: removed orphan registration
+        // for scheme 'nexus-diff'. The provider is registered correctly
+        // in extension.ts under 'nexus-original' (which is the scheme
+        // showDiff actually constructs). This duplicate had no consumer.
         this._tracker?.setView(webviewView);
         webviewView.webview.options = {
             enableScripts: true,
@@ -395,6 +756,46 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             ]
         };
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+        // V2.2 hotfix #2 — sub-bundle 2a/2b: lazy-init the event store
+        // and attempt to replay the active session log. The store
+        // outlives webview reloads (it's instance-scoped on this
+        // SidebarProvider, not webview-scoped), so a reload picks up
+        // the same log file and the same activeFeature.
+        //
+        // Replay strategy: post a 'replayBegin' message, then stream
+        // recorded events back as 'replayEvent' messages, then post
+        // 'replayEnd'. The webview's reducer treats replay events
+        // exactly like live events (toolCallEvent, chatToken, etc.)
+        // — the only differences are (a) the begin/end bookends so
+        // the webview can show a "restoring previous session..."
+        // indicator, and (b) replay events are tagged with their
+        // original timestamp so cards' startedAt fields stay accurate.
+        //
+        // Replay happens BEFORE the regular initState dispatch (which
+        // sends the latest spec content from disk). This ordering is
+        // intentional: the log replays cards/reasoning, then initState
+        // syncs phaseState / activePlan / featureList from disk truth.
+        // initState's payload always wins for state that disk-vs-log
+        // can disagree about.
+        if (!this._eventStore) {
+            const wf = vscode.workspace.workspaceFolders?.[0];
+            const root = this._isMetaMode ? this._extensionUri : wf?.uri;
+            if (root) {
+                this._eventStore = new SessionEventStore(root, this._currentFeature);
+            }
+        } else if (this._eventStore) {
+            // Reload case: existing store, just refresh its feature
+            // pointer in case the workspace changed.
+            this._eventStore.setActiveFeature(this._currentFeature);
+        }
+
+        // Replay before any other webview messages. Because this is
+        // async and resolveWebviewView is sync, we kick off the replay
+        // and let it race with the rest of the resolve work — but we
+        // post the bookend messages directly so the webview knows
+        // what's happening.
+        this.replayActiveSessionToWebview().catch((e) => log.warn('[replay] failed:', String(e)));
 
         // P1.4: wire the hook event emitter to the webview. Lazy-construct
         // (no harm if no hook ever fires this session) and let the getter
@@ -543,11 +944,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const taskFiles = getDeps().state.get<any>('nexus_task_files') || {};
                     const hasApiKey = !!(await getDeps().secrets.get('nexuscode_apikey'));
 
+                    // V2.1.2 spec-fix-4: hydrate the current feature slug
+                    // from workspaceState. Default 'main' preserves pre-fix
+                    // behavior for users who never explicitly switched.
+                    this._currentFeature = getDeps().state.get<string>('nexus_current_feature') || DEFAULT_FEATURE;
+
                     let savedReqs = "";
                     let savedDesign = "";
                     let savedTasks: any = null;
                     let savedRules = "";
                     let savedPhaseState: any = null;
+                    let featureList: { slug: string; phaseState: any }[] = [];
 
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders) {
@@ -556,13 +963,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         const specs = this.specs();
                         if (specs) {
-                            savedReqs = await specs.readRequirements();
-                            savedDesign = await specs.readDesign();
-                            savedTasks = await specs.readTasksJson();
+                            savedReqs = await specs.readRequirements(this._currentFeature);
+                            savedDesign = await specs.readDesign(this._currentFeature);
+                            savedTasks = await specs.readTasksJson(this._currentFeature);
                             // Webview UI expects a single `nexusRules` string — feed it the
                             // combined steering content (product + structure + tech).
                             savedRules = (await specs.readSteering()).combined;
-                            savedPhaseState = await specs.readPhaseState();
+                            savedPhaseState = await specs.readPhaseState(this._currentFeature);
+                            featureList = await specs.listFeatures();
 
                             this._activeRequirements = savedReqs;
                             this._activeDesign = savedDesign;
@@ -597,6 +1005,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             coder:    thinkingCoder,
                             verifier: thinkingVerifier,
                         },
+                        // V2.1.2 spec-fix-4: multi-feature payload
+                        currentFeature: this._currentFeature,
+                        featureList,
                     });
                     break;
                 }
@@ -664,31 +1075,217 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         // --- BACKGROUND LLM PROCESSING ---
 
-                        // Fetch & Parse Requirements (PRD)
+                        // V2.1.2 spec-fix-7: persistent traceability cache.
+                        // The matrix can be reconstructed from disk in a few
+                        // milliseconds when nothing has changed, vs ~80 seconds
+                        // of LLM calls for 5 specs. Cache lives at
+                        // .nexus/cache/traceability.json and is keyed per
+                        // feature by content hash so single-spec edits only
+                        // invalidate that one feature.
+                        const { TraceabilityCache, hashContent } = await import('./context/traceabilityCache.js');
+                        const cache = new TraceabilityCache(specs.cacheDir());
+                        await cache.load();
+
+                        // The webview can request a force-rebuild (the new
+                        // ↻ Force Rebuild button) which clears the cache
+                        // before processing. The default ↻ Refresh path
+                        // honors the cache and only re-parses what changed.
+                        const forceRebuild = data.force === true;
+                        if (forceRebuild) {
+                            log.info('[DEBUG-MAP] Force rebuild requested; clearing cache.');
+                            cache.clear();
+                        }
+
                         let reqGraph: any = { nodes: [], edges: [] };
-                        try {
-                            const { parseRequirementGraph } = await import('./context/traceabilityGraph.js');
-                            const reqString = await specs.readRequirements();
-                            if (reqString) {
-                                reqGraph = await parseRequirementGraph(reqString);
-                            }
-                        } catch (e) {
-                            log.debug("[DEBUG-MAP] 🟡 No requirements.md found or parsing failed:", e instanceof Error ? e.message : String(e));
-                        }
-
-                        // Fetch & Parse Architecture (Design)
                         let designGraph: any = { nodes: [], edges: [] };
+                        let aggregatedTasks: any = { implementationTasks: [] };
+
+                        // Per-feature progress tracking. Sent to the webview
+                        // so the user can see "got 3 of 5; 2 failed; 4 from cache".
+                        const featureWarnings: { slug: string; phase: string; reason: string }[] = [];
+                        let featuresProcessed = 0;
+                        let featuresWithReqs = 0;
+                        let featuresWithDesign = 0;
+                        let cacheHits = 0;
+                        let cacheMisses = 0;
+
                         try {
-                            const { parseDesignGraph } = await import('./context/traceabilityGraph.js');
-                            const designString = await specs.readDesign();
-                            if (designString) {
-                                designGraph = await parseDesignGraph(designString);
+                            const { parseRequirementGraph, parseDesignGraph } = await import('./context/traceabilityGraph.js');
+                            const features = await specs.listFeatures();
+
+                            // Update status. We don't yet know how many will
+                            // hit cache vs miss, so the message stays generic
+                            // until after the loop.
+                            this._view?.webview.postMessage({
+                                type: 'statusUpdate',
+                                message: `Nexus: Aggregating ${features.length} spec${features.length === 1 ? '' : 's'}...`
+                            });
+
+                            for (const f of features) {
+                                featuresProcessed++;
+                                const cached = cache.get(f.slug);
+
+                                // ─── Requirements per feature ─────────────────
+                                try {
+                                    const reqString = await specs.readRequirements(f.slug);
+                                    if (reqString) {
+                                        const reqHash = hashContent(reqString);
+                                        let featureReq;
+
+                                        if (cached && cached.reqHash === reqHash && cached.reqGraph) {
+                                            // Cache hit — use the stored graph directly.
+                                            featureReq = cached.reqGraph;
+                                            cacheHits++;
+                                        } else {
+                                            // Cache miss — call the LLM, then store.
+                                            featureReq = await parseRequirementGraph(reqString);
+                                            cacheMisses++;
+                                            // Update cache entry (or create if missing).
+                                            cache.set(f.slug, {
+                                                reqHash,
+                                                reqGraph: featureReq,
+                                                designHash: cached?.designHash ?? '',
+                                                designGraph: cached?.designGraph ?? null,
+                                                tasksHash: cached?.tasksHash ?? '',
+                                                tasksJson: cached?.tasksJson ?? null,
+                                            });
+                                        }
+
+                                        if (featureReq.nodes.length === 0) {
+                                            featureWarnings.push({
+                                                slug: f.slug,
+                                                phase: 'requirements',
+                                                reason: 'Parser returned no epics (LLM may have returned empty or malformed response)',
+                                            });
+                                        } else {
+                                            featuresWithReqs++;
+                                            for (const n of featureReq.nodes) {
+                                                const prefixedId = `${f.slug}::${n.id}`;
+                                                reqGraph.nodes.push({
+                                                    ...n,
+                                                    id: prefixedId,
+                                                    label: features.length > 1 ? `[${f.slug}] ${n.label || n.id}` : (n.label || n.id),
+                                                });
+                                            }
+                                            for (const e of featureReq.edges) {
+                                                reqGraph.edges.push({
+                                                    ...e,
+                                                    source: `${f.slug}::${e.source}`,
+                                                    target: `${f.slug}::${e.target}`,
+                                                });
+                                            }
+                                        }
+                                    } else {
+                                        featureWarnings.push({
+                                            slug: f.slug,
+                                            phase: 'requirements',
+                                            reason: 'No requirements.md found',
+                                        });
+                                    }
+                                } catch (e) {
+                                    const reason = e instanceof Error ? e.message : String(e);
+                                    log.warn(`[DEBUG-MAP] reqs parse failed for ${f.slug}: ${reason}`);
+                                    featureWarnings.push({ slug: f.slug, phase: 'requirements', reason });
+                                }
+
+                                // ─── Design per feature ───────────────────────
+                                try {
+                                    const designString = await specs.readDesign(f.slug);
+                                    if (designString) {
+                                        const designHash = hashContent(designString);
+                                        // Re-read the cached entry — it may have been
+                                        // updated by the requirements branch above.
+                                        const cachedNow = cache.get(f.slug);
+                                        let featureDesign;
+
+                                        if (cachedNow && cachedNow.designHash === designHash && cachedNow.designGraph) {
+                                            featureDesign = cachedNow.designGraph;
+                                            cacheHits++;
+                                        } else {
+                                            featureDesign = await parseDesignGraph(designString);
+                                            cacheMisses++;
+                                            cache.set(f.slug, {
+                                                reqHash: cachedNow?.reqHash ?? '',
+                                                reqGraph: cachedNow?.reqGraph ?? null,
+                                                designHash,
+                                                designGraph: featureDesign,
+                                                tasksHash: cachedNow?.tasksHash ?? '',
+                                                tasksJson: cachedNow?.tasksJson ?? null,
+                                            });
+                                        }
+
+                                        if (featureDesign.nodes.length > 0) {
+                                            featuresWithDesign++;
+                                            for (const n of featureDesign.nodes) {
+                                                designGraph.nodes.push({
+                                                    ...n,
+                                                    id: `${f.slug}::${n.id}`,
+                                                    label: features.length > 1 ? `[${f.slug}] ${n.label || n.id}` : (n.label || n.id),
+                                                });
+                                            }
+                                            for (const e of featureDesign.edges) {
+                                                designGraph.edges.push({
+                                                    ...e,
+                                                    source: `${f.slug}::${e.source}`,
+                                                    target: `${f.slug}::${e.target}`,
+                                                });
+                                            }
+                                        }
+                                    }
+                                } catch (e) {
+                                    const reason = e instanceof Error ? e.message : String(e);
+                                    log.warn(`[DEBUG-MAP] design parse failed for ${f.slug}: ${reason}`);
+                                    featureWarnings.push({ slug: f.slug, phase: 'design', reason });
+                                }
+
+                                // ─── Tasks per feature ────────────────────────
+                                // Tasks aren't LLM-parsed (they come straight from
+                                // tasks.json), so caching them mainly avoids the
+                                // file read. We still do it for consistency and
+                                // because the prefixing/augmentation work IS
+                                // CPU-visible at scale.
+                                try {
+                                    const featureTasks = await specs.readTasksJson(f.slug);
+                                    if (featureTasks && Array.isArray(featureTasks.implementationTasks)) {
+                                        for (const t of featureTasks.implementationTasks) {
+                                            aggregatedTasks.implementationTasks.push({
+                                                ...t,
+                                                _featureSlug: f.slug,
+                                                relatedRequirement: t.relatedRequirement
+                                                    ? `${f.slug}::${t.relatedRequirement}`
+                                                    : t.relatedRequirement,
+                                            });
+                                        }
+                                        // Cache the augmented tasks payload — keyed on
+                                        // a hash of the raw JSON for invalidation.
+                                        const tasksHash = hashContent(JSON.stringify(featureTasks));
+                                        const cachedNow = cache.get(f.slug);
+                                        if (!cachedNow || cachedNow.tasksHash !== tasksHash) {
+                                            cache.set(f.slug, {
+                                                reqHash: cachedNow?.reqHash ?? '',
+                                                reqGraph: cachedNow?.reqGraph ?? null,
+                                                designHash: cachedNow?.designHash ?? '',
+                                                designGraph: cachedNow?.designGraph ?? null,
+                                                tasksHash,
+                                                tasksJson: featureTasks,
+                                            });
+                                        }
+                                    }
+                                } catch (e) {
+                                    log.warn(`[DEBUG-MAP] tasks parse failed for ${f.slug}:`, e instanceof Error ? e.message : String(e));
+                                }
                             }
+
+                            // Persist cache to disk after the full sweep — one
+                            // write per refresh, batched.
+                            await cache.save(specs.cacheDir());
+
+                            log.info(`[DEBUG-MAP] Aggregated traceability: ${featuresWithReqs}/${featuresProcessed} reqs, ${featuresWithDesign}/${featuresProcessed} designs, ${aggregatedTasks.implementationTasks.length} tasks · ${cacheHits} cached, ${cacheMisses} fresh`);
                         } catch (e) {
-                            log.debug("[DEBUG-MAP] 🟡 No design.md found or parsing failed:", e instanceof Error ? e.message : String(e));
+                            log.error("[DEBUG-MAP] traceability aggregation failed:", e instanceof Error ? e.message : String(e));
                         }
 
-                        let tasksJson = await specs.readTasksJson();
+                        let tasksJson = aggregatedTasks;
 
                         // 2. Build the Ultimate Combined Matrix
                         let combinedGraph: any = { nodes: [...normalizedCodeGraph.nodes], edges: [...normalizedCodeGraph.edges] };
@@ -707,7 +1304,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                 codeMap: codeGraph,
                                 reqMap: reqGraph,
                                 combinedMap: combinedGraph,
-                                isGraphLoading: false // Unlocks the UI buttons
+                                isGraphLoading: false, // Unlocks the UI buttons
+                                // V2.1.2 spec-fix-5: per-feature diagnostics so the
+                                // user can see "got 3 of 5 specs; the others failed"
+                                // instead of staring at a sparse matrix wondering why.
+                                featureCount: featuresProcessed,
+                                featuresWithReqs,
+                                featuresWithDesign,
+                                featureWarnings,
+                                // V2.1.2 spec-fix-8: cache stats. The cache hits +
+                                // misses count individual graphs (req or design)
+                                // not features, so a feature with both cached
+                                // contributes 2 to cacheHits.
+                                cacheHits,
+                                cacheMisses,
                             }
                         });
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: '' });
@@ -777,7 +1387,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // markTaskCompleted matches against the title in tasks.md, so we
                             // accept `data.taskTitle` if provided, falling back to `data.task`
                             // for back-compat with any caller that hasn't been updated yet.
-                            await specs.markTaskCompleted(data.taskTitle ?? data.task);
+                            await specs.markTaskCompleted(data.taskTitle ?? data.task, this._currentFeature);
 
                             try {
                                 if (this._activeRequirements) {
@@ -803,7 +1413,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                             currentPRD = currentPRD.replace(update.original, update.updated);
                                         });
 
-                                        await specs.writeRequirements(currentPRD);
+                                        await specs.writeRequirements(currentPRD, this._currentFeature);
                                         this._activeRequirements = currentPRD;
                                         this._view?.webview.postMessage({ type: 'requirementsUpdated', text: currentPRD });
                                     }
@@ -850,7 +1460,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         enrichedPrompt += `<metadata>\n  <target_audience>${reqPlan.targetAudience}</target_audience>\n</metadata>\n\n`;
                         enrichedPrompt += `## 🎯 Agile User Stories\n\n`;
 
-                        reqPlan.userStories.forEach((us: any, eIdx: number) => {
+                        // V2.1.2 spec-redesign hotfix: defensive coercion against
+                        // missing fields in the model's response. Three failure modes
+                        // we've actually observed:
+                        //   1. nonFunctionalRequirements isn't in the schema at all,
+                        //      so models that strictly follow the schema (Qwen 3.6
+                        //      vs older models that volunteered the field) omit it.
+                        //   2. Even fields marked `required` in the schema can come
+                        //      back undefined when the endpoint runs strict:false
+                        //      json_schema or json_object mode, because xgrammar
+                        //      doesn't enforce all string-level constraints (see
+                        //      llmService.ts ~line 795 for the wider context).
+                        //   3. Models occasionally return a single string where the
+                        //      schema asks for an array.
+                        // Without these defaults, .forEach on undefined throws
+                        // "Cannot read properties of undefined" mid-render and the
+                        // whole generation reads as a failure even though the LLM
+                        // succeeded. Coercion is cheap; bail-out is expensive.
+                        const userStoriesList = Array.isArray(reqPlan.userStories) ? reqPlan.userStories : [];
+                        const nfrList: string[] = Array.isArray(reqPlan.nonFunctionalRequirements) ? reqPlan.nonFunctionalRequirements : [];
+                        const successMetricsList: string[] = Array.isArray(reqPlan.successMetrics) ? reqPlan.successMetrics : [];
+                        const outOfScopeList: string[] = Array.isArray(reqPlan.outOfScope) ? reqPlan.outOfScope : [];
+
+                        userStoriesList.forEach((us: any, eIdx: number) => {
                             const epicId = `EPIC-${(eIdx + 1).toString().padStart(2, '0')}`;
                             enrichedPrompt += `<epic id="${epicId}" name="${us.epic || 'General'}">\n`;
                             enrichedPrompt += `### ${epicId}: ${us.epic || 'General'}\n\n`;
@@ -870,26 +1502,60 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             enrichedPrompt += `</epic>\n\n`;
                         });
 
-                        enrichedPrompt += `## 🛡️ Non-Functional Requirements (NFRs)\n`;
-                        enrichedPrompt += `<nfr_list>\n`;
-                        reqPlan.nonFunctionalRequirements.forEach((nfr: string) => { enrichedPrompt += `- ${nfr}\n`; });
-                        enrichedPrompt += `</nfr_list>\n`;
+                        // NFR section — only render the block if we got NFRs.
+                        // An empty <nfr_list></nfr_list> in the saved markdown is
+                        // useless noise; better to omit it cleanly.
+                        if (nfrList.length > 0) {
+                            enrichedPrompt += `## 🛡️ Non-Functional Requirements (NFRs)\n`;
+                            enrichedPrompt += `<nfr_list>\n`;
+                            nfrList.forEach((nfr: string) => { enrichedPrompt += `- ${nfr}\n`; });
+                            enrichedPrompt += `</nfr_list>\n`;
+                        }
+
+                        // Success metrics — same conditional rendering.
+                        if (successMetricsList.length > 0) {
+                            enrichedPrompt += `\n## 📊 Success Metrics\n`;
+                            successMetricsList.forEach((m: string) => { enrichedPrompt += `- ${m}\n`; });
+                        }
+
+                        // Out of scope — same conditional rendering.
+                        if (outOfScopeList.length > 0) {
+                            enrichedPrompt += `\n## 🚫 Out of Scope\n`;
+                            outOfScopeList.forEach((s: string) => { enrichedPrompt += `- ${s}\n`; });
+                        }
 
                         const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                         const specs = new SpecManager(rootUri);
-                        await specs.writeRequirements(enrichedPrompt);
+                        await specs.writeRequirements(enrichedPrompt, this._currentFeature);
                         this._activeRequirements = enrichedPrompt;
 
                         this._view?.webview.postMessage({ type: 'reqStep', message: `✅ Saved requirements.md` });
                         this._view?.webview.postMessage({ type: 'requirementsGenerated', text: enrichedPrompt });
-                        this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await specs.readPhaseState() });
+                        this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await specs.readPhaseState(this._currentFeature) });
                     } catch (error: unknown) {
                         if (isAbortError(error)) {
                             this._view?.webview.postMessage({ type: 'reqStep', message: `\n🛑 Cancelled by User.` });
+                            this._view?.webview.postMessage({ type: 'generationFailed' });
+                        } else if (error instanceof EmptyCompletionError) {
+                            // V2.1.2 fix: empty-completion is the most common cause of
+                            // "click Auto-Generate, nothing happens, returns to edit page".
+                            // Surface it via a dedicated specError event so the new
+                            // stepper UI can render a prominent banner (the old reqStep
+                            // path got blown away by generationFailed reverting the UI).
+                            this._view?.webview.postMessage({
+                                type: 'specError',
+                                phase: 'requirements',
+                                title: 'No response generated',
+                                message: errorMessage(error),
+                            });
                         } else {
-                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${errorMessage(error)}` });
+                            this._view?.webview.postMessage({
+                                type: 'specError',
+                                phase: 'requirements',
+                                title: 'Requirements generation failed',
+                                message: errorMessage(error),
+                            });
                         }
-                        this._view?.webview.postMessage({ type: 'generationFailed' }); // Reset UI
                     } finally {
                         this._activeTaskController = undefined;
                     }
@@ -904,7 +1570,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                     const gateSpecs = new SpecManager(rootUri);
                     try {
-                        await gateSpecs.requirePhaseApproved('design');
+                        await gateSpecs.requirePhaseApproved('design', this._currentFeature);
                     } catch (e: unknown) {
                         this._view?.webview.postMessage({ type: 'reqStep', message: `🔒 ${errorMessage(e)}` });
                         this._view?.webview.postMessage({ type: 'generationFailed' });
@@ -918,20 +1584,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     try {
                         const designDoc = await generateDesign(data.requirements, this._activeTaskController.signal);
 
-                        await new SpecManager(rootUri).writeDesign(designDoc);
+                        await new SpecManager(rootUri).writeDesign(designDoc, this._currentFeature);
 
                         this._activeDesign = designDoc;
 
                         this._view?.webview.postMessage({ type: 'reqStep', message: `✅ Saved design.md` });
                         this._view?.webview.postMessage({ type: 'designGenerated', text: designDoc });
-                        this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await new SpecManager(rootUri).readPhaseState() });
+                        this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await new SpecManager(rootUri).readPhaseState(this._currentFeature) });
                     } catch (error: unknown) {
                         if (isAbortError(error)) {
                             this._view?.webview.postMessage({ type: 'reqStep', message: `\n🛑 Architecting Cancelled by User.` });
+                            this._view?.webview.postMessage({ type: 'generationFailed' });
+                        } else if (error instanceof EmptyCompletionError) {
+                            this._view?.webview.postMessage({
+                                type: 'specError',
+                                phase: 'design',
+                                title: 'No response generated',
+                                message: errorMessage(error),
+                            });
                         } else {
-                            this._view?.webview.postMessage({ type: 'reqStep', message: `\n❌ Error: ${errorMessage(error)}` });
+                            this._view?.webview.postMessage({
+                                type: 'specError',
+                                phase: 'design',
+                                title: 'Design generation failed',
+                                message: errorMessage(error),
+                            });
                         }
-                        this._view?.webview.postMessage({ type: 'generationFailed' });
                     } finally {
                         this._activeTaskController = undefined;
                     }
@@ -946,7 +1624,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                     const gateSpecs = new SpecManager(rootUri);
                     try {
-                        await gateSpecs.requirePhaseApproved('tasks');
+                        await gateSpecs.requirePhaseApproved('tasks', this._currentFeature);
                     } catch (e: unknown) {
                         this._view?.webview.postMessage({ type: 'reqStep', message: `🔒 ${errorMessage(e)}` });
                         this._view?.webview.postMessage({ type: 'generationFailed' });
@@ -976,8 +1654,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             steeringBlock
                         );
 
+                        // ─── #3-DIAG (spec-fix-11) ─────────────────────────
+                        // Spec-page task generation — same wrong-file edit
+                        // investigation. Logs each generated task's file
+                        // target so we can compare against the user's intent.
+                        try {
+                            const tasks = plan?.implementationTasks ?? [];
+                            log.info(`[#3-DIAG] generateTasks returned ${tasks.length} task(s) (spec-page path).`);
+                            tasks.forEach((t: any, i: number) => {
+                                const targetFile = typeof t === 'string' ? '(string-task; no .file)' : (t?.file ?? '(undefined)');
+                                const step = typeof t === 'string' ? t : (t?.step ?? '(no step)');
+                                log.info(`[#3-DIAG] generateTasks task[${i}].file = "${targetFile}" — step: "${String(step).slice(0, 100)}"`);
+                            });
+                        } catch (e) {
+                            log.warn('[#3-DIAG] Failed to log generateTasks output:', e instanceof Error ? e.message : String(e));
+                        }
+                        // ───────────────────────────────────────────────────
+
                         const specs = new SpecManager(rootUri);
-                        await specs.writeTasksJson(plan);
+                        await specs.writeTasksJson(plan, this._currentFeature);
 
                         let mdContent = `---\n`;
                         mdContent += `version: 1.0.0\n`;
@@ -1009,7 +1704,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         });
                         mdContent += `</tasks>\n`;
 
-                        await specs.writeTasksMd(mdContent);
+                        await specs.writeTasksMd(mdContent, this._currentFeature);
 
                         const { finalPaths, renamingMap } = await resolveCanonicalPaths(plan.folderStructure, rootUri.fsPath);
                         plan.folderStructure = finalPaths;
@@ -1030,15 +1725,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this._view?.webview.postMessage({ type: 'chatToken', token: "I have analyzed the PRD and System Architecture. Here is the master implementation plan. You can execute these tasks one by one using the buttons below, or run them all at once.\n\n" });
                         this._view?.webview.postMessage({ type: "structureResponse", value: plan });
                         this._view?.webview.postMessage({ type: 'tasksGenerated' });
-                        this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await specs.readPhaseState() });
+                        this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: await specs.readPhaseState(this._currentFeature) });
 
                     } catch (error: unknown) {
                         if (isAbortError(error)) {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: `🛑 Planning Cancelled by User.` });
+                            this._view?.webview.postMessage({ type: 'generationFailed' });
+                        } else if (error instanceof EmptyCompletionError) {
+                            this._view?.webview.postMessage({
+                                type: 'specError',
+                                phase: 'tasks',
+                                title: 'No response generated',
+                                message: errorMessage(error),
+                            });
                         } else {
-                            vscode.window.showErrorMessage(`Failed to generate tasks: ${errorMessage(error)}`);
+                            this._view?.webview.postMessage({
+                                type: 'specError',
+                                phase: 'tasks',
+                                title: 'Tasks generation failed',
+                                message: errorMessage(error),
+                            });
                         }
-                        this._view?.webview.postMessage({ type: 'generationFailed' });
                     } finally {
                         this._activeTaskController = undefined;
                         this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
@@ -1071,7 +1778,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // Webview sends { phase: 'requirements' | 'design' | 'tasks' }
                     const specs = this.specs();
                     if (specs && this.isValidPhase(data.phase)) {
-                        const next = await specs.setPhaseStatus(data.phase as Phase, 'approved');
+                        const next = await specs.setPhaseStatus(data.phase as Phase, 'approved', this._currentFeature);
                         this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: next });
                         vscode.window.showInformationMessage(`✅ ${data.phase} approved.`);
                     }
@@ -1084,10 +1791,256 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     // so the user has to explicitly regenerate them.
                     const specs = this.specs();
                     if (specs && this.isValidPhase(data.phase)) {
-                        const next = await specs.resetFromPhase(data.phase as Phase);
+                        const next = await specs.resetFromPhase(data.phase as Phase, this._currentFeature);
                         this._view?.webview.postMessage({ type: 'phaseStateUpdated', phaseState: next });
                         vscode.window.showInformationMessage(`↩️ ${data.phase} rejected. Regenerate when ready.`);
                     }
+                    break;
+                }
+
+                case "reopenPRD": {
+                    // V2.2 hotfix #3: non-destructive navigation back to PRD.
+                    //
+                    // Differs from startOver:
+                    //   - startOver: deletes requirements.md + design.md +
+                    //     tasks.md + tasks.json on disk, AND cascades phase
+                    //     reset (resetFromPhase('requirements') sets all
+                    //     three to 'not_started')
+                    //   - reopenPRD: ONLY flips phaseState.requirements
+                    //     from 'approved' back to 'draft'. All files on
+                    //     disk stay intact. Design + tasks remain available;
+                    //     user decides whether to regenerate them after
+                    //     re-approving PRD or keep as-is.
+                    //
+                    // The user's mental model: "I want to look at the PRD
+                    // again, maybe tweak something, but I don't want to
+                    // throw away the design and 18-task plan I already
+                    // built." Start Over was the wrong tool for that;
+                    // this is the right tool.
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) { break; }
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
+                    const sm = new SpecManager(rootUri);
+                    try {
+                        await sm.setPhaseStatus('requirements', 'draft', this._currentFeature);
+                        const phaseState = await sm.readPhaseState(this._currentFeature);
+                        const reqs = await sm.readRequirements(this._currentFeature);
+                        const dsg = await sm.readDesign(this._currentFeature);
+                        const tasksJson = await sm.readTasksJson(this._currentFeature);
+                        this._activeRequirements = reqs;
+                        this._activeDesign = dsg;
+                        // Send featureChanged with the unchanged content but
+                        // updated phaseState so the webview re-renders with
+                        // the requirements section back in editable mode.
+                        this._view?.webview.postMessage({
+                            type: 'featureChanged',
+                            currentFeature: this._currentFeature,
+                            requirements: reqs,
+                            design: dsg,
+                            tasks: tasksJson,
+                            phaseState,
+                            featureList: await sm.listFeatures(),
+                        });
+                    } catch (e: unknown) {
+                        log.warn('[reopenPRD] failed:', errorMessage(e));
+                    }
+                    break;
+                }
+
+                case "startOver": {
+                    // V2.1.2 spec-fix-3: full clean-slate reset for the active feature.
+                    // Webview's "Start Over" buttons used to only clear local React
+                    // state and fire updateRequirements:"" — that left phaseState.json
+                    // on disk untouched, so all approved flags survived and the user
+                    // couldn't actually re-generate from scratch (the page kept
+                    // showing "Approve Tasks" and "Go to Coder" buttons even after
+                    // clearing the textarea).
+                    //
+                    // Four steps, in this exact order to avoid races:
+                    //   1. Reset phaseState.json — both requirements and design
+                    //      reset paths actually walk the same code (resetFromPhase
+                    //      with 'requirements' clears ALL three because it walks
+                    //      from that phase forward).
+                    //   2. Delete the saved spec files (requirements.md, design.md,
+                    //      tasks.md, tasks.json) so a regeneration doesn't merge
+                    //      with stale content.
+                    //   3. Clear in-memory copies on the host so any in-flight
+                    //      reads pick up the cleared state.
+                    //   4. Notify the webview with a fresh phaseState so the UI
+                    //      bounces back to the "describe your idea" empty state.
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) { break; }
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
+                    const sm = new SpecManager(rootUri);
+
+                    try {
+                        // Step 1: reset phaseState
+                        const next = await sm.resetFromPhase('requirements', this._currentFeature);
+
+                        // Step 2: delete the saved spec files. We use a best-effort
+                        // delete loop because some files may not exist (e.g. user
+                        // never made it past requirements). VS Code's fs.delete
+                        // throws on missing files, so we wrap each one.
+                        const featureDir = vscode.Uri.joinPath(rootUri, '.nexus', 'specs', sm.slugifyName(this._currentFeature));
+                        const filesToDelete = ['requirements.md', 'design.md', 'tasks.md', 'tasks.json'];
+                        for (const f of filesToDelete) {
+                            try {
+                                await vscode.workspace.fs.delete(vscode.Uri.joinPath(featureDir, f));
+                            } catch {
+                                // File didn't exist — fine, that's the goal anyway.
+                            }
+                        }
+
+                        // Step 3: clear host-side in-memory copies.
+                        this._activeRequirements = "";
+                        this._activeDesign = "";
+
+                        // V2.2 hotfix #2 (2a): roll the session log
+                        // forward. After Start Over, the next replay
+                        // should NOT show the wiped task's history —
+                        // user explicitly asked for a fresh slate. Old
+                        // log files stay on disk for forensic value
+                        // but a new current.txt pointer means future
+                        // reloads start blank.
+                        if (this._eventStore) {
+                            await this._eventStore.startNewSession();
+                        }
+
+                        // Step 4: notify the webview.
+                        // V2.2 hotfix #4: also send fresh featureList so the
+                        // webview's "View existing spec" picker can re-filter
+                        // with the now-empty phaseState. Without this, the
+                        // webview's filter applies to a stale list and the
+                        // just-reset feature still appears.
+                        this._view?.webview.postMessage({
+                            type: 'phaseStateUpdated',
+                            phaseState: next,
+                            featureList: await sm.listFeatures(),
+                        });
+                        vscode.window.showInformationMessage('↩️ Spec reset. Start a new idea anytime.');
+                    } catch (e: unknown) {
+                        // Don't surface as an error to the user via popup —
+                        // partial cleanup is still better than nothing, and
+                        // they can retry. Log for diagnosis though.
+                        log.warn('[startOver] partial cleanup:', errorMessage(e));
+                    }
+                    break;
+                }
+
+                case "setCurrentFeature": {
+                    // V2.1.2 spec-fix-4: switch the active feature. Triggered
+                    // by the webview's switcher dropdown. We persist the
+                    // choice to workspaceState (so it survives VS Code
+                    // restart) and re-hydrate the spec page with the new
+                    // feature's content via a featureChanged message.
+                    //
+                    // No-op if the requested slug isn't a real feature on
+                    // disk (defensive — protects against typos in stored
+                    // state if the user manually deleted a directory).
+                    const requested = typeof data.slug === 'string' ? data.slug : DEFAULT_FEATURE;
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) { break; }
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
+                    const sm = new SpecManager(rootUri);
+
+                    const exists = await sm.featureExists(requested);
+                    if (!exists && requested !== DEFAULT_FEATURE) {
+                        // Asked to switch to a feature that doesn't exist.
+                        // Don't silently create it — that's createFeature's
+                        // job. Tell the webview the switch failed.
+                        this._view?.webview.postMessage({
+                            type: 'featureChangeFailed',
+                            slug: requested,
+                            reason: `Feature "${requested}" not found.`,
+                        });
+                        break;
+                    }
+
+                    this._currentFeature = sm.slugifyName(requested);
+                    // V2.2 hotfix #2 (2a): switch the event store's
+                    // active feature so subsequent recordings go into
+                    // the right per-feature directory.
+                    if (this._eventStore) {
+                        this._eventStore.setActiveFeature(this._currentFeature);
+                    }
+                    await getDeps().state.update('nexus_current_feature', this._currentFeature);
+
+                    // Re-hydrate spec content for the new feature.
+                    const reqs = await sm.readRequirements(this._currentFeature);
+                    const dsg = await sm.readDesign(this._currentFeature);
+                    const tasksJson = await sm.readTasksJson(this._currentFeature);
+                    const phaseState = await sm.readPhaseState(this._currentFeature);
+                    this._activeRequirements = reqs;
+                    this._activeDesign = dsg;
+
+                    this._view?.webview.postMessage({
+                        type: 'featureChanged',
+                        currentFeature: this._currentFeature,
+                        requirements: reqs,
+                        design: dsg,
+                        tasks: tasksJson,
+                        phaseState,
+                        featureList: await sm.listFeatures(),
+                    });
+                    break;
+                }
+
+                case "createFeature": {
+                    // V2.1.2 spec-fix-4: create a new feature and switch to it.
+                    // Triggered by the empty-state name field OR by the "+ New"
+                    // button in the switcher dropdown. We slugify aggressively
+                    // (the user types "My Checkout Flow!" and gets
+                    // "my-checkout-flow") and refuse if the slug already
+                    // exists OR if it slugifies to empty/main and wasn't
+                    // explicitly asked for.
+                    const requested = typeof data.name === 'string' ? data.name : '';
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (!workspaceFolders) { break; }
+                    const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
+                    const sm = new SpecManager(rootUri);
+
+                    const slug = sm.slugifyName(requested);
+                    if (!slug || (slug === DEFAULT_FEATURE && requested.trim() !== DEFAULT_FEATURE)) {
+                        this._view?.webview.postMessage({
+                            type: 'featureChangeFailed',
+                            slug,
+                            reason: `Cannot create feature with that name. Use letters, numbers, and dashes.`,
+                        });
+                        break;
+                    }
+
+                    if (await sm.featureExists(slug)) {
+                        this._view?.webview.postMessage({
+                            type: 'featureChangeFailed',
+                            slug,
+                            reason: `A feature called "${slug}" already exists. Switch to it instead, or pick a different name.`,
+                        });
+                        break;
+                    }
+
+                    // Create the directory + initial phaseState.json by
+                    // calling featureDir + readPhaseState — the latter
+                    // returns the default { all not_started } shape and
+                    // writes nothing. The directory will be populated on
+                    // first writeRequirements call.
+                    await sm.featureDir(slug);
+
+                    this._currentFeature = slug;
+                    await getDeps().state.update('nexus_current_feature', slug);
+
+                    // Reset in-memory copies — fresh feature has no content.
+                    this._activeRequirements = "";
+                    this._activeDesign = "";
+
+                    this._view?.webview.postMessage({
+                        type: 'featureChanged',
+                        currentFeature: slug,
+                        requirements: '',
+                        design: '',
+                        tasks: null,
+                        phaseState: await sm.readPhaseState(slug),
+                        featureList: await sm.listFeatures(),
+                    });
                     break;
                 }
 
@@ -1096,7 +2049,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders && data.text.trim()) {
                         const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
-                        try { await new SpecManager(rootUri).writeRequirements(data.text); } catch (e) { }
+                        try { await new SpecManager(rootUri).writeRequirements(data.text, this._currentFeature); } catch (e) { }
                     } else if (data.text === "") {
                         this._activeRequirements = "";
                         this._activeDesign = "";
@@ -1109,7 +2062,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders && data.text.trim()) {
                         const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
-                        try { await new SpecManager(rootUri).writeDesign(data.text); } catch (e) { }
+                        try { await new SpecManager(rootUri).writeDesign(data.text, this._currentFeature); } catch (e) { }
                     }
                     break;
                 }
@@ -1151,10 +2104,168 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 case "clearHistory":
                     await getDeps().state.update('nexus_chat_history', []);
-                    await getDeps().state.update('nexus_task_statuses', {});
-                    await getDeps().state.update('nexus_task_summaries', {});
-                    await getDeps().state.update('nexus_task_files', {});
+                    // V2.2 hotfix: do NOT wipe task statuses / summaries / files
+                    // here. They represent "what work has been done in this
+                    // feature" — orthogonal to chat content. The user's
+                    // intent on clearHistory is "fresh chat," not "wipe
+                    // progress." Previously these were cleared too, which
+                    // meant clearing chat lost all task-progression UI
+                    // (the plan card showed bare task names with no
+                    // status pills, even though the underlying tasks.md
+                    // on disk still recorded which were complete).
+                    //
+                    // The Start Over flow handles "true reset" — it deletes
+                    // the spec files on disk AND the persisted state.
+                    // clearHistory is the lighter-touch sibling.
                     break;
+
+                case "getTimelineEvents": {
+                    // P3.1: Timeline tab requests all session events
+                    // for the active feature. We fan out to the
+                    // SessionEventStore which reads every events-*.jsonl
+                    // in the feature directory (max 5 per V2.2 rotation)
+                    // and concatenates them with sessionStamp tags.
+                    //
+                    // The webview owns the reducer (eventsToTimelineModel)
+                    // — keeps the structuring logic in one place and
+                    // makes the host a pure data-fetcher. Payload is
+                    // bounded by rotation policy so postMessage size
+                    // is reasonable.
+                    if (!this._eventStore) {
+                        this._view?.webview.postMessage({
+                            type: 'timelineEvents',
+                            events: [],
+                            empty: true,
+                            reason: 'no-session-store',
+                        });
+                        break;
+                    }
+                    try {
+                        const allEvents = await this._eventStore.readAllLogsForFeature();
+                        // RecordedEvent shape is { ts, payload }. The
+                        // reducer in the webview consumes the payloads
+                        // — extract them and forward.
+                        const payloads = allEvents.map(e => e.payload);
+                        this._view?.webview.postMessage({
+                            type: 'timelineEvents',
+                            events: payloads,
+                            count: payloads.length,
+                        });
+                    } catch (e: unknown) {
+                        log.warn('[getTimelineEvents] failed:', String(e));
+                        this._view?.webview.postMessage({
+                            type: 'timelineEvents',
+                            events: [],
+                            empty: true,
+                            reason: 'read-error',
+                            errorMessage: String(e),
+                        });
+                    }
+                    break;
+                }
+
+                case "exportSession": {
+                    // V2.2 hotfix: bundle the current session into a
+                    // single JSON file under .nexus/exports/<feature>-
+                    // <timestamp>.json and open it in an editor tab so
+                    // the user can save-as, copy, or share with a
+                    // support engineer.
+                    //
+                    // Bundle contents:
+                    //   - exportedAt, feature, nexusVersion
+                    //   - phaseState + specs (requirements + design + tasksJson)
+                    //     read FRESH from disk so the export reflects
+                    //     ground truth, not a stale React copy
+                    //   - chat: messages + task state from the webview
+                    //     (passed in this message — host doesn't have a
+                    //     React-equivalent copy)
+                    //   - events: full session event log if 2a captured
+                    //     anything during this session
+                    //   - featureList: contextual list of all features
+                    //     in the workspace
+                    //
+                    // Failures (write error, fs unavailable) are
+                    // non-fatal — we toast the error and continue. The
+                    // export button isn't in any critical path.
+                    try {
+                        const wf = vscode.workspace.workspaceFolders?.[0];
+                        if (!wf) {
+                            vscode.window.showWarningMessage('Cannot export — no workspace folder is open.');
+                            break;
+                        }
+                        const root = this._isMetaMode ? this._extensionUri : wf.uri;
+                        const sm = new SpecManager(root);
+                        const phaseState = await sm.readPhaseState(this._currentFeature);
+                        const requirements = await sm.readRequirements(this._currentFeature);
+                        const design = await sm.readDesign(this._currentFeature);
+                        let tasksJson: unknown = null;
+                        try {
+                            tasksJson = await sm.readTasksJson(this._currentFeature);
+                        } catch {
+                            // tasks.json may not exist yet; not an error.
+                        }
+                        const featureList = await sm.listFeatures();
+                        // Pull the event log if 2a captured one.
+                        let events: unknown[] = [];
+                        if (this._eventStore) {
+                            const recorded = await this._eventStore.readActiveLog();
+                            if (recorded) {
+                                events = recorded;
+                            }
+                        }
+
+                        const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, '');
+                        const bundle = {
+                            exportedAt: new Date().toISOString(),
+                            feature: this._currentFeature,
+                            phaseState,
+                            specs: {
+                                requirements,
+                                design,
+                                tasksJson,
+                            },
+                            chat: {
+                                // These come from the webview's React
+                                // state — host doesn't have its own copy
+                                // of these (the host's chat history is
+                                // workspaceState which is a different
+                                // shape). Defensively coerce to JSON-
+                                // safe values; if any field is undefined,
+                                // export an empty/null placeholder.
+                                messages: Array.isArray(data.messages) ? data.messages : [],
+                                taskStatuses: data.taskStatuses ?? {},
+                                taskSummaries: data.taskSummaries ?? {},
+                                taskFiles: data.taskFiles ?? {},
+                                taskSteps: data.taskSteps ?? {},
+                                taskReasoning: data.taskReasoning ?? {},
+                                activePlan: data.activePlan ?? null,
+                            },
+                            events,
+                            featureList,
+                        };
+                        const json = JSON.stringify(bundle, null, 2);
+                        const exportsDir = vscode.Uri.joinPath(root, '.nexus', 'exports');
+                        await vscode.workspace.fs.createDirectory(exportsDir);
+                        const exportUri = vscode.Uri.joinPath(
+                            exportsDir,
+                            `${this._currentFeature}-${stamp}.json`
+                        );
+                        await vscode.workspace.fs.writeFile(exportUri, Buffer.from(json, 'utf8'));
+                        // Open in an editor tab. preview:false keeps
+                        // it open after the user clicks elsewhere.
+                        const doc = await vscode.workspace.openTextDocument(exportUri);
+                        await vscode.window.showTextDocument(doc, { preview: false });
+                        vscode.window.showInformationMessage(
+                            `📦 Session exported to .nexus/exports/${this._currentFeature}-${stamp}.json (${(json.length / 1024).toFixed(1)} KB, ${events.length} events)`
+                        );
+                    } catch (e: unknown) {
+                        log.warn('[exportSession] failed:', errorMessage(e));
+                        vscode.window.showErrorMessage(
+                            `Export failed: ${errorMessage(e)}`
+                        );
+                    }
+                    break;
+                }
 
                 case "saveApiKey":
                     await getDeps().secrets.store('nexuscode_apikey', data.value);
@@ -1164,6 +2275,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 case "processUserMessage": {
                     this._activeTaskController = new AbortController();
+                    // V2.1.2 spec-fix-12 — Bug #1: latch the AutoPilot
+                    // flag for this chat session so the approval hook can
+                    // read it. Coerce defensively: older webview bundles
+                    // may not include the field.
+                    this._currentAutopilot = Boolean(data.autopilot);
                     try {
                         const workspacePath = await this.getTargetContext();
 
@@ -1178,7 +2294,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing intent..." });
                         }
 
-                        const intent = await determineIntent(data.text);
+                        // V2.1.2 spec-fix-10 P5.2: applyExploreFix re-uses
+                        // this case via a synthesized prompt and explicitly
+                        // forces intent='build'. Skip the LLM classifier
+                        // when the caller already knows what it wants —
+                        // a "fix the bug we just diagnosed" prompt could
+                        // misclassify back to 'explore' otherwise.
+                        const forcedIntent = data.forceIntent;
+                        const intent = (forcedIntent === 'build' || forcedIntent === 'explore' || forcedIntent === 'explain' || forcedIntent === 'ask')
+                            ? forcedIntent
+                            : await determineIntent(data.text);
 
                         const fullPrompt = data.context
                             ? `--- ATTACHED CONTEXT ---\n${data.context}\n\n--- USER QUERY ---\n${data.text}`
@@ -1244,7 +2369,56 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             // context follows as semantic enrichment.
                             const finalContext = `${projectStructure}\n\n--- SEMANTIC CONTEXT ---\n${lspContext}\n\n${astContext}\n\n${hybridContext}\n\n${styleGuide}\n\n${requirementInjection}\n\n${designInjection}`;
 
-                            const result = await generatePlan(fullPrompt, finalContext);
+                            // V2.1.3: planner-driven scaffolding. When
+                            // the workspace looks empty + the prompt
+                            // sounds like a greenfield request, build
+                            // a scaffoldHint so the planner emits a
+                            // scaffold task as task[0]. For brownfield
+                            // workspaces this runs but the hint stays
+                            // undefined — generatePlan's prompt is
+                            // identical to before in that case.
+                            //
+                            // Note: the existing dialog flow (handled
+                            // by requestScaffoldDecision) STILL runs
+                            // when the webview triggers it. Today, the
+                            // dialog usually scaffolds first and the
+                            // workspace is no longer empty by the time
+                            // generatePlan runs here — so the hint
+                            // ends up undefined and behavior is
+                            // unchanged. The planner-driven path lights
+                            // up only when the dialog is skipped or
+                            // bypassed; a future bundle can retire the
+                            // dialog in favor of this path if desired.
+                            const scaffoldInfo = await this.detectGreenfieldForPrompt(data.text);
+                            const scaffoldHint = (scaffoldInfo && scaffoldInfo.detection.isGreenfield)
+                                ? {
+                                    confidence: scaffoldInfo.detection.confidence,
+                                    ...(scaffoldInfo.detection.stackHint
+                                        ? { stackHint: scaffoldInfo.detection.stackHint }
+                                        : {}),
+                                    availableTemplates: scaffoldInfo.templates,
+                                }
+                                : undefined;
+
+                            const result = await generatePlan(fullPrompt, finalContext, scaffoldHint);
+
+                            // ─── #3-DIAG (spec-fix-11) ─────────────────────────
+                            // Wrong-file edit investigation. Logs the planner's
+                            // chosen file for each task so we can compare against
+                            // the user's intent. Will be removed after the
+                            // investigation concludes.
+                            try {
+                                const tasks = result.plan?.implementationTasks ?? [];
+                                log.info(`[#3-DIAG] Planner returned ${tasks.length} task(s) for build-mode prompt. User prompt was:`, fullPrompt.slice(0, 200));
+                                tasks.forEach((t: any, i: number) => {
+                                    const targetFile = typeof t === 'string' ? '(string-task; no .file)' : (t?.file ?? '(undefined)');
+                                    const step = typeof t === 'string' ? t : (t?.step ?? '(no step)');
+                                    log.info(`[#3-DIAG] Planner task[${i}].file = "${targetFile}" — step: "${String(step).slice(0, 100)}"`);
+                                });
+                            } catch (e) {
+                                log.warn('[#3-DIAG] Failed to log planner output:', e instanceof Error ? e.message : String(e));
+                            }
+                            // ───────────────────────────────────────────────────
 
                             this._view?.webview.postMessage({ type: 'chatToken', token: result.explanation + "\n\n" });
 
@@ -1328,7 +2502,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             const explorationContext = exploreResult.gatheredContext ?? "";
 
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "Nexus: Analyzing evidence..." });
-                            this._view?.webview.postMessage({ type: 'startChatStream' });
+                            // V2.1.2 spec-fix-10 P5.2: tag the stream as
+                            // 'explore' and include the original prompt so
+                            // the webview can render an "Apply this fix"
+                            // button under the assistant's response and
+                            // route the click back with full context.
+                            this._view?.webview.postMessage({
+                                type: 'startChatStream',
+                                intent: 'explore',
+                                originalPrompt: data.text,
+                            });
 
                             const fullContext = `--- FORENSIC EVIDENCE GATHERED BY TOOLS ---\n${explorationContext}\n\nBased on this evidence, explain exactly what went wrong and how we should fix it.`;
 
@@ -1387,6 +2570,22 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         if (isAbortError(error)) {
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "⚠️ Generation stopped." });
                             setTimeout(() => this._view?.webview.postMessage({ type: 'statusUpdate', message: "" }), 3000);
+                        } else if (error instanceof EmptyCompletionError) {
+                            // Empty-completion is most often a context-overflow
+                            // case on Qwen 3.6 27B (32K cap). Surface it INLINE
+                            // in the chat rather than as a modal popup — users
+                            // are looking at the chat thread when the silence
+                            // happens, so the explanation should land there.
+                            //
+                            // Without this branch, streamChat throws and we
+                            // hit the generic showErrorMessage path below,
+                            // which puts a modal at the bottom-right corner
+                            // of VS Code that users frequently miss.
+                            this._view?.webview.postMessage({
+                                type: 'chatToken',
+                                token: `\n\n⚠️ **No response generated.** ${errorMessage(error)}`,
+                            });
+                            this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
                         } else {
                             vscode.window.showErrorMessage(`NexusCode Error: ${errorMessage(error)}`);
                             this._view?.webview.postMessage({ type: 'statusUpdate', message: "" });
@@ -1408,6 +2607,91 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
+                // V2.1.2 spec-fix-10 P5.2: explore-mode "Apply this fix"
+                // dispatcher. The webview emits this when the user clicks
+                // the button (or when auto-apply opt-in fires) below an
+                // explore-mode response.
+                //
+                // Payload:
+                //   - originalPrompt — what the user typed (e.g.
+                //     "where is the dashboard?")
+                //   - exploreResponse — the assistant's diagnosis,
+                //     verbatim
+                //   - source — 'button' | 'auto'; threaded through to
+                //     the audit log so reviewers can distinguish click
+                //     authorization vs setting authorization
+                //
+                // The synthesized build prompt gives the planner full
+                // context: original intent + diagnosis. We route through
+                // processUserMessage with forceIntent='build' so the
+                // existing planner→coder pipeline does the heavy lifting
+                // and we don't duplicate 80+ lines of build-mode prep.
+                case "applyExploreFix": {
+                    const originalPrompt = typeof data.originalPrompt === 'string' ? data.originalPrompt : '';
+                    const exploreResponse = typeof data.exploreResponse === 'string' ? data.exploreResponse : '';
+                    const source = data.source === 'auto' ? 'auto' : 'button';
+
+                    if (!originalPrompt || !exploreResponse) {
+                        log.warn('[applyExploreFix] Missing originalPrompt or exploreResponse; ignoring.');
+                        break;
+                    }
+
+                    // Audit hook — record the apply event with its source
+                    // so the audit trail explicitly captures whether
+                    // authorization came from a click or the auto setting.
+                    // Wrapped in try/catch because audit logging is
+                    // best-effort; never block the user-facing flow on it.
+                    try {
+                        log.info(`[applyExploreFix] source=${source}, original prompt length=${originalPrompt.length}, explore response length=${exploreResponse.length}`);
+                    } catch { /* ignore */ }
+
+                    // Synthesize the build-mode prompt. The structure here
+                    // is intentional:
+                    //   1. Lead with explicit "apply the fix" instruction
+                    //      to anchor the planner's intent.
+                    //   2. Surface the original user request for grounding
+                    //      (so the planner doesn't drift to a different
+                    //      problem the diagnosis happens to mention).
+                    //   3. Append the full diagnosis as forensic context.
+                    const synthesizedPrompt = `Apply the fix described in the prior analysis below. Do not re-investigate; the diagnosis has already been done.
+
+--- ORIGINAL USER REQUEST ---
+${originalPrompt}
+
+--- DIAGNOSIS FROM EXPLORE MODE ---
+${exploreResponse}
+
+Now make the file edits required to resolve this. Generate a concrete plan with implementation tasks.`;
+
+                    // Re-emit to the webview so the user sees the fix
+                    // being attempted in their chat thread (good UX —
+                    // the apply isn't silent), then route to the build
+                    // pipeline with intent forced.
+                    //
+                    // V2.1.2 spec-fix-13: also send originalPrompt and
+                    // exploreResponse as separate fields so the webview
+                    // can render a compact fix-application card instead
+                    // of dumping the whole synthesized prompt as a giant
+                    // user-message bubble. The full `text` field is
+                    // unchanged (still feeds the planner verbatim); only
+                    // what the user sees in chat changes.
+                    this._view?.webview.postMessage({
+                        type: 'addUserMessageAndSubmit',
+                        text: synthesizedPrompt,
+                        // Pass forceIntent through so processUserMessage
+                        // skips determineIntent. The webview adapter
+                        // doesn't strip this field — it forwards data
+                        // verbatim into the next processUserMessage call.
+                        forceIntent: 'build',
+                        // Mark the source for downstream audit/telemetry.
+                        applySource: source,
+                        // V2.1.2 spec-fix-13: parts for compact rendering.
+                        applyOriginalPrompt: originalPrompt,
+                        applyDiagnosisLength: exploreResponse.length,
+                    });
+                    break;
+                }
+
                 case "executeTask": {
                     const originalTaskQuery = data.prompt || data.task;
                     const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -1415,6 +2699,74 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                     const rootUri = this._isMetaMode ? this._extensionUri : workspaceFolders[0]!.uri;
                     this._activeTaskController = new AbortController();
+                    // V2.1.2 spec-fix-12 — Bug #1: latch the AutoPilot
+                    // flag for this task so the approval hook gates
+                    // write_file / edit_file calls correctly.
+                    this._currentAutopilot = Boolean(data.autopilot);
+
+                    // V2.1.3: scaffold-template tasks short-circuit the
+                    // standard MCTS+Coder pipeline. Apply the template
+                    // directly and report completion. The standard
+                    // pipeline would still work but waste cycles
+                    // generating "approaches" for what's a deterministic
+                    // file-copy operation.
+                    const taskKind = typeof data.taskKind === 'string' ? data.taskKind : undefined;
+                    if (taskKind === 'scaffold-template') {
+                        const templateId = typeof data.templateId === 'string' ? data.templateId : '';
+                        if (!templateId) {
+                            log.error('[Scaffold] scaffold-template task missing templateId');
+                            this._view?.webview.postMessage({
+                                type: 'taskCompleted',
+                                task: data.task,
+                                success: false,
+                                error: 'Scaffold task missing templateId'
+                            });
+                            return;
+                        }
+                        try {
+                            const templates = discoverTemplates(rootUri.fsPath, this._extensionUri.fsPath);
+                            const tpl = templates.find(t => t.id === templateId);
+                            if (!tpl) {
+                                throw new Error(`Template "${templateId}" not found.`);
+                            }
+                            const result = applyTemplate(tpl, rootUri.fsPath, nodeFsAdapter);
+                            log.info(`[Scaffold] V2.1.3 planner-driven apply ${tpl.id}: ${result.written.length} written, ${result.skipped.length} skipped`);
+                            this._view?.webview.postMessage({
+                                type: 'agentStep',
+                                task: data.task,
+                                step: { type: 'analyze',
+                                        description: `Scaffolded ${tpl.displayName}`,
+                                        details: `Wrote ${result.written.length} files: ${result.written.slice(0, 6).join(', ')}${result.written.length > 6 ? '…' : ''}` }
+                            });
+                            this._view?.webview.postMessage({
+                                type: 'taskCompleted',
+                                task: data.task,
+                                success: true,
+                                summary: `Applied ${tpl.displayName} scaffold (${result.written.length} files).`
+                            });
+                            // Note: scaffold actions are recorded in the
+                            // extension log via the log.info call above.
+                            // A dedicated AuditLog.logScaffoldApply
+                            // method belongs with the v2 governance
+                            // work — adding it here would touch the
+                            // audit interface for one call site.
+                        } catch (e) {
+                            const msg = errorMessage(e);
+                            log.error(`[Scaffold] V2.1.3 planner-driven apply failed: ${msg}`);
+                            this._view?.webview.postMessage({
+                                type: 'taskCompleted',
+                                task: data.task,
+                                success: false,
+                                error: `Scaffold failed: ${msg}`
+                            });
+                        }
+                        return;
+                    }
+                    // scaffold-llm falls through to the standard pipeline.
+                    // The prompt already contains scaffolding instructions
+                    // from the planner; the Coder will create files via
+                    // write_file tool calls. No special routing needed —
+                    // the Coder is already capable of multi-file creation.
 
                     vscode.window.withProgress({
                         location: vscode.ProgressLocation.Notification,
@@ -1437,6 +2789,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                             let success = false;
                             let finalMergedFilepath = "";
+                            // V2.2 cross-task remediation: accumulate
+                            // workspace-relative filepaths the agent
+                            // wrote during this task. Used to attribute
+                            // any new tsc errors to the most-recent
+                            // task that touched the failing file.
+                            const filesTouchedThisTask: string[] = [];
 
                             for (let i = 0; i < approaches.length; i++) {
                                 if (success || token.isCancellationRequested) { break; }
@@ -1493,6 +2851,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         backendTaskId: currentApproachPrompt,
                                     });
 
+                                    // V2.3 bundle 3: detect installed
+                                    // packages so the Coder's system
+                                    // prompt can include the actual
+                                    // available libraries. Without this,
+                                    // the Coder uses training-data
+                                    // assumptions about what's available
+                                    // — causing "phantom imports"
+                                    // (importing rrule when it isn't
+                                    // installed) and type drift bugs
+                                    // (Prisma.BookingWhereInput phantom
+                                    // because the installed Prisma
+                                    // version doesn't export it).
+                                    const installedPackagesResult = await detectInstalledPackages(rootUri);
+                                    const installedPackagesSection = renderPackagesPromptSection(installedPackagesResult);
+
+                                    // V2.3 bundle 4: detect high-value
+                                    // type symbols (Prisma exports,
+                                    // Express interfaces, Zod schemas).
+                                    // Targets phantom-type-reference
+                                    // bugs by giving the Coder the
+                                    // ACTUAL exported names from the
+                                    // installed package version, not
+                                    // training-data assumptions.
+                                    const typeSymbolsResult = await detectHighValueSymbols(rootUri);
+                                    const typeSymbolsSection = renderSymbolsPromptSection(typeSymbolsResult);
+
                                     const finalDiffs = await runTask({
                                         env,
                                         task: currentApproachPrompt,
@@ -1501,6 +2885,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         activeDesign: this._activeDesign,
                                         previousFailures,
                                         globalRules,
+                                        ...(installedPackagesSection ? { installedPackagesSection } : {}),
+                                        ...(typeSymbolsSection ? { typeSymbolsSection } : {}),
                                         // P2.2: route per-Coder steering through
                                         // SteeringManager so the Coder gets:
                                         //   - Template-stripped content
@@ -1519,6 +2905,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         log: (msg: string, stepType?: string, details?: string) => {
                                             this._view?.webview.postMessage({ type: 'statusUpdate', message: msg });
                                             if (stepType && details) {
+                                                // P3.1 bundle 2: phase tracking. Map stepType
+                                                // to our coarse phase enum so subsequent
+                                                // tokenUsage events get attributed correctly.
+                                                // Mirror the same mapping as the Timeline
+                                                // reducer (agentStep handler) so attribution
+                                                // is consistent end-to-end.
+                                                const lower = stepType.toLowerCase();
+                                                if (lower.includes('plan')) {
+                                                    this._activeAgentPhase = 'planner';
+                                                } else if (lower.includes('verif')) {
+                                                    this._activeAgentPhase = 'verifier';
+                                                } else if (lower.includes('cod')) {
+                                                    this._activeAgentPhase = 'coder';
+                                                }
                                                 this._view?.webview.postMessage({
                                                     type: 'agentStep',
                                                     task: data.task,
@@ -1533,7 +2933,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         },
                                         ...(this._activeTaskController?.signal ? { abortSignal: this._activeTaskController.signal } : {}),
                                         usageCallback: (usage: unknown) => {
-                                            this._view?.webview.postMessage({ type: 'tokenUsage', task: data.task, usage });
+                                            // P3.1 bundle 2: tag with current agent phase
+                                            // so the Timeline reducer can attribute tokens
+                                            // to planner / coder / verifier.
+                                            this._view?.webview.postMessage({
+                                                type: 'tokenUsage',
+                                                task: data.task,
+                                                phase: this._activeAgentPhase,
+                                                usage,
+                                            });
                                         },
                                         // Lifecycle event emitter for tool calls.
                                         // Lazily-constructed; sink is webview
@@ -1541,6 +2949,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         // messages are consumed by the rich
                                         // tool-call cards in the webview.
                                         toolEventEmitter: this.getToolEventEmitter(),
+                                        // V2.1.2 spec-fix-12 — Bug #1:
+                                        // approval gate. The hook
+                                        // auto-approves when AutoPilot
+                                        // is ON or the tool is
+                                        // non-mutating; otherwise it
+                                        // posts requestToolApproval to
+                                        // the webview and awaits a
+                                        // click. Coordinator forwards
+                                        // it down to CoderAgent →
+                                        // ReActEngine → dispatchWithEvents.
+                                        approvalHook: this.buildApprovalHook(),
+                                        // V2.2 hotfix #4: clear stale
+                                        // tool cards on retry. Without
+                                        // this, retried tasks accumulated
+                                        // read_file / list_directory cards
+                                        // from each attempt visually
+                                        // stacking, making the current
+                                        // attempt's work hard to read.
+                                        taskRetryCallback: (taskId, attempt) => {
+                                            // Reset host-side seq counters
+                                            // for both Coder and Verifier
+                                            // sub-scopes. The taskId comes
+                                            // in as "task-N::filepath" —
+                                            // also reset the matching
+                                            // verifier sub-scope so the
+                                            // next attempt's cards start
+                                            // from seq=0 cleanly.
+                                            const emitter = this.getToolEventEmitter();
+                                            emitter.resetTask(taskId);
+                                            // Verifier sub-scope: split
+                                            // and reinsert the ::verifier::
+                                            // marker.
+                                            const parts = taskId.split('::');
+                                            if (parts.length === 2) {
+                                                emitter.resetTask(`${parts[0]}::verifier::${parts[1]}`);
+                                            }
+                                            this._view?.webview.postMessage({
+                                                type: 'taskRetry',
+                                                taskId,
+                                                attempt,
+                                            });
+                                        },
                                     });
 
                                     if (!finalDiffs || finalDiffs.length === 0) { throw new Error("Swarm failed to generate verified code."); }
@@ -1556,6 +3006,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                             fileContent = new TextDecoder().decode(fileData);
                                         } catch { await vscode.workspace.fs.writeFile(fileUri, new Uint8Array(0)); }
 
+                                        // V2.1.2 spec-fix-12 — Bugs #4 + #5:
+                                        // Populate undo stack and the diff
+                                        // provider's content map BEFORE we
+                                        // apply the new edit. fileContent
+                                        // holds the pre-edit original — both
+                                        // consumers need that exact baseline.
+                                        //
+                                        // Bug #5 (Undo always says "no history"):
+                                        //   Adds an entry keyed by the task
+                                        //   ID so the undoTaskEdit handler
+                                        //   can find it.
+                                        //
+                                        // Bug #4 + #5 (Diff shows "everything
+                                        // was added"):
+                                        //   showDiff opens the file as
+                                        //   `nexus-original:<path>`, which
+                                        //   the originalContentProvider
+                                        //   serves. It was returning empty
+                                        //   string because nothing called
+                                        //   setContent. Now it has the real
+                                        //   pre-edit content — vscode.diff
+                                        //   renders proper line-level hunks
+                                        //   because both sides are non-empty.
+                                        this._undoStack.set(data.task, {
+                                            filepath: realFilepath,
+                                            originalContent: fileContent
+                                        });
+                                        const originalUri = vscode.Uri.parse(`nexus-original:${fileUri.path}`);
+                                        originalContentProvider.setContent(originalUri, fileContent);
+
                                         // Component 2B-3c: when CoderAgent used the
                                         // tool-call path, the file is already modified
                                         // on disk and finalDiff.finalContent holds the
@@ -1570,7 +3050,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                                         const document = await vscode.workspace.openTextDocument(fileUri);
                                         const editor = await vscode.window.showTextDocument(document, { preview: false });
-                                        const mergedHeader = getAIHeader(realFilepath, currentApproachPrompt, fileContent) + "\n";
+                                        // V2.2 hotfix #3: don't append separator newline when header is
+                                        // empty (no-comment formats like JSON). Otherwise JSON files
+                                        // would get a stray leading "\n" — valid but ugly.
+                                        const rawHeader = getAIHeader(realFilepath, currentApproachPrompt, fileContent);
+                                        const mergedHeader = rawHeader.length > 0 ? rawHeader + "\n" : "";
                                         const finalCodePayload = mergedHeader + finalPerfectCode;
 
                                         await editor.edit(b => {
@@ -1592,6 +3076,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                         }
 
                                         finalMergedFilepath = realFilepath; // Keep the last one for the UI success message
+                                        // V2.2 cross-task remediation: record this file in the
+                                        // task's touched-list. Skip duplicates from MCTS
+                                        // approach retries hitting the same file.
+                                        if (!filesTouchedThisTask.includes(realFilepath)) {
+                                            filesTouchedThisTask.push(realFilepath);
+                                        }
                                     }
 
                                     // MCTS Success Merge
@@ -1628,7 +3118,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                                     // Hotfix (post-2B): see verifyTask for rationale. data.task is now
                                     // a UI-uniqueness key (e.g., "task-3"); the title for tasks.md
                                     // sync comes from data.taskTitle when available.
-                                    await new SpecManager(rootUri).markTaskCompleted(data.taskTitle ?? data.task);
+                                    await new SpecManager(rootUri).markTaskCompleted(data.taskTitle ?? data.task, this._currentFeature);
                                 } catch (e) {
                                     log.warn("Could not auto-update tasks.md", e);
                                 }
@@ -1638,6 +3128,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                                 // Guarantee state sync
                                 this._view?.webview.postMessage({ type: 'taskStatusUpdate', task: data.task, status: 'approved', summary: `Updated ${finalMergedFilepath}` });
+
+                                // V2.2 cross-task remediation: analyze
+                                // whether this task's edits broke any
+                                // EARLIER task's compile invariants.
+                                // Async background work — never blocks
+                                // the success path UI; failures are
+                                // logged and silently absorbed.
+                                this.runCrossTaskAnalysis({
+                                    taskKey: data.task,
+                                    taskTitle: data.taskTitle ?? data.task,
+                                    filesTouched: filesTouchedThisTask,
+                                    completedAt: Date.now(),
+                                }, rootUri.fsPath).catch((e) => {
+                                    log.warn(`[CrossTask] analysis failed for ${data.task}: ${errorMessage(e)}`);
+                                });
                             } else {
                                 const errorSummary = approaches.length > 1 ? `⚠️ All ${approaches.length} MCTS Approaches Failed.` : `⚠️ Execution Failed.`;
 
@@ -2374,27 +3879,77 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
 
                 case "scaffoldDecisionMade": {
-                    // V2.1.1 — webview reports the user's choice. Today
-                    // we just log and acknowledge; the actual scaffolding
-                    // (template file copy + Planner prompt adjustment)
-                    // lands in V2.1.2 / V2.1.3. Logging now lets us
-                    // verify the decision flow end-to-end during V2.1.1
-                    // QA before V2.1.2 introduces filesystem effects.
+                    // V2.1.2b — webview reports the user's choice.
+                    // Three possible actions:
+                    //   'skip'    user picked "skip scaffolding" — no fs effect
+                    //   'cancel'  user dismissed the dialog (treated as skip)
+                    //   'apply'   user picked a template; we apply it now
+                    //
+                    // For 'apply', we re-discover templates (the cached
+                    // list from requestScaffoldDecision could be stale if
+                    // the user added a workspace template between dialog
+                    // open and confirm), then call applyTemplate. Errors
+                    // surface in the acknowledgment so the dialog can
+                    // show a meaningful message rather than silently
+                    // failing.
                     const action = typeof data.action === 'string' ? data.action : 'skip';
                     const templateId = typeof data.templateId === 'string' ? data.templateId : null;
-                    log.info(
-                        `[Scaffold] User decision: action=${action}` +
-                        (templateId ? ` templateId=${templateId}` : '')
-                    );
+
+                    let applyError: string | null = null;
+                    let applyResult: { written: number; skipped: number } | null = null;
+
+                    if (action === 'apply' && templateId) {
+                        try {
+                            const workspaceFolders = vscode.workspace.workspaceFolders;
+                            const workspaceRoot = workspaceFolders?.[0]?.uri.fsPath;
+                            if (!workspaceRoot) {
+                                applyError = 'No workspace folder open — cannot scaffold.';
+                            } else {
+                                const templates = discoverTemplates(
+                                    workspaceRoot,
+                                    this._extensionUri.fsPath
+                                );
+                                const tpl = templates.find(t => t.id === templateId);
+                                if (!tpl) {
+                                    applyError = `Template "${templateId}" not found.`;
+                                } else {
+                                    const result = applyTemplate(tpl, workspaceRoot, nodeFsAdapter);
+                                    applyResult = {
+                                        written: result.written.length,
+                                        skipped: result.skipped.length,
+                                    };
+                                    log.info(
+                                        `[Scaffold] Applied ${tpl.id}: ` +
+                                        `${result.written.length} written, ` +
+                                        `${result.skipped.length} skipped`
+                                    );
+                                }
+                            }
+                        } catch (e) {
+                            applyError = errorMessage(e);
+                            log.error(`[Scaffold] Apply failed for ${templateId}: ${applyError}`);
+                        }
+                    } else {
+                        log.info(`[Scaffold] User decision: action=${action}`);
+                    }
+
                     // Echo back so the webview can release its waiting
-                    // state and proceed with the user's prompt as
-                    // normal (or with scaffolding context once V2.1.2
-                    // lands).
-                    this._view?.webview.postMessage({
+                    // state and either surface the error or proceed
+                    // with the original chat prompt.
+                    const ackPayload: {
+                        type: 'scaffoldDecisionAcknowledged';
+                        action: string;
+                        templateId: string | null;
+                        applyError: string | null;
+                        applyResult: { written: number; skipped: number } | null;
+                    } = {
                         type: 'scaffoldDecisionAcknowledged',
                         action,
                         templateId,
-                    });
+                        applyError,
+                        applyResult,
+                    };
+                    this._view?.webview.postMessage(ackPayload);
                     break;
                 }
 
@@ -2405,6 +3960,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                 case "rejectCommand": {
                     if (this._pendingCommandResolver) { this._pendingCommandResolver(false); }
+                    break;
+                }
+
+                // V2.1.2 spec-fix-12 — Bug #1: per-call approval responses
+                // for write_file / edit_file. Distinct from approveCommand
+                // (which is for bash) because multiple file-write
+                // approvals can be pending concurrently — keyed by callId.
+                case "approveToolCall": {
+                    const callId = String(data.callId ?? '');
+                    const resolver = this._pendingApprovalResolvers.get(callId);
+                    if (resolver) { resolver(true); }
+                    break;
+                }
+
+                case "rejectToolCall": {
+                    const callId = String(data.callId ?? '');
+                    const resolver = this._pendingApprovalResolvers.get(callId);
+                    if (resolver) { resolver(false); }
                     break;
                 }
 

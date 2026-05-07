@@ -46,7 +46,7 @@ import { log } from '../utils/log';
 
 export type WebviewToHost =
     | { type: 'webviewReady' }
-    | { type: 'requestWorkspaceGraph' }
+    | { type: 'requestWorkspaceGraph'; forceRefresh?: boolean }
     | { type: 'saveNexusRules'; [k: string]: unknown }
     | { type: 'verifyTask'; [k: string]: unknown }
     | { type: 'generateRequirements'; [k: string]: unknown }
@@ -55,6 +55,9 @@ export type WebviewToHost =
     | { type: 'requestRevision'; [k: string]: unknown }
     | { type: 'approvePhase'; [k: string]: unknown }
     | { type: 'rejectPhase'; [k: string]: unknown }
+    | { type: 'startOver' }
+    | { type: 'setCurrentFeature'; slug: string }
+    | { type: 'createFeature'; name: string }
     | { type: 'updateRequirements'; [k: string]: unknown }
     | { type: 'updateDesign'; [k: string]: unknown }
     | { type: 'syncHistory'; [k: string]: unknown }
@@ -94,12 +97,33 @@ export type WebviewToHost =
     // steering file list; user-driven actions create or open files.
     | { type: 'requestSteeringList' }
     | { type: 'createSteeringFile'; id: string }
-    | { type: 'openSteeringFile'; id: string };
+    | { type: 'requestSteeringList' }
+    | { type: 'createSteeringFile'; [k: string]: unknown }
+    | { type: 'openSteeringFile'; id: string }
+    // V2.1.2 spec-fix-10 P5.2: explore-mode "Apply this fix" flow.
+    // Payload carries the user's original prompt and the assistant's
+    // explore response so the host can synthesize a build-mode prompt
+    // and route through the existing planner→coder pipeline.
+    // `source` distinguishes button click vs auto-apply for audit.
+    | { type: 'applyExploreFix'; originalPrompt: string; exploreResponse: string; source: 'button' | 'auto' }
+    // V2.2 hotfix #2: export current session to JSON file. Carries the
+    // webview's React-state copies of chat + task progression — host
+    // doesn't have its own copy of these (they live in webview state
+    // only, not workspaceState).
+    | { type: 'exportSession'; messages?: unknown; taskStatuses?: unknown; taskSummaries?: unknown; taskFiles?: unknown; taskSteps?: unknown; taskReasoning?: unknown; activePlan?: unknown }
+    // V2.2 hotfix-clear-reopen-mermaid: non-destructive nav back to PRD.
+    | { type: 'reopenPRD' }
+    // P3.1: timeline tab requests all session events for the active feature.
+    | { type: 'getTimelineEvents' }
+    // V2.1.2 spec-fix-12 — inline tool approval responses.
+    | { type: 'approveToolCall'; callId: string }
+    | { type: 'rejectToolCall'; callId: string };
 
 const KNOWN_WEBVIEW_TO_HOST_TYPES: ReadonlySet<WebviewToHost['type']> = new Set([
     'webviewReady', 'requestWorkspaceGraph', 'saveNexusRules', 'verifyTask',
     'generateRequirements', 'generateDesign', 'generateProjectTasks',
-    'requestRevision', 'approvePhase', 'rejectPhase', 'updateRequirements',
+    'requestRevision', 'approvePhase', 'rejectPhase', 'startOver',
+    'setCurrentFeature', 'createFeature', 'updateRequirements',
     'updateDesign', 'syncHistory', 'clearHistory', 'saveApiKey',
     'processUserMessage', 'cancelTask', 'executeTask', 'refreshCodeLens',
     'undoTaskEdit', 'runGlobalCompiler', 'searchFiles', 'showDiff',
@@ -108,7 +132,16 @@ const KNOWN_WEBVIEW_TO_HOST_TYPES: ReadonlySet<WebviewToHost['type']> = new Set(
     'approveCommand', 'rejectCommand', 'generateProjectTests', 'setSecurityGate',
     'respondBashApproval',
     'requestHookList', 'toggleHook', 'runHook', 'openHookFile',
-    'requestSteeringList', 'createSteeringFile', 'openSteeringFile'
+    'requestSteeringList', 'createSteeringFile', 'openSteeringFile',
+    'applyExploreFix',
+    // V2.2 hotfix #2 — session export
+    'exportSession',
+    // V2.2 hotfix-clear-reopen-mermaid — non-destructive PRD nav
+    'reopenPRD',
+    // P3.1: timeline tab data fetch
+    'getTimelineEvents',
+    // V2.1.2 spec-fix-12 — inline approval responses
+    'approveToolCall', 'rejectToolCall'
 ]);
 
 // ─── host → webview ──────────────────────────────────────────────────
@@ -149,7 +182,30 @@ export type HostToWebview =
     | { type: 'requirementsUpdated'; [k: string]: unknown }
     | { type: 'reviewEdits'; [k: string]: unknown }
     | { type: 'searchResults'; [k: string]: unknown }
-    | { type: 'startChatStream'; [k: string]: unknown }
+    // V2.2 hotfix #2 (2b): session replay envelope. Sent by the host
+    // on webview connect to restore previous session state from the
+    // event log on disk. The webview unwraps replayEvent and re-
+    // dispatches inner events through the normal handler path.
+    | { type: 'replayBegin'; count: number }
+    | { type: 'replayEvent'; ts: string; event: { type: string; [k: string]: unknown } }
+    | { type: 'replayEnd' }
+    // P3.1: timeline tab — host sends all session events for the
+    // active feature in response to a getTimelineEvents request.
+    // The webview reduces these into a TimelineModel for display.
+    | { type: 'timelineEvents'; events: { type: string; [k: string]: unknown }[]; count?: number; empty?: boolean; reason?: string; errorMessage?: string }
+    // P2.1 bundle 1: MCP server status snapshot.
+    | { type: 'mcpStatus'; servers: { name: string; connected: boolean; toolCount: number; lastError?: string }[] }
+    // V2.2 hotfix #4: emitted on retry attempt N+1 to clear stale
+    // tool cards from attempt N.
+    | { type: 'taskRetry'; taskId: string; attempt: number }
+    // V2.1.2 spec-fix-12 — inline tool approval prompt.
+    | { type: 'requestToolApproval'; callId: string; toolName: string; filepath: string; preview?: unknown }
+    // V2.2 cross-task remediation banner.
+    | { type: 'crossTaskRegression'; [k: string]: unknown }
+    | { type: 'specError'; phase: 'requirements' | 'design' | 'tasks'; title: string; message: string }
+    | { type: 'featureChanged'; currentFeature: string; requirements: string; design: string; tasks: any; phaseState: any; featureList: { slug: string; phaseState: any }[] }
+    | { type: 'featureChangeFailed'; slug: string; reason: string }
+    | { type: 'startChatStream'; intent?: 'build' | 'explore' | 'explain' | 'ask'; originalPrompt?: string; [k: string]: unknown }
     | { type: 'startRevision'; [k: string]: unknown }
     | { type: 'statusUpdate'; [k: string]: unknown }
     | { type: 'streamReasoning'; [k: string]: unknown }
@@ -159,7 +215,7 @@ export type HostToWebview =
     | { type: 'taskExecutionStarted'; [k: string]: unknown }
     | { type: 'taskStatusUpdate'; [k: string]: unknown }
     | { type: 'tasksGenerated'; [k: string]: unknown }
-    | { type: 'tokenUsage'; usage: { prompt_tokens?: number; completion_tokens?: number }; task?: string }
+    | { type: 'tokenUsage'; usage: { prompt_tokens?: number; completion_tokens?: number }; task?: string; phase?: 'planner' | 'coder' | 'verifier' | 'unknown' }
     | { type: 'toolCallEvent'; event: unknown }
     | { type: 'updateModelsList'; [k: string]: unknown }
     | { type: 'workspaceGraphData'; [k: string]: unknown }
@@ -228,6 +284,12 @@ export type HostToWebview =
         type: 'scaffoldDecisionAcknowledged';
         action: string;
         templateId: string | null;
+        // V2.1.2b — populated when action='apply' completes (or fails).
+        // applyError is null on success, a string message on failure.
+        // applyResult is null on failure, otherwise carries the file
+        // counts so the dialog can show "wrote N files, skipped M".
+        applyError: string | null;
+        applyResult: { written: number; skipped: number } | null;
     };
 
 const KNOWN_HOST_TO_WEBVIEW_TYPES: ReadonlySet<HostToWebview['type']> = new Set([
@@ -236,7 +298,8 @@ const KNOWN_HOST_TO_WEBVIEW_TYPES: ReadonlySet<HostToWebview['type']> = new Set(
     'generationFailed', 'glassBrain', 'historyCompacted', 'initState',
     'injectTerminalTask', 'insertText', 'metaModeChanged', 'phaseStateUpdated',
     'reqStep', 'requestCommandApproval', 'requestBashApproval', 'requestReview', 'requirementsGenerated',
-    'requirementsUpdated', 'reviewEdits', 'searchResults', 'startChatStream',
+    'requirementsUpdated', 'reviewEdits', 'searchResults', 'specError',
+    'featureChanged', 'featureChangeFailed', 'startChatStream',
     'startRevision', 'statusUpdate', 'streamReasoning', 'streamTerminal',
     'structureResponse', 'taskCompleted', 'taskExecutionStarted',
     'taskStatusUpdate', 'tasksGenerated', 'tokenUsage', 'toolCallEvent',
@@ -246,7 +309,19 @@ const KNOWN_HOST_TO_WEBVIEW_TYPES: ReadonlySet<HostToWebview['type']> = new Set(
     'mcpStatusUpdated',
     'sessionListUpdated', 'sessionBundleUpdated', 'startupTimingUpdated',
     'thinkingModeChanged',
-    'scaffoldDecisionAvailable', 'scaffoldDecisionAcknowledged'
+    'scaffoldDecisionAvailable', 'scaffoldDecisionAcknowledged',
+    // V2.2 hotfix #2 (2b) — session replay
+    'replayBegin', 'replayEvent', 'replayEnd',
+    // P3.1 timeline data
+    'timelineEvents',
+    // P2.1 bundle 1: MCP status snapshot
+    'mcpStatus',
+    // V2.2 hotfix #4 — retry hygiene
+    'taskRetry',
+    // V2.1.2 spec-fix-12 — inline approval
+    'requestToolApproval',
+    // V2.2 cross-task remediation
+    'crossTaskRegression',
 ]);
 
 // ─── runtime validator ───────────────────────────────────────────────

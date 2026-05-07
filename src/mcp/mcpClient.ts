@@ -21,6 +21,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { McpServerEntry } from './mcpConfig';
 import { envExpand } from './mcpConfig';
 import type { ToolDefinition } from '../llm/Provider';
@@ -93,21 +94,40 @@ type ConnectMcpServerFn = (entry: McpServerEntry) => Promise<McpConnection>;
 /** Real implementation — module-private. Exported one (`connectMcpServer`)
  *  reads through the swappable holder so tests can inject. */
 async function realConnectMcpServer(entry: McpServerEntry): Promise<McpConnection> {
-    // Resolve env: expand `${env:VAR}` references against process.env.
-    // Empty values from process.env become empty strings (matches
-    // envExpand's documented contract).
-    const resolvedEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(entry.env)) {
-        resolvedEnv[k] = envExpand(v, process.env);
+    log.debug(`[McpClient] connecting to '${entry.id}' (transport=${entry.transport})`);
+
+    let transport: StdioClientTransport | StreamableHTTPClientTransport;
+    if (entry.transport === 'stdio') {
+        // Resolve env: expand `${env:VAR}` references against process.env.
+        // Empty values from process.env become empty strings (matches
+        // envExpand's documented contract).
+        const resolvedEnv: Record<string, string> = {};
+        for (const [k, v] of Object.entries(entry.env)) {
+            resolvedEnv[k] = envExpand(v, process.env);
+        }
+        transport = new StdioClientTransport({
+            command: entry.command,
+            args: entry.args,
+            env: resolvedEnv,
+        });
+    } else {
+        // P2.1 streamable-http (2026-05): construct the SDK's
+        // StreamableHTTPClientTransport. Headers go through envExpand
+        // so secrets can live in process.env.
+        const resolvedHeaders: Record<string, string> = {};
+        for (const [k, v] of Object.entries(entry.headers)) {
+            resolvedHeaders[k] = envExpand(v, process.env);
+        }
+        let url: URL;
+        try {
+            url = new URL(entry.url);
+        } catch (e) {
+            throw new Error(`[McpClient] '${entry.id}' has invalid URL: ${entry.url}`);
+        }
+        transport = new StreamableHTTPClientTransport(url, {
+            requestInit: { headers: resolvedHeaders },
+        });
     }
-
-    log.debug(`[McpClient] connecting to '${entry.id}' (command=${entry.command})`);
-
-    const transport = new StdioClientTransport({
-        command: entry.command,
-        args: entry.args,
-        env: resolvedEnv
-    });
 
     const client = new Client(
         {
@@ -125,7 +145,12 @@ async function realConnectMcpServer(entry: McpServerEntry): Promise<McpConnectio
 
     // connect() performs the JSON-RPC initialize handshake. Errors
     // from the server (protocol mismatch, immediate crash) bubble up.
-    await client.connect(transport);
+    // Cast: the SDK's Transport interface declares sessionId as
+    // `string` but StreamableHTTPClientTransport's runtime instance
+    // has it as `string | undefined`. Under exactOptionalPropertyTypes
+    // the union narrows to incompatible. Both transports work fine
+    // at runtime; this is a strict-mode static check disagreement.
+    await client.connect(transport as unknown as Parameters<typeof client.connect>[0]);
 
     // listTools() returns the server's tools. Failures here mean the
     // server connected but doesn't speak the tools/list capability —

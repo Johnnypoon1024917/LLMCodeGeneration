@@ -7,5 +7,25 @@
 		"out": true // set this to false to include "out" folder in search results
 	},
 	// Turn off tsc task auto detection since we have the necessary tasks as npm scripts
-	"typescript.tsc.autoDetect": "off"
+	"typescript.tsc.autoDetect": "off",
+
+	// ─────────────────────────────────────────────────────────────────
+	// NexusCode settings pinned for the fixture test runner
+	// ─────────────────────────────────────────────────────────────────
+	// These get read by the test VS Code instance when `npm run fixtures`
+	// runs. Without them in this project-level settings file, the test
+	// instance falls back to (a) the user-global settings.json (which
+	// may not propagate cleanly across Windows VS Code instances), or
+	// (b) hardcoded defaults (which won't match your local endpoint).
+	//
+	// API KEY is intentionally NOT here — if your endpoint needs one,
+	// set NEXUSCODE_API_KEY as an env var before `npm run fixtures`.
+	// Committing keys to git is a different kind of bug.
+	"nexuscode.apiEndpoint": "http://192.168.191.41:8000/v1/chat/completions",
+	"nexuscode.model": "qwen3.6-27b",
+	// Per-role models default to nexuscode.model above. Override only if
+	// you serve different models per role.
+	// "nexuscode.modelPlanner": "qwen3.6-27b",
+	// "nexuscode.modelCoder": "qwen3.6-27b",
+	// "nexuscode.modelVerifier": "qwen3.6-27b",
 }

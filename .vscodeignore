@@ -10,3 +10,9 @@ vsc-extension-quickstart.md
 **/*.ts
 **/.vscode-test.*
 !parsers/*.wasm
+# V2.1.2 scaffolds — the directory ships in the VSIX as the source of
+# built-in project templates. The default rules above strip .ts files
+# and tsconfig.json files; we re-include scaffolds/** so template
+# contents survive packaging. Without this, scaffolded projects would
+# be missing their source and configs.
+!scaffolds/**

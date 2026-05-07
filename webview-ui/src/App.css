@@ -493,13 +493,40 @@ body, html, #root {
 }
 
 /* Also, ensure paragraphs don't have excessive bottom margins */
+/* V2.1.2 spec-fix-14: tighten further. The thinking preamble can have
+ * 8-10 short paragraphs in a row; even 10px cumulative margins read as
+ * wasted vertical space. 4px keeps separation but stops the message
+ * from sprawling. */
 .markdown-body p {
   margin-top: 0;
-  margin-bottom: 10px; /* Keep this tight */
+  margin-bottom: 4px; /* was 10px — tightened spec-fix-14 */
 }
 
 .markdown-body p:last-child {
   margin-bottom: 0; /* Removes the gap at the very bottom of the chat */
+}
+
+/* V2.1.2 spec-fix-14: list items in chat messages were rendering with
+ * default browser margins (typically 16px top/bottom on <ul>/<ol> and
+ * line-height padding inside <li>). For thinking-trace style content
+ * with many short bullets, that compounds badly. */
+.markdown-body ul,
+.markdown-body ol {
+  margin-top: 2px;
+  margin-bottom: 4px;
+  padding-left: 20px; /* keep markers visible — don't go below 16px */
+}
+
+.markdown-body li {
+  margin-top: 0;
+  margin-bottom: 2px;
+}
+
+.markdown-body li > p {
+  /* When a list item contains a paragraph (markdown does this when
+   * items have multiple lines), cancel the paragraph's own margin so
+   * it doesn't double up with the list-item margin. */
+  margin-bottom: 0;
 }
 
 /* ─── Session tab bar — Phase 1.6 redesign ──────────────────────────
@@ -2873,7 +2900,7 @@ body, html, #root {
  * just refines typography. */
 .nexus-message-content.markdown-body p {
   margin-top: 0;
-  margin-bottom: 8px;
+  margin-bottom: 4px; /* was 8px — tightened spec-fix-14 */
 }
 
 .nexus-message-content.markdown-body p:last-child {
@@ -3776,795 +3803,1403 @@ body, html, #root {
     text-transform: uppercase;
 }
 
-
 /* ─── V2 Execution Modes (Plan / Autonomy) ──────────────────────────
-
    Plan mode is the default; the toolbar is visually quiet so the
-
    user focus stays on individual task cards. Autonomy mode ramps
-
    visual weight up — accent border on the toolbar, magenta badges
-
    on the queue indicator, pulse animation on the currently-running
-
    counter. The "this is the cool mode" cue for demos and at-a-glance
-
    recognition: a regulated-industry user glancing at their colleague's
-
    screen should be able to tell which mode is active without reading. */
 
-
-
 .execution-mode-toolbar {
-
     display: flex;
-
     align-items: center;
-
     gap: 12px;
-
     padding: 8px 12px;
-
     border-bottom: 1px solid var(--vscode-widget-border);
-
     background: var(--vscode-editor-background);
-
     font-size: 11px;
-
     transition: background 0.18s ease, border-color 0.18s ease;
-
 }
-
-
 
 /* Subtle accent when autonomy is selected — the toolbar gets a
-
    left edge band of magenta so the audience sees "different mode
-
    is active" peripherally. Does NOT use the full background tint
-
    (looked alarming in early review). */
-
 .execution-mode-toolbar.is-autonomy {
-
     background: linear-gradient(
-
         90deg,
-
         color-mix(in srgb, var(--vscode-terminal-ansiMagenta) 8%, transparent) 0%,
-
         var(--vscode-editor-background) 12%
-
     );
-
     border-left: 2px solid var(--vscode-terminal-ansiMagenta);
-
 }
-
-
 
 /* Stronger accent while a run is actually in progress — gives the
-
    audience a clear "things are happening" signal that pairs with
-
    the queue counter. */
-
 .execution-mode-toolbar.is-running {
-
     background: linear-gradient(
-
         90deg,
-
         color-mix(in srgb, var(--vscode-terminal-ansiMagenta) 14%, transparent) 0%,
-
         color-mix(in srgb, var(--vscode-terminal-ansiMagenta) 4%, var(--vscode-editor-background)) 25%
-
     );
-
     border-left: 2px solid var(--vscode-terminal-ansiMagenta);
-
 }
-
-
 
 .execution-mode-toolbar__label {
-
     color: var(--nexus-subtext);
-
     user-select: none;
-
 }
-
-
 
 /* Replace the default <select> chrome — the OS-native dropdown
-
    sticks out badly against the rest of the panel chrome. */
-
 .execution-mode-toolbar__select {
-
     background: var(--vscode-input-background);
-
     color: var(--vscode-input-foreground);
-
     border: 1px solid var(--vscode-input-border, color-mix(in srgb, var(--vscode-foreground) 18%, transparent));
-
     border-radius: 3px;
-
     padding: 3px 24px 3px 8px;
-
     font-size: 11px;
-
     font-family: inherit;
-
     cursor: pointer;
-
     appearance: none;
-
     -webkit-appearance: none;
-
     -moz-appearance: none;
-
     /* Custom chevron — inline SVG. Uses currentColor so it picks up
-
        theme colors automatically. */
-
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 4 L5 7 L8 4' stroke='currentColor' stroke-width='1.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-
     background-repeat: no-repeat;
-
     background-position: right 6px center;
-
     transition: border-color 0.15s ease;
-
 }
-
-
 
 .execution-mode-toolbar__select:hover:not(:disabled) {
-
     border-color: var(--vscode-focusBorder, var(--vscode-terminal-ansiMagenta));
-
 }
-
-
 
 .execution-mode-toolbar__select:focus {
-
     outline: none;
-
     border-color: var(--vscode-focusBorder, var(--vscode-terminal-ansiMagenta));
-
     box-shadow: 0 0 0 1px var(--vscode-focusBorder, var(--vscode-terminal-ansiMagenta));
-
 }
-
-
 
 .execution-mode-toolbar__select:disabled {
-
     cursor: not-allowed;
-
     opacity: 0.55;
-
 }
-
-
 
 /* "Run All Tasks" CTA — the primary action when autonomy is selected
-
    and idle. Magenta to match the autonomy accent so the audience
-
    visually links button → mode. */
-
 .execution-mode-toolbar__run-all {
-
     margin-left: auto;
-
     background: var(--vscode-terminal-ansiMagenta);
-
     color: var(--vscode-button-foreground);
-
     border: none;
-
     border-radius: 3px;
-
     padding: 3px 12px;
-
     font-size: 11px;
-
     font-weight: 600;
-
     cursor: pointer;
-
     transition: filter 0.15s ease, transform 0.1s ease;
-
 }
-
-
 
 .execution-mode-toolbar__run-all:hover {
-
     filter: brightness(1.15);
-
 }
-
-
 
 .execution-mode-toolbar__run-all:active {
-
     transform: translateY(1px);
-
 }
-
-
 
 /* Queue counter shown during a run. Pulse animation tells the
-
    audience "the agent is working" — pairs with the streamed
-
    reasoning that's already going below. */
-
 .execution-mode-toolbar__queue-counter {
-
     margin-left: auto;
-
     color: var(--vscode-terminal-ansiMagenta);
-
     font-weight: 600;
-
     display: inline-flex;
-
     align-items: center;
-
     gap: 6px;
-
 }
-
-
 
 .execution-mode-toolbar__queue-counter::before {
-
     content: "";
-
     width: 6px;
-
     height: 6px;
-
     border-radius: 50%;
-
     background: var(--vscode-terminal-ansiMagenta);
-
     animation: nexus-autonomy-pulse 1.4s ease-in-out infinite;
-
     flex-shrink: 0;
-
 }
-
-
 
 @keyframes nexus-autonomy-pulse {
-
     0%, 100% {
-
         opacity: 0.4;
-
         transform: scale(0.85);
-
     }
-
     50% {
-
         opacity: 1;
-
         transform: scale(1.1);
-
     }
-
 }
-
-
 
 /* Halt button — quiet visual weight (it's a recovery action, not
-
    a feature). Hover gets a subtle warning tint. */
-
 .execution-mode-toolbar__halt {
-
     background: transparent;
-
     color: var(--vscode-foreground);
-
     border: 1px solid color-mix(in srgb, var(--vscode-foreground) 25%, transparent);
-
     border-radius: 3px;
-
     padding: 3px 10px;
-
     font-size: 11px;
-
     cursor: pointer;
-
     transition: background 0.15s ease, border-color 0.15s ease;
-
 }
-
-
 
 .execution-mode-toolbar__halt:hover {
-
     background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 14%, transparent);
-
     border-color: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 60%, transparent);
-
 }
-
-
 
 /* Halt-by-rejection error banner. Distinct from real errors because
-
    the run STOPPED on the user's behalf — it's not a crash, just a
-
    pause point. Warm yellow rather than alarm red. */
-
 .execution-mode-toolbar__error-banner {
-
     padding: 8px 12px;
-
     border-bottom: 1px solid var(--vscode-widget-border);
-
     background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 12%, transparent);
-
     color: var(--vscode-foreground);
-
     font-size: 11px;
-
     display: flex;
-
     justify-content: space-between;
-
     align-items: center;
-
     gap: 12px;
-
 }
-
-
 
 .execution-mode-toolbar__error-banner-dismiss {
-
     background: transparent;
-
     color: var(--vscode-foreground);
-
     border: 1px solid color-mix(in srgb, var(--vscode-foreground) 25%, transparent);
-
     border-radius: 3px;
-
     padding: 2px 10px;
-
     font-size: 11px;
-
     cursor: pointer;
-
 }
-
-
 
 .execution-mode-toolbar__error-banner-dismiss:hover {
-
     background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
-
 }
-
-
 
 /* Per-task buttons get visually parked during an autonomy run.
-
    The user CAN'T click them (disabled in JSX), but a half-faded
-
    look reinforces "the queue is driving — don't try to interfere." */
-
 .nexus-task-card.is-queued button.micro-btn {
-
     opacity: 0.45;
-
     cursor: not-allowed;
-
 }
-
-
 
 /* ─── Thinking-mode pill (V2.0 follow-up) ───────────────────────────
-
    Bulk toggle for thinking-mode across all three agents. Three
-
    visual states:
-
      .is-on    blue accent     "🧠 Deep thinking" — accuracy-first default
-
      .is-off   amber accent    "⚡ Speed mode"     — explicit speed opt-in
-
      .is-mixed dotted border   "🧠 Custom"        — per-agent customization
-
    Sits between the mode dropdown and the right-aligned action area
-
    (Run All / queue counter). Visible in both Plan and Autonomy modes
-
    because thinking applies regardless of how tasks are dispatched. */
 
-
-
 .execution-mode-toolbar__thinking-pill {
-
     background: transparent;
-
     color: var(--vscode-foreground);
-
     border: 1px solid color-mix(in srgb, var(--vscode-foreground) 22%, transparent);
-
     border-radius: 12px;
-
     padding: 3px 10px;
-
     font-size: 11px;
-
     font-weight: 500;
-
     cursor: pointer;
-
     white-space: nowrap;
-
     transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-
     user-select: none;
-
 }
-
-
 
 .execution-mode-toolbar__thinking-pill.is-on {
-
     background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 12%, transparent);
-
     border-color: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 45%, transparent);
-
     color: var(--vscode-charts-blue, #4cc2ff);
-
 }
-
-
 
 .execution-mode-toolbar__thinking-pill.is-on:hover {
-
     background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 20%, transparent);
-
 }
-
-
 
 .execution-mode-toolbar__thinking-pill.is-off {
-
     background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 14%, transparent);
-
     border-color: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 50%, transparent);
-
     color: var(--vscode-charts-orange, #cca700);
-
 }
-
-
 
 .execution-mode-toolbar__thinking-pill.is-off:hover {
-
     background: color-mix(in srgb, var(--vscode-charts-orange, #cca700) 22%, transparent);
-
 }
-
-
 
 .execution-mode-toolbar__thinking-pill.is-mixed {
-
     background: transparent;
-
     /* Dotted border tells the user "this is a heterogeneous state".
-
        Same-color text avoids competing with the pure on/off variants. */
-
     border-style: dashed;
-
     border-color: color-mix(in srgb, var(--vscode-foreground) 35%, transparent);
-
     color: var(--nexus-subtext);
-
 }
-
-
 
 .execution-mode-toolbar__thinking-pill.is-mixed:hover {
-
     background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
-
 }
-
-
 
 .execution-mode-toolbar__thinking-pill:focus-visible {
-
     outline: none;
-
     box-shadow: 0 0 0 2px var(--vscode-focusBorder, var(--vscode-charts-blue, #4cc2ff));
-
 }
-
-
 
 /* Advanced link — quiet text-button styling. Opens VS Code settings
-
    filtered to per-agent thinking keys for power users. */
-
 .execution-mode-toolbar__thinking-advanced {
-
     background: transparent;
-
     border: none;
-
     padding: 0 4px;
-
     font-size: 11px;
-
     color: var(--nexus-subtext);
-
     cursor: pointer;
-
     text-decoration: none;
-
     user-select: none;
-
     transition: color 0.15s ease, text-decoration 0.15s ease;
-
 }
-
-
 
 .execution-mode-toolbar__thinking-advanced:hover {
-
     color: var(--vscode-foreground);
-
     text-decoration: underline;
-
 }
-
-
 
 .execution-mode-toolbar__thinking-advanced:focus-visible {
-
     outline: none;
-
     color: var(--vscode-foreground);
-
     text-decoration: underline;
-
 }
-
-
 
 /* ─── V2 polish: code-map selected-node card ──────────────────────
-
    Renders at the top of the code-map detail sidebar when the user
-
    single-clicks a node. Replaces the old "scroll to node card" UX
-
    with a permanent detail surface that doesn't require scrolling.
-
    The card uses subtle accent so it doesn't compete with the
-
    long node-list below. */
 
-
-
 .nexus-graph-selected-card {
-
     background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 8%, transparent);
-
     border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 35%, transparent);
-
     border-radius: 6px;
-
     padding: 12px;
-
     display: flex;
-
     flex-direction: column;
-
     gap: 8px;
-
     flex-shrink: 0;
-
 }
-
-
 
 .nexus-graph-selected-card__header {
-
     display: flex;
-
     justify-content: space-between;
-
     align-items: center;
-
     gap: 8px;
-
 }
-
-
 
 .nexus-graph-selected-card__kind {
-
     font-size: 10px;
-
     font-weight: 700;
-
     letter-spacing: 0.6px;
-
     text-transform: uppercase;
-
     color: var(--vscode-charts-blue, #4cc2ff);
-
 }
-
-
 
 .nexus-graph-selected-card__close {
-
     background: transparent;
-
     color: var(--nexus-subtext);
-
     border: none;
-
     cursor: pointer;
-
     font-size: 14px;
-
     line-height: 1;
-
     padding: 2px 6px;
-
     border-radius: 3px;
-
     transition: background 0.15s ease, color 0.15s ease;
-
 }
-
-
 
 .nexus-graph-selected-card__close:hover {
-
     background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
-
     color: var(--vscode-foreground);
-
 }
-
-
 
 .nexus-graph-selected-card__name {
-
     font-size: 14px;
-
     font-weight: 600;
-
     color: var(--vscode-foreground);
-
     word-break: break-word;
-
     line-height: 1.3;
-
 }
-
-
 
 .nexus-graph-selected-card__parent {
-
     font-size: 11px;
-
     color: var(--nexus-subtext);
-
 }
-
-
 
 .nexus-graph-selected-card__parent code {
-
     font-family: var(--vscode-editor-font-family, monospace);
-
     font-size: 10px;
-
     color: var(--vscode-foreground);
-
     background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
-
     padding: 1px 4px;
-
     border-radius: 3px;
-
 }
-
-
 
 .nexus-graph-selected-card__actions {
-
     display: flex;
-
     align-items: center;
-
     gap: 12px;
-
     flex-wrap: wrap;
-
     margin-top: 4px;
-
 }
-
-
 
 .nexus-graph-selected-card__open-btn {
-
     background: var(--vscode-charts-blue, #4cc2ff);
-
     color: var(--vscode-button-foreground, #ffffff);
-
     border: none;
-
     border-radius: 4px;
-
     padding: 5px 12px;
-
     font-size: 11px;
-
     font-weight: 600;
-
     cursor: pointer;
-
     transition: filter 0.15s ease, transform 0.1s ease;
-
 }
-
-
 
 .nexus-graph-selected-card__open-btn:hover:not(:disabled) {
-
     filter: brightness(1.15);
-
 }
-
-
 
 .nexus-graph-selected-card__open-btn:active:not(:disabled) {
-
     transform: translateY(1px);
-
 }
-
-
 
 .nexus-graph-selected-card__open-btn:disabled {
-
     opacity: 0.45;
-
     cursor: not-allowed;
+}
 
+.nexus-graph-selected-card__hint {
+    font-size: 10px;
+    color: var(--nexus-subtext);
+    font-style: italic;
+}
+
+/* ─── Code-map side panel: 360° context sections (Option A polish) ───
+   GitNexus-style enrichment for the existing selection card.
+   Sections render only when there's data — bare nodes stay minimal.
+   v2.8 will replace the underlying derivation with a symbol-level
+   call graph; this CSS stays mostly the same, the data gets richer. */
+
+.nexus-graph-selected-card__section {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.nexus-graph-selected-card__section-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--nexus-subtext);
+    margin-bottom: 6px;
+}
+
+.nexus-graph-selected-card__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.nexus-graph-selected-card__list-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: var(--vscode-foreground);
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 4px 8px;
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.nexus-graph-selected-card__list-item:hover {
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 10%, transparent);
+    border-color: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 30%, transparent);
+}
+
+.nexus-graph-selected-card__list-item:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 14%, transparent);
+    border-color: var(--vscode-focusBorder, var(--vscode-charts-blue, #4cc2ff));
+}
+
+.nexus-graph-selected-card__list-badge {
+    margin-left: auto;
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--vscode-charts-green, #4ec9b0);
+    background: color-mix(in srgb, var(--vscode-charts-green, #4ec9b0) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--vscode-charts-green, #4ec9b0) 35%, transparent);
+    border-radius: 3px;
+    padding: 1px 6px;
+    flex-shrink: 0;
+}
+
+.nexus-graph-selected-card__list-overflow {
+    font-size: 10px;
+    color: var(--nexus-subtext);
+    font-style: italic;
+    padding: 4px 8px;
+}
+
+.nexus-graph-selected-card__chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.nexus-graph-selected-card__chip {
+    font-size: 10px;
+    color: var(--nexus-subtext);
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+    border-radius: 10px;
+    padding: 1px 8px;
+    white-space: nowrap;
+}
+
+.nexus-graph-selected-card__chip.is-overflow {
+    font-style: italic;
+}
+
+.nexus-graph-selected-card__meta-row {
+    display: flex;
+    gap: 8px;
+    font-size: 11px;
+    margin-bottom: 4px;
+    align-items: center;
+}
+
+.nexus-graph-selected-card__meta-label {
+    color: var(--nexus-subtext);
+    font-weight: 600;
+    min-width: 70px;
+}
+
+.nexus-graph-selected-card__v2-hint {
+    font-size: 10px;
+    color: var(--nexus-subtext);
+    font-style: italic;
+    padding: 6px 8px;
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 6%, transparent);
+    border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 18%, transparent);
+    border-radius: 3px;
 }
 
 
+/* ─── V2.1.2b: Scaffold confirmation dialog ──────────────────────
+   Modal overlay shown when the user submits a prompt that the host
+   classified as greenfield. Stack picker + Skip + Cancel + Apply.
+   Uses VS Code theme tokens via color-mix() so it lands in both
+   light and dark themes without hardcoding palette. */
 
-.nexus-graph-selected-card__hint {
+.nexus-scaffold-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    /* Backdrop blur is a nice-to-have but expensive on weaker GPUs.
+       Limit to 2px so the perf cost stays in the noise. */
+    backdrop-filter: blur(2px);
+}
 
-    font-size: 10px;
+.nexus-scaffold-dialog {
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 20%, transparent);
+    border-radius: 8px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+    width: 100%;
+    max-width: 520px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
 
+.nexus-scaffold-dialog__header {
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.nexus-scaffold-dialog__title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--vscode-foreground);
+}
+
+.nexus-scaffold-dialog__subtitle {
+    font-size: 12px;
+    margin-top: 4px;
     color: var(--nexus-subtext);
+    line-height: 1.5;
+}
 
+.nexus-scaffold-dialog__confidence {
     font-style: italic;
+    opacity: 0.85;
+}
 
+.nexus-scaffold-dialog__body {
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.nexus-scaffold-dialog__field-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    color: var(--nexus-subtext);
+}
+
+.nexus-scaffold-dialog__select {
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, color-mix(in srgb, var(--vscode-foreground) 20%, transparent));
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--vscode-font-family, sans-serif);
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+}
+
+.nexus-scaffold-dialog__select:focus {
+    outline: none;
+    border-color: var(--vscode-focusBorder, var(--vscode-charts-blue, #4cc2ff));
+}
+
+.nexus-scaffold-dialog__select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.nexus-scaffold-dialog__description {
+    margin-top: 4px;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.55;
+    color: color-mix(in srgb, var(--vscode-foreground) 80%, transparent);
+}
+
+.nexus-scaffold-dialog__tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+}
+
+.nexus-scaffold-dialog__tag {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 15%, transparent);
+    color: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 90%, var(--vscode-foreground));
+    font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.nexus-scaffold-dialog__error {
+    margin: 0 20px 12px;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--vscode-errorForeground, #f85149) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #f85149) 35%, transparent);
+    color: var(--vscode-errorForeground, #f85149);
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.nexus-scaffold-dialog__error strong {
+    color: var(--vscode-errorForeground, #f85149);
+}
+
+.nexus-scaffold-dialog__actions {
+    padding: 12px 20px 16px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    border-top: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+.nexus-scaffold-dialog__btn {
+    padding: 6px 14px;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: filter 0.15s ease, transform 0.1s ease, background 0.15s ease;
+    font-family: var(--vscode-font-family, sans-serif);
+}
+
+.nexus-scaffold-dialog__btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.nexus-scaffold-dialog__btn--ghost {
+    background: transparent;
+    color: var(--nexus-subtext);
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+}
+
+.nexus-scaffold-dialog__btn--ghost:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+    color: var(--vscode-foreground);
+}
+
+.nexus-scaffold-dialog__btn--secondary {
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+    color: var(--vscode-foreground);
+}
+
+.nexus-scaffold-dialog__btn--secondary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+}
+
+.nexus-scaffold-dialog__btn--primary {
+    background: var(--vscode-button-background, var(--vscode-charts-blue, #4cc2ff));
+    color: var(--vscode-button-foreground, #ffffff);
+}
+
+.nexus-scaffold-dialog__btn--primary:hover:not(:disabled) {
+    background: var(--vscode-button-hoverBackground, color-mix(in srgb, var(--vscode-button-background, #4cc2ff) 85%, white));
+}
+
+.nexus-scaffold-dialog__btn--primary:active:not(:disabled) {
+    transform: translateY(1px);
+}
+
+
+/* ============================================================================
+   V2.1.2 spec-fix-4 — Multi-spec UX (Option C)
+   Spec name field on empty state + small switcher pill near Start Over.
+   ============================================================================ */
+
+/* Name field — sits at top of empty state, between description and attach row.
+   Subtle styling: uses VS Code's input bg/border vars so it inherits the theme. */
+.nexus-spec-name-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 12px 0;
+    padding: 10px;
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+}
+
+.nexus-spec-name-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--vscode-foreground);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.nexus-spec-name-input {
+    padding: 6px 8px;
+    font-family: var(--vscode-font-family, sans-serif);
+    font-size: 13px;
+    color: var(--vscode-input-foreground, var(--vscode-foreground));
+    background: var(--vscode-input-background, transparent);
+    border: 1px solid var(--vscode-input-border, color-mix(in srgb, var(--vscode-foreground) 20%, transparent));
+    border-radius: 4px;
+    outline: none;
+    transition: border-color 0.15s ease;
+}
+
+.nexus-spec-name-input:focus {
+    border-color: var(--vscode-focusBorder, var(--vscode-charts-blue, #4cc2ff));
+}
+
+.nexus-spec-name-preview {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground, var(--nexus-subtext));
+    margin-top: 2px;
+}
+
+.nexus-spec-name-preview code {
+    font-family: var(--vscode-editor-font-family, monospace);
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+
+.nexus-spec-name-error {
+    font-size: 11px;
+    color: var(--vscode-errorForeground, #f48771);
+    margin-top: 2px;
+}
+
+/* Feature switcher — pill button + dropdown menu. Pill sits in the same row
+   as Start Over. Menu is absolutely positioned below the pill. */
+.nexus-feature-switcher {
+    position: relative;
+    display: inline-block;
+}
+
+.nexus-feature-switcher-pill {
+    background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+    color: var(--vscode-foreground);
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    padding: 4px 10px;
+    border-radius: 14px;
+    font-size: 12px;
+    font-family: var(--vscode-font-family, sans-serif);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    white-space: nowrap;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.nexus-feature-switcher-pill:hover {
+    background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    border-color: color-mix(in srgb, var(--vscode-foreground) 24%, transparent);
+}
+
+.nexus-feature-switcher-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    min-width: 220px;
+    max-width: 320px;
+    background: var(--vscode-menu-background, var(--vscode-editor-background));
+    border: 1px solid var(--vscode-menu-border, color-mix(in srgb, var(--vscode-foreground) 16%, transparent));
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    padding: 4px 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+}
+
+.nexus-feature-switcher-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--vscode-menu-foreground, var(--vscode-foreground));
+    border: none;
+    text-align: left;
+    font-size: 12px;
+    font-family: var(--vscode-font-family, sans-serif);
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.nexus-feature-switcher-item:hover {
+    background: var(--vscode-menu-selectionBackground, color-mix(in srgb, var(--vscode-foreground) 10%, transparent));
+    color: var(--vscode-menu-selectionForeground, var(--vscode-foreground));
+}
+
+.nexus-feature-switcher-item.active {
+    font-weight: 600;
+}
+
+.nexus-feature-switcher-status {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, var(--nexus-subtext));
+    white-space: nowrap;
+}
+
+.nexus-feature-switcher-divider {
+    height: 1px;
+    background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    margin: 4px 0;
+}
+
+.nexus-feature-switcher-new {
+    color: var(--vscode-charts-blue, #4cc2ff);
+    font-weight: 500;
+}
+
+/* ============================================================================
+   V2.1.2 spec-fix-4 — Code map empty-state diagnostic overlay
+   ============================================================================ */
+
+.nexus-codemap-empty-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    padding: 24px 32px;
+    background: color-mix(in srgb, var(--vscode-editor-background) 85%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--vscode-foreground) 25%, transparent);
+    border-radius: 8px;
+    color: var(--vscode-descriptionForeground, var(--nexus-subtext));
+    font-size: 13px;
+    max-width: 360px;
+    pointer-events: none;
+    z-index: 5;
+}
+
+.nexus-codemap-empty-overlay-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--vscode-foreground);
+    margin-bottom: 6px;
+}
+
+.nexus-codemap-empty-overlay-hint {
+    font-size: 11px;
+    margin-top: 8px;
+    color: var(--vscode-descriptionForeground, var(--nexus-subtext));
+}
+
+
+/* ============================================================================
+   V2.1.2 spec-fix-5 — Traceability matrix per-feature aggregation banner
+   ============================================================================ */
+
+.nexus-traceability-aggregate-banner {
+    padding: 6px 16px;
+    font-size: 11px;
+    border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+}
+
+.nexus-traceability-aggregate-ok {
+    color: var(--vscode-charts-green, #3fb950);
+}
+
+.nexus-traceability-aggregate-partial {
+    color: var(--vscode-charts-orange, #f0883e);
+}
+
+.nexus-traceability-aggregate-partial summary,
+.nexus-traceability-aggregate-failed summary {
+    cursor: pointer;
+    user-select: none;
+}
+
+.nexus-traceability-aggregate-partial summary:hover,
+.nexus-traceability-aggregate-failed summary:hover {
+    text-decoration: underline;
+}
+
+.nexus-traceability-aggregate-failed {
+    color: var(--vscode-errorForeground, #f48771);
+}
+
+.nexus-traceability-aggregate-issues {
+    margin: 6px 0 4px 16px;
+    padding-left: 8px;
+    list-style: disc;
+    color: var(--vscode-foreground);
+}
+
+.nexus-traceability-aggregate-issues li {
+    margin: 2px 0;
+}
+
+.nexus-traceability-aggregate-issues code {
+    font-family: var(--vscode-editor-font-family, monospace);
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 10px;
+}
+
+
+/* ============================================================================
+   V2.1.2 spec-fix-6 — Code map page redesign (Option A + spec filter)
+   Compact toolbar + status strip, consistent V2.1.2 visual language.
+   Replaces the original 70px tall header with hardcoded #0d1117 styles.
+   ============================================================================ */
+
+/* Top-level container — replaces the inline style with theme-aware values */
+.nexus-map-tab {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+    background: var(--vscode-editor-background);
+}
+
+/* Compact 36px toolbar replacing the prior 70px header */
+.nexus-map-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    height: 36px;
+    flex-shrink: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+    z-index: 1000;
+}
+
+.nexus-map-toolbar-cluster {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.nexus-map-toolbar-divider {
+    width: 1px;
+    height: 18px;
+    background: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+    margin: 0 4px;
+}
+
+/* Pill button — replaces nexus-map-toggle. Same visual language as the
+   spec page switcher pill. */
+.nexus-map-pill {
+    background: transparent;
+    color: var(--vscode-foreground);
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 14%, transparent);
+    padding: 4px 12px;
+    border-radius: 14px;
+    font-size: 12px;
+    font-family: var(--vscode-font-family, sans-serif);
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    white-space: nowrap;
+    line-height: 1;
+}
+
+.nexus-map-pill:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+    border-color: color-mix(in srgb, var(--vscode-foreground) 24%, transparent);
+}
+
+.nexus-map-pill.active {
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 18%, transparent);
+    border-color: var(--vscode-charts-blue, #4cc2ff);
+    color: var(--vscode-foreground);
+    font-weight: 500;
+}
+
+/* Disabled state — for the granularity pills when not in codeMap mode.
+   Stays mounted to avoid layout shift but visually muted. */
+.nexus-map-pill.disabled,
+.nexus-map-pill:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Action variant — the refresh button gets accent coloring to distinguish
+   it from selectable pills. */
+.nexus-map-pill-action {
+    border-color: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 50%, transparent);
+    color: var(--vscode-charts-blue, #4cc2ff);
+}
+
+.nexus-map-pill-action:hover {
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 12%, transparent);
+    border-color: var(--vscode-charts-blue, #4cc2ff);
+}
+
+/* Spec filter dropdown — sits next to the granularity pills when there
+   are multiple specs to filter. */
+.nexus-map-spec-filter {
+    position: relative;
+    display: inline-block;
+}
+
+.nexus-map-spec-filter-menu {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 4px);
+    min-width: 220px;
+    max-width: 320px;
+    max-height: 320px;
+    overflow-y: auto;
+    background: var(--vscode-menu-background, var(--vscode-editor-background));
+    border: 1px solid var(--vscode-menu-border, color-mix(in srgb, var(--vscode-foreground) 16%, transparent));
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    padding: 4px 0;
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+}
+
+.nexus-map-spec-filter-actions {
+    display: flex;
+    gap: 4px;
+    padding: 4px 12px;
+}
+
+.nexus-map-spec-filter-action {
+    background: transparent;
+    color: var(--vscode-charts-blue, #4cc2ff);
+    border: none;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-family: var(--vscode-font-family, sans-serif);
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+.nexus-map-spec-filter-action:hover {
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.nexus-map-spec-filter-divider {
+    height: 1px;
+    background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    margin: 4px 0;
+}
+
+.nexus-map-spec-filter-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--vscode-menu-foreground, var(--vscode-foreground));
+    transition: background 0.1s ease;
+}
+
+.nexus-map-spec-filter-item:hover {
+    background: var(--vscode-menu-selectionBackground, color-mix(in srgb, var(--vscode-foreground) 10%, transparent));
+}
+
+.nexus-map-spec-filter-item input[type="checkbox"] {
+    margin: 0;
+}
+
+.nexus-map-spec-filter-slug {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Canvas container — theme-aware border replacing the hardcoded #30363d. */
+.nexus-map-canvas-container {
+    border-right: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+}
+
+/* Side panel — narrowed from flex:2 (40%) to flex:1 (25%) per Option A.
+   Replaces the inline-style version of the same div. */
+.nexus-map-side-panel {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: var(--vscode-editor-background);
+    position: relative;
+    min-width: 220px;
+}
+
+
+/* V2.1.2 spec-fix-8 — cache badge inline with the aggregation banner */
+.nexus-traceability-aggregate-cache {
+    color: var(--vscode-descriptionForeground, var(--nexus-subtext));
+    font-weight: normal;
+    font-style: italic;
+}
+
+
+/* ============================================================================
+   V2.1.2 spec-fix-9 — Markdown table styling (remark-gfm) + mermaid blocks
+   ============================================================================
+   Tables: previously crashed into one line of pipe characters because
+   ReactMarkdown without remark-gfm doesn't recognize table syntax. Now
+   they render as proper grids; this CSS gives them the visual treatment
+   they need to be readable in the spec page.
+
+   Mermaid: inline diagram rendering via the new MermaidBlock component.
+   Container styling, loading state, and error fallback. */
+
+/* ── Tables ─────────────────────────────────────────────────────────── */
+
+.nexus-spec-content table,
+.nexus-spec-view table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 12px;
+    background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.nexus-spec-content table th,
+.nexus-spec-content table td,
+.nexus-spec-view table th,
+.nexus-spec-view table td {
+    padding: 6px 12px;
+    text-align: left;
+    border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    border-right: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.nexus-spec-content table th,
+.nexus-spec-view table th {
+    background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+    color: var(--vscode-foreground);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 24%, transparent);
+}
+
+.nexus-spec-content table tr:last-child td,
+.nexus-spec-view table tr:last-child td {
+    border-bottom: none;
+}
+
+.nexus-spec-content table th:last-child,
+.nexus-spec-content table td:last-child,
+.nexus-spec-view table th:last-child,
+.nexus-spec-view table td:last-child {
+    border-right: none;
+}
+
+.nexus-spec-content table tr:hover td,
+.nexus-spec-view table tr:hover td {
+    background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+}
+
+.nexus-spec-content table code,
+.nexus-spec-view table code {
+    font-size: 11px;
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-family: var(--vscode-editor-font-family, monospace);
+}
+
+/* ── Mermaid block container ────────────────────────────────────────── */
+
+.nexus-mermaid-block {
+    margin: 12px 0;
+    padding: 16px;
+    background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+    border: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    border-radius: 6px;
+    overflow-x: auto;
+    /* Center the SVG horizontally within its container — most diagrams
+       fit but wide ER diagrams may need to scroll. */
+    display: flex;
+    justify-content: center;
+}
+
+.nexus-mermaid-block svg {
+    max-width: 100%;
+    height: auto;
+    /* Mermaid sets its own max-width on the root SVG. Override so it
+       fills the container width when smaller than container. */
+}
+
+/* ── Mermaid loading state ──────────────────────────────────────────── */
+
+.nexus-mermaid-loading {
+    margin: 12px 0;
+    padding: 24px;
+    text-align: center;
+    color: var(--vscode-descriptionForeground);
+    background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+    border-radius: 6px;
+    font-size: 12px;
+    font-style: italic;
+}
+
+/* ── Mermaid error fallback ─────────────────────────────────────────── */
+
+.nexus-mermaid-error {
+    margin: 12px 0;
+    border: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #f48771) 40%, transparent);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.nexus-mermaid-error-banner {
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--vscode-errorForeground, #f48771) 12%, transparent);
+    color: var(--vscode-errorForeground, #f48771);
+    font-size: 12px;
+    border-bottom: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #f48771) 24%, transparent);
+}
+
+.nexus-mermaid-error-source {
+    margin: 0;
+    padding: 12px;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-foreground);
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px;
+    overflow-x: auto;
+    white-space: pre;
+}
+
+
+/* ============================================================================
+   V2.1.2 spec-fix-10 — "View an existing spec" affordance on empty state
+   ============================================================================
+   Re-surfaces the feature switcher from the empty state, where it was
+   previously hidden because the gating condition required a non-empty
+   `requirements` value. Users now have a discoverable way to view old
+   specs from the very first thing they see on the spec page. */
+
+.nexus-spec-existing-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 12px 0;
+    padding-bottom: 16px;
+    border-bottom: 1px dashed color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
+}
+
+.nexus-spec-existing-button {
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 12%, transparent);
+    color: var(--vscode-charts-blue, #4cc2ff);
+    border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 40%, transparent);
+    padding: 6px 14px;
+    border-radius: 16px;
+    font-size: 12px;
+    font-family: var(--vscode-font-family, sans-serif);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+.nexus-spec-existing-button:hover {
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4cc2ff) 24%, transparent);
+    border-color: var(--vscode-charts-blue, #4cc2ff);
+}
+
+.nexus-spec-existing-or {
+    color: var(--vscode-descriptionForeground);
+    font-size: 12px;
+    font-style: italic;
+}
+
+
+/* ============================================================================
+   V2.1.2 spec-fix-10 P5.2 — Apply this fix card
+   ============================================================================
+   Renders below explore-mode assistant messages when the response describes
+   an actionable fix (code block + file path). Two visual modes:
+
+   - Static button (default): subtle "💡 Apply this fix" affordance
+   - Countdown (auto-apply opt-in): more prominent "⚡ Auto-applying in 3…"
+     with a Cancel button. Different background to make it clear something
+     is about to happen automatically. */
+
+.nexus-apply-fix-card {
+    margin: 8px 0 4px 0;
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4a90e2) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #4a90e2) 30%, transparent);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+}
+
+/* Auto-apply countdown variant — more saturated to telegraph "watch out,
+   this is doing something on its own." */
+.nexus-apply-fix-card-auto {
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4a90e2) 18%, transparent);
+    border-color: color-mix(in srgb, var(--vscode-charts-blue, #4a90e2) 50%, transparent);
+}
+
+.nexus-apply-fix-label {
+    color: var(--vscode-foreground);
+    font-weight: 500;
+    flex: 1;
+}
+
+.nexus-apply-fix-button {
+    background: var(--vscode-charts-blue, #4a90e2);
+    color: white;
+    border: none;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    transition: opacity 0.2s;
+}
+
+.nexus-apply-fix-button:hover {
+    opacity: 0.85;
+}
+
+.nexus-apply-fix-button:active {
+    opacity: 0.7;
+}
+
+.nexus-apply-fix-button-cancel {
+    background: transparent;
+    color: var(--vscode-charts-blue, #4a90e2);
+    border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #4a90e2) 50%, transparent);
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 500;
+    transition: background 0.2s;
+}
+
+.nexus-apply-fix-button-cancel:hover {
+    background: color-mix(in srgb, var(--vscode-charts-blue, #4a90e2) 12%, transparent);
 }

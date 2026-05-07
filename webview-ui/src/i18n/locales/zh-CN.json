@@ -91,15 +91,7 @@
     "disable": "停用钩子",
     "run_now": "立即运行钩子",
     "open_in_editor": "在编辑器中打开",
-    "last_fired": "上次触发",
-    "activity_label": "钩子活动",
-    "fire_running": "运行中",
-    "fire_succeeded": "已成功",
-    "fire_errored": "已出错",
-    "fire_timed_out": "已超时",
-    "fire_skipped": "已跳过",
-    "fire_waiting_output": "等待输出…",
-    "fire_file_label": "文件"
+    "last_fired": "上次触发"
   },
   "mention": {
     "attach_file_context": "附加文件上下文"
@@ -240,10 +232,9 @@
     "hooks": "钩子",
     "steering": "导向规则",
     "map": "代码图谱",
+    "timeline": "时间线",
     "audit": "审计日志",
-    "settings": "设置",
-    "mcp": "MCP 服务器",
-    "diagnostics": "诊断"
+    "settings": "设置"
   },
   "specs": {
     "phase_stepper_aria": "规范工作流进度",
@@ -257,53 +248,5 @@
     "ears_label": "EARS",
     "ears_about": "关于 EARS",
     "ears_explanation": "EARS(Easy Approach to Requirements Syntax)是一种用于编写可测试需求的结构化模式。关键字在所有语言下都保持英文大写,以便 grep 与工具链识别。"
-  },
-  "mcp": {
-    "title": "MCP 服务器",
-    "reload": "重新加载",
-    "reload_tooltip": "重新读取 .nexus/mcp-servers.json",
-    "loading": "正在加载 MCP 服务器…",
-    "empty_title": "未配置 MCP 服务器",
-    "empty_hint": "在 .nexus/mcp-servers.json 中添加服务器条目，可为代理扩展外部工具。",
-    "config_error_title": "配置错误",
-    "config_error_server_label": "服务器",
-    "tools_label": "工具",
-    "status_disabled": "已禁用",
-    "status_configured": "已配置",
-    "status_connecting": "连接中",
-    "status_connected": "已连接",
-    "status_error": "错误"
-  },
-  "diagnostics": {
-    "title": "诊断",
-    "refresh": "刷新",
-    "refresh_tooltip": "刷新会话和计时数据",
-    "section_sessions": "会话",
-    "section_summary": "概要",
-    "section_tokens": "令牌",
-    "section_tools": "工具",
-    "section_timeline": "时间线",
-    "section_timing": "启动阶段（主机）",
-    "sessions_loading": "正在加载会话…",
-    "sessions_empty": "尚未记录任何审计会话。",
-    "session_pick_prompt": "— 选择一个会话 —",
-    "bundle_error_title": "加载会话失败",
-    "bundle_loading": "正在加载会话详情…",
-    "summary_started": "开始",
-    "summary_duration": "持续时间",
-    "summary_events": "事件",
-    "summary_errors": "错误",
-    "tokens_prompt": "提示",
-    "tokens_completion": "回应",
-    "tokens_call": "次调用",
-    "tokens_calls": "次调用",
-    "tokens_total": "总计",
-    "agent_planner": "规划器",
-    "agent_coder": "编码器",
-    "agent_verifier": "验证器",
-    "agent_hook": "钩子",
-    "agent_unknown": "未知",
-    "copy_bundle": "复制 JSON 包",
-    "copy_bundle_tooltip": "复制完整会话包为 JSON，便于提交支持工单"
   }
 }

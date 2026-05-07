@@ -137,7 +137,16 @@ const projectTaskSchema = {
         relatedRequirement: { type: "string" },
         dependencies: { type: "array", items: { type: "string" } },
         verificationRules: { type: "array", items: { type: "string" } },
-        testStrategy: { type: "string" }
+        testStrategy: { type: "string" },
+        // V2.1.3: optional task-kind discriminator. Default is 'code'
+        // (existing CoderAgent dispatch). 'scaffold-template' triggers
+        // applyTemplate; 'scaffold-llm' triggers Coder with scaffolding
+        // prompt. Optional + enum so the model can omit it for code
+        // tasks and pick from a closed set for scaffold tasks.
+        kind: { type: "string", enum: ["code", "scaffold-template", "scaffold-llm"] },
+        // V2.1.3: only meaningful when kind === 'scaffold-template'.
+        // Identifies which shipped template to apply.
+        templateId: { type: "string" }
     },
     required: ["step", "file", "detailedInstructions"]
 };

@@ -1,0 +1,6 @@
+{
+  "id": "node-ts-api",
+  "displayName": "Node.js + TypeScript REST API",
+  "description": "Express REST API with TypeScript. Strict mode, ESM, auto-reload via tsx watch. Includes a /health endpoint and a sample /api/echo route.",
+  "stackTags": ["node", "typescript", "api", "express", "rest"]
+}

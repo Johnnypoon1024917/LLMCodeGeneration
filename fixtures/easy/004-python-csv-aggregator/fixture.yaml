@@ -1,0 +1,61 @@
+id: 004-python-csv-aggregator
+title: Python CLI that aggregates CSV column totals
+tier: easy
+
+# Probes non-Node language support. The agent's V2.3 package-list
+# injection is Node-shaped (reads package.json); this fixture deliberately
+# uses ONLY Python stdlib so that any "phantom import" failures point at
+# the agent's language reasoning, not at the package-list mechanism.
+#
+# Calibration: a junior engineer with the requirement could ship this in
+# 15 minutes. If the agent fails this consistently, the issue is
+# fundamental Python support, not difficulty.
+
+requirement: |
+  Build a Python 3 CLI named `aggregate.py` that reads a CSV file from
+  stdin and writes a summary CSV to stdout. The input CSV has a header
+  row with at least these columns: category (string), amount (number).
+  Other columns may exist and should be ignored.
+
+  Output: a CSV with two columns — category, total — where total is the
+  sum of amount for each unique category. Categories sorted alphabetically.
+  Output must include the header row.
+
+  Must run as `python3 aggregate.py < input.csv`. Use only Python's
+  standard library (csv module). No pip install required.
+
+rubric:
+  - kind: file_exists
+    description: aggregate.py was created
+    path: aggregate.py
+
+  - kind: command
+    description: script runs with empty input (header-only) without crashing
+    cmd: 'echo "category,amount" | python3 aggregate.py'
+    timeout_ms: 5000
+
+  - kind: command_output_contains
+    description: output preserves header row
+    cmd: 'echo "category,amount" | python3 aggregate.py'
+    expect_text: category,total
+
+  - kind: command_output_contains
+    description: aggregates totals correctly (food=15, travel=200)
+    cmd: 'printf "category,amount\nfood,5\ntravel,200\nfood,10\n" | python3 aggregate.py'
+    expect_text: food,15
+
+  - kind: command_output_contains
+    description: aggregates totals correctly (travel=200)
+    cmd: 'printf "category,amount\nfood,5\ntravel,200\nfood,10\n" | python3 aggregate.py'
+    expect_text: travel,200
+
+  - kind: command_output_contains
+    description: categories sorted alphabetically (food before travel)
+    cmd: 'printf "category,amount\ntravel,100\nfood,50\n" | python3 aggregate.py'
+    expect_line: 2
+    expect_text: food
+
+has_reference: false
+
+modes: [interactive, autopilot]
+budget_seconds: 300

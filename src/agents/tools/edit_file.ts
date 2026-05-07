@@ -15,6 +15,9 @@ import * as path from 'path';
 import { registerTool, type ToolExecutor } from '../toolRegistry';
 import { applyBlock } from '../../utilities/searchReplace';
 import { validateWorkspacePath } from './_pathGuard';
+// V2.1.2 spec-fix-11 #3-DIAG: direct logger import for the wrong-file
+// edit investigation. Will be removed when the diagnostic is concluded.
+import { log } from '../../logger';
 
 const definition = {
     type: 'function' as const,
@@ -37,6 +40,12 @@ const executor: ToolExecutor = async (args, ctx) => {
     const filepath = String(args['filepath'] ?? '');
     const oldText = String(args['old_text'] ?? '');
     const newText = String(args['new_text'] ?? '');
+    // ─── #3-DIAG (spec-fix-11) ─────────────────────────────────────
+    // Wrong-file edit investigation. Log the filepath the LLM passed.
+    // Cross-reference against Coordinator dispatch log to detect
+    // "Coder edited a different file than assigned" failure mode.
+    log.info(`[#3-DIAG] edit_file tool call received with path: "${filepath}" (old_text length: ${oldText.length}, new_text length: ${newText.length})`);
+    // ───────────────────────────────────────────────────────────────
 
     if (!filepath) {
         return {

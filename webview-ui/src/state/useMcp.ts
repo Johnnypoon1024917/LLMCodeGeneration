@@ -20,8 +20,15 @@ import { useCallback, useEffect, useReducer } from 'react';
  *  validates incoming messages so a host change won't crash the panel. */
 export interface McpServerView {
     id: string;
-    command: string;
-    args: string[];
+    /** P2.1 streamable-http (2026-05): transport discriminator. Older
+     *  host messages without this field default to 'stdio' (handled by
+     *  the validator in handleHostMessage). */
+    transport: 'stdio' | 'http';
+    /** Stdio-only — populated when transport === 'stdio'. */
+    command?: string;
+    args?: string[];
+    /** HTTP-only — populated when transport === 'http'. */
+    url?: string;
     status: 'disabled' | 'configured' | 'connecting' | 'connected' | 'error';
     statusChangedAt: number;
     errorMessage?: string;
@@ -84,25 +91,49 @@ function validateServer(raw: unknown): McpServerView | null {
     if (typeof raw !== 'object' || raw === null) { return null; }
     const o = raw as Record<string, unknown>;
     if (typeof o['id'] !== 'string') { return null; }
-    if (typeof o['command'] !== 'string') { return null; }
-    if (!Array.isArray(o['args'])) { return null; }
     if (typeof o['statusChangedAt'] !== 'number') { return null; }
     if (typeof o['status'] !== 'string' || !VALID_STATUSES.has(o['status'] as McpServerView['status'])) {
         return null;
     }
     if (!Array.isArray(o['tools'])) { return null; }
 
-    const args = (o['args'] as unknown[]).filter((a) => typeof a === 'string') as string[];
+    // P2.1 streamable-http (2026-05): transport-aware validation.
+    // Backward compat: hosts predating this field still send command/args
+    // for stdio servers. Infer transport from which fields are present.
+    let transport: 'stdio' | 'http';
+    if (typeof o['transport'] === 'string') {
+        if (o['transport'] !== 'stdio' && o['transport'] !== 'http') { return null; }
+        transport = o['transport'] as 'stdio' | 'http';
+    } else if (typeof o['command'] === 'string') {
+        transport = 'stdio';
+    } else if (typeof o['url'] === 'string') {
+        transport = 'http';
+    } else {
+        // No transport hint and no recognisable transport-specific
+        // field — drop this row.
+        return null;
+    }
+
     const tools = (o['tools'] as unknown[]).filter((t) => typeof t === 'string') as string[];
 
     const view: McpServerView = {
         id: o['id'] as string,
-        command: o['command'] as string,
-        args,
+        transport,
         status: o['status'] as McpServerView['status'],
         statusChangedAt: o['statusChangedAt'] as number,
-        tools
+        tools,
     };
+    if (transport === 'stdio') {
+        if (typeof o['command'] !== 'string') { return null; }
+        view.command = o['command'] as string;
+        const args = Array.isArray(o['args'])
+            ? (o['args'] as unknown[]).filter((a) => typeof a === 'string') as string[]
+            : [];
+        view.args = args;
+    } else {
+        if (typeof o['url'] !== 'string') { return null; }
+        view.url = o['url'] as string;
+    }
     if (typeof o['errorMessage'] === 'string') { view.errorMessage = o['errorMessage'] as string; }
     if (typeof o['description'] === 'string') { view.description = o['description'] as string; }
     return view;

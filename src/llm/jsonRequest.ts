@@ -28,8 +28,9 @@
 //   with fallback to the global nexuscode.model. When omitted, behavior
 //   matches pre-routing (uses the global default).
 
-import { resilientFetch, getLLMConfig, authHeaders, safeParseJSON, type AgentRole } from '../llmService';
+import { resilientFetch, getLLMConfig, authHeaders, safeParseJSON, truncateContextForChat, CHAT_CONTEXT_CHAR_BUDGET, type AgentRole } from '../llmService';
 import { errorMessage } from '../utilities/errors';
+import { EmptyCompletionError } from './errors';
 import type { JsonSchema } from './jsonSchemas';
 import { log } from '../logger';
 
@@ -210,9 +211,27 @@ export async function jsonRequest<T>(opts: JsonRequestOptions): Promise<JsonRequ
         }
         : { type: "json_object" };
 
+    // V2.1.2 fix: truncate any oversize message content before send.
+    // PRD/Design/Tasks generation can attach long spec docs via `data.context`;
+    // when that pushes prompt + history past Qwen 3.6's 32K window, the
+    // endpoint silently returns 200 + empty content rather than 400. Without
+    // this guard, jsonRequest then throws a confusing JSON-parse error
+    // ("Unexpected end of JSON input") instead of something the user can act on.
+    //
+    // We mutate a copy of opts.messages — never the caller's array. The
+    // truncation marker is visible to the model so it knows context was cut
+    // (helps it produce honest "based on a partial view" answers instead of
+    // confidently hallucinating).
+    const truncatedMessages = opts.messages.map(msg => {
+        if (typeof msg.content === 'string' && msg.content.length > CHAT_CONTEXT_CHAR_BUDGET) {
+            return { ...msg, content: truncateContextForChat(msg.content) };
+        }
+        return msg;
+    });
+
     const body: Record<string, unknown> = {
         model,
-        messages: opts.messages,
+        messages: truncatedMessages,
         temperature: opts.temperature ?? 0.1,
         response_format: responseFormat
     };
@@ -257,6 +276,21 @@ export async function jsonRequest<T>(opts: JsonRequestOptions): Promise<JsonRequ
         throw new Error("LLM response missing choices");
     }
     const content = firstChoice.message.content;
+
+    // V2.1.2 fix: detect empty completion BEFORE parsing. Qwen 3.6 27B
+    // at the lab endpoint (32K context cap) returns 200 OK + empty
+    // content on context overflow rather than a clean 400. Without this
+    // check, the JSON.parse below throws "Unexpected end of JSON input"
+    // and bubbles up as a confusing error in the spec UI. Throwing the
+    // shared EmptyCompletionError lets the SidebarProvider catch handler
+    // show a meaningful message ("prompt too long, attach fewer docs")
+    // instead of a parser stack trace.
+    if (typeof content !== 'string' || content.length === 0) {
+        throw new EmptyCompletionError(
+            'The LLM returned an empty response. This usually means the prompt + attached context exceeded the model\'s context window, ' +
+            'or the model declined to answer for safety reasons. Try a shorter prompt, fewer attached files, or breaking the request into smaller parts.'
+        );
+    }
 
     let parsed: T;
     if (caps.jsonSchema) {

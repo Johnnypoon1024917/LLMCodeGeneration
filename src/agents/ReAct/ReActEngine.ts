@@ -667,6 +667,12 @@ async function dispatchOneCall(
         dispatchOpts.emitter = config.emitter;
         if (config.taskId) { dispatchOpts.taskId = config.taskId; }
     }
+    // V2.1.2 spec-fix-12 — Bug #1: forward the approval hook to the
+    // dispatcher so write_file / edit_file calls block on human input
+    // when AutoPilot is OFF.
+    if (config.approvalHook) {
+        dispatchOpts.approvalHook = config.approvalHook;
+    }
 
     const dispatchResult: ToolDispatchResult = await dispatchWithEvents(
         toolCall,

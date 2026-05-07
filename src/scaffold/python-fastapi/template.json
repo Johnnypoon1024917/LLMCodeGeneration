@@ -1,0 +1,6 @@
+{
+  "id": "python-fastapi",
+  "displayName": "Python + FastAPI",
+  "description": "FastAPI web service with Pydantic v2 models, /health endpoint, and a sample /api/echo route. Run with uvicorn.",
+  "stackTags": ["python", "api", "fastapi", "rest"]
+}

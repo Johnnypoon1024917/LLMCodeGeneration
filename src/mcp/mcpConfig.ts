@@ -26,8 +26,23 @@
 //     from process.env. We do NOT support arbitrary shell expansion
 //     because that's a security footgun, and Kiro doesn't either.
 
-/** P2.1: one entry in the mcpServers map. */
-export interface McpServerEntry {
+/** P2.1: one entry in the mcpServers map.
+ *
+ *  Tagged union: stdio servers (existing) spawn a subprocess; HTTP
+ *  servers (P2.1 streamable-http extension, 2026-05) connect to a
+ *  remote URL using the MCP Streamable HTTP transport.
+ *
+ *  Existing config files (with only `command` + `args` + `env`) parse
+ *  cleanly into the stdio variant — the `transport` discriminator
+ *  defaults to 'stdio' when only those fields are present. Authors
+ *  opt into HTTP by setting `url` instead of `command`.
+ */
+export type McpServerEntry = McpStdioServerEntry | McpHttpServerEntry;
+
+/** Stdio-transport server: NexusCode spawns a subprocess and speaks
+ *  JSON-RPC over its stdin/stdout. The original P2.1 shape. */
+export interface McpStdioServerEntry {
+    transport: 'stdio';
     /** The server's identifier — the map key. */
     id: string;
     /** Executable to spawn (`npx`, `python`, `/usr/bin/myserver`). */
@@ -41,8 +56,30 @@ export interface McpServerEntry {
      *  to connect. Useful for keeping a server config around without
      *  paying its startup cost on every session. */
     disabled: boolean;
-    /** Optional human-friendly description shown in the UI. Pass-through
-     *  from config; the manager doesn't interpret it. */
+    /** Optional human-friendly description shown in the UI. */
+    description?: string;
+}
+
+/** Streamable HTTP-transport server (P2.1 extension, 2026-05): the
+ *  MCP server runs remotely; we connect via a single HTTPS endpoint
+ *  using the Streamable HTTP transport from the official SDK.
+ *
+ *  Headers field is for static authentication (Bearer tokens, API
+ *  keys). Full OAuth 2.1 is NOT implemented this turn — for OAuth
+ *  servers, use a stdio MCP proxy that handles the auth flow locally.
+ *  The roadmap defers OAuth to a follow-on bundle. */
+export interface McpHttpServerEntry {
+    transport: 'http';
+    id: string;
+    /** HTTP(S) URL of the MCP server. Must include scheme + host;
+     *  port and path optional. */
+    url: string;
+    /** Static headers sent on every request. Useful for Bearer
+     *  tokens / API keys. Values support `${env:VAR}` substitution
+     *  (same as stdio's env field) so secrets don't have to live in
+     *  the committed JSON. */
+    headers: Record<string, string>;
+    disabled: boolean;
     description?: string;
 }
 
@@ -115,11 +152,25 @@ export function parseMcpConfig(raw: string): McpConfig | McpConfigError {
             };
         }
         const entry = raw as Record<string, unknown>;
-        if (typeof entry['command'] !== 'string' || entry['command'].trim() === '') {
+
+        // P2.1 streamable-http extension (2026-05): detect transport.
+        // - `url` field present → HTTP transport
+        // - `command` field present → stdio transport
+        // - both or neither → ambiguous, reject
+        const hasUrl = typeof entry['url'] === 'string' && entry['url'].trim() !== '';
+        const hasCommand = typeof entry['command'] === 'string' && entry['command'].trim() !== '';
+        if (hasUrl && hasCommand) {
             return {
                 code: 'invalid_server_entry',
                 serverId: id,
-                message: `Server '${id}' missing required string field 'command'`
+                message: `Server '${id}' has both 'url' and 'command' — pick one (HTTP or stdio transport)`
+            };
+        }
+        if (!hasUrl && !hasCommand) {
+            return {
+                code: 'invalid_server_entry',
+                serverId: id,
+                message: `Server '${id}' must specify either 'command' (stdio) or 'url' (HTTP)`
             };
         }
 
@@ -180,7 +231,46 @@ export function parseMcpConfig(raw: string): McpConfig | McpConfigError {
             disabled = entry['disabled'];
         }
 
-        const serverEntry: McpServerEntry = { id, command: entry['command'], args, env, disabled };
+        let serverEntry: McpServerEntry;
+        if (hasUrl) {
+            // HTTP transport: parse `headers` (optional, defaults to {}).
+            let headers: Record<string, string> = {};
+            if ('headers' in entry && entry['headers'] !== undefined) {
+                if (!entry['headers'] || typeof entry['headers'] !== 'object' || Array.isArray(entry['headers'])) {
+                    return {
+                        code: 'invalid_server_entry',
+                        serverId: id,
+                        message: `Server '${id}' field 'headers' must be an object of string-to-string pairs`
+                    };
+                }
+                for (const [k, v] of Object.entries(entry['headers'] as Record<string, unknown>)) {
+                    if (typeof v !== 'string') {
+                        return {
+                            code: 'invalid_server_entry',
+                            serverId: id,
+                            message: `Server '${id}' header '${k}' must be a string`
+                        };
+                    }
+                    headers[k] = v;
+                }
+            }
+            serverEntry = {
+                transport: 'http',
+                id,
+                url: entry['url'] as string,
+                headers,
+                disabled,
+            };
+        } else {
+            serverEntry = {
+                transport: 'stdio',
+                id,
+                command: entry['command'] as string,
+                args,
+                env,
+                disabled,
+            };
+        }
         if ('description' in entry && typeof entry['description'] === 'string') {
             serverEntry.description = entry['description'];
         }

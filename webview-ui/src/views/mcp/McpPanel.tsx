@@ -161,11 +161,18 @@ export function McpPanel({ mcp, onClose }: McpPanelProps) {
                                 </div>
                             )}
 
-                            {/* Command line — what gets spawned */}
+                            {/* Connection summary — what gets spawned (stdio)
+                                or connected to (http). */}
                             <div className="ml-5 mt-1 text-xs text-text-tertiary font-mono truncate">
-                                {server.command}
-                                {server.args.length > 0 && ' '}
-                                {server.args.join(' ')}
+                                {server.transport === 'stdio' ? (
+                                    <>
+                                        {server.command}
+                                        {server.args && server.args.length > 0 && ' '}
+                                        {server.args && server.args.join(' ')}
+                                    </>
+                                ) : (
+                                    <>{server.url}</>
+                                )}
                             </div>
 
                             {/* Tools list — populated when status === 'connected'. Empty

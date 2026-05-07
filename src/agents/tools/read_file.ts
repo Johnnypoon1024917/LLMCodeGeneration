@@ -11,6 +11,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { registerTool, type ToolExecutor } from '../toolRegistry';
 import { validateWorkspacePath } from './_pathGuard';
+import { checkExclusion, truncateForLlm } from './_contextExclusions';
 
 const definition = {
     type: 'function' as const,
@@ -49,6 +50,20 @@ const executor: ToolExecutor = async (args, ctx) => {
         };
     }
 
+    // V2.2 hotfix #6: context-bloat exclusion. Reject reads of files
+    // that are known to bloat the LLM's context window without
+    // providing actionable information (lockfiles, build cache,
+    // logs, minified output). Production logs showed Qwen 27B (32K
+    // context) hitting "input_tokens=28673" mid-task, with reads of
+    // these files in the tool history as the main culprit.
+    const exclusionReason = checkExclusion(filepath);
+    if (exclusionReason) {
+        return {
+            llmContent: `Error: ${exclusionReason}`,
+            uiPayload: { kind: 'error', message: exclusionReason }
+        };
+    }
+
     const targetUri = vscode.Uri.file(path.join(ctx.workspaceRoot, filepath));
 
     // Guardrail: resolve the path and check it actually exists as a file.
@@ -72,12 +87,13 @@ const executor: ToolExecutor = async (args, ctx) => {
     const fileData = await vscode.workspace.fs.readFile(targetUri);
     const content = new TextDecoder().decode(fileData);
 
-    // For very large files, we MAY want to truncate the LLM-bound
-    // content (token budget) but ship the full file to the UI. For
-    // 2B-2 we keep both unbounded; truncation logic is a 2B-3-or-later
-    // concern when integration testing reveals real token pressure.
+    // V2.2 hotfix #6: truncate the LLM-bound content for very large
+    // files. The UI payload still gets the full file (so the user
+    // can read everything in the rendered tool card), but the LLM
+    // sees a 30KB head + a truncation note. This caps the per-read
+    // contribution to context and makes runaway reads recoverable.
     return {
-        llmContent: content,
+        llmContent: truncateForLlm(content, filepath),
         uiPayload: {
             kind: 'file_contents',
             filepath,

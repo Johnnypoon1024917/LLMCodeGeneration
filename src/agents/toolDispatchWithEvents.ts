@@ -45,10 +45,32 @@ export type PreDispatchHook = (
 ) => Promise<{ blocked: boolean; reason?: string }>;
 
 /**
+ * V2.1.2 spec-fix-12 — Bug #1: approval hook. Distinct from
+ * preDispatchHook because the semantics differ:
+ *   - preDispatchHook is policy-driven (denylist, security monitor) and
+ *     blocks autonomously based on rules.
+ *   - approvalHook is human-in-the-loop: it pauses dispatch, prompts
+ *     the user, and resolves with their decision.
+ *
+ * Returns true to proceed; false to reject. A rejection is surfaced to
+ * the LLM as an error result so it can adapt or stop. The hook is only
+ * invoked when AutoPilot is OFF and the tool is mutating (write_file /
+ * edit_file) — read-only and benign tools auto-approve.
+ *
+ * The hook may return immediately (auto-approve) or block awaiting a
+ * webview round-trip; callers should not assume synchronous return.
+ */
+export type ApprovalHook = (
+    toolCall: ToolCall,
+    args: Record<string, unknown>
+) => Promise<boolean>;
+
+/**
  * Options for the wrapped dispatcher. All fields optional — when
  * absent, the wrapper degrades gracefully:
  *   - no emitter: events are dropped (silent dispatch)
  *   - no preDispatchHook: every call is allowed
+ *   - no approvalHook: every call auto-approves
  *   - no source: defaults to 'coordinator'
  */
 export interface DispatchWithEventsOptions {
@@ -56,6 +78,8 @@ export interface DispatchWithEventsOptions {
     emitter?: ToolEventEmitter;
     /** Pre-dispatch security hook. */
     preDispatchHook?: PreDispatchHook;
+    /** Pre-dispatch approval hook (human-in-the-loop). */
+    approvalHook?: ApprovalHook;
     /** Tag for the event `source` field (Q8=8C). Default 'coordinator'. */
     source?: 'coordinator' | 'planner' | 'verifier-internal';
     /** Task ID to attach to events. Required when emitter is provided. */
@@ -141,8 +165,56 @@ export async function dispatchWithEvents(
         }
     }
 
+    // V2.1.2 spec-fix-12 — Bug #1: pre-dispatch approval check.
+    // Runs AFTER security (so denied-by-policy never reaches the user)
+    // but BEFORE the started event (so we don't render a "running"
+    // card for a tool we never actually ran). The hook decides
+    // internally whether the call needs UI prompting or auto-approves.
+    if (options.approvalHook) {
+        // Emit started early so the user sees the pending approval as
+        // a card alongside whatever they're being asked. UI uses the
+        // pending-approval marker on the tool call to show the buttons.
+        if (options.emitter) {
+            const startedForApproval: Omit<ToolCallStartedEvent, 'seq'> = {
+                type: 'toolCallStarted',
+                taskId, callId, source,
+                timestamp: startTime,
+                name: toolCall.function.name,
+                arguments: parsedArgs
+            };
+            options.emitter.emit(startedForApproval);
+        }
+
+        const approved = await options.approvalHook(toolCall, parsedArgs);
+        if (!approved) {
+            const reason = 'Edit rejected by user';
+            if (options.emitter) {
+                const rejectedCompleted: Omit<ToolCallCompletedEvent, 'seq'> = {
+                    type: 'toolCallCompleted',
+                    taskId, callId, source,
+                    timestamp: Date.now(),
+                    status: 'error',
+                    durationMs: Date.now() - startTime,
+                    result: {
+                        llmContent: `Error: ${reason}`,
+                        uiPayload: { kind: 'error', message: reason }
+                    }
+                };
+                options.emitter.emit(rejectedCompleted);
+            }
+            return {
+                llmContent: `Rejected: ${reason}. The user did not approve this edit. Stop or propose an alternative.`,
+                uiPayload: { kind: 'error', message: reason }
+            };
+        }
+        // Approved — fall through. We already emitted started, so the
+        // normal path below should NOT re-emit.
+    }
+
     // Emit started event before the dispatch.
-    if (options.emitter) {
+    // (Skipped if approvalHook already emitted started above — the call
+    // was approved and we don't want a duplicate started event.)
+    if (options.emitter && !options.approvalHook) {
         const startedEvent: Omit<ToolCallStartedEvent, 'seq'> = {
             type: 'toolCallStarted',
             taskId, callId, source,
@@ -175,7 +247,7 @@ export async function dispatchWithEvents(
     };
 
     // Honor caller's signal if any.
-    if (ctx.signal) wrappedCtx.signal = ctx.signal;
+    if (ctx.signal) { wrappedCtx.signal = ctx.signal; }
 
     let result: ToolDispatchResult;
     let status: 'success' | 'error' | 'cancelled' = 'success';

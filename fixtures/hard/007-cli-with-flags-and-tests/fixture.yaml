@@ -1,0 +1,115 @@
+id: 007-cli-with-flags-and-tests
+title: TypeScript CLI with flag parsing and jest tests
+tier: hard
+
+# Probes the agent's ability to:
+#   1. Write working implementation code
+#   2. Write meaningful tests that pass
+#   3. Handle edge cases (negative numbers, non-numeric input, missing args)
+#
+# Why hard: the agent must produce two coherent artifacts (impl + tests)
+# that are mutually correct. A common failure mode is the agent writes
+# tests that don't actually exercise the impl, or writes impl that
+# passes only the tests it wrote without handling realistic edge cases.
+#
+# The semantic check below catches the "tests pass but don't test
+# anything meaningful" failure mode that a deterministic command check
+# can't detect.
+
+requirement: |
+  Build a TypeScript CLI named `stats.ts` that takes numbers as
+  command-line arguments and prints summary statistics.
+
+  Usage:
+    npx ts-node stats.ts 1 2 3 4 5
+    npx ts-node stats.ts --median 1 2 3 4 5
+    npx ts-node stats.ts --no-mean 1 2 3
+
+  Behavior:
+    - By default, prints lines: "mean: X", "min: X", "max: X" (one per line)
+    - --median flag adds a "median: X" line (in alphabetical order with the others)
+    - --no-mean flag suppresses the mean line
+    - With zero numeric arguments: print "error: at least one number required"
+      to stderr, exit code 1
+    - Non-numeric arguments are an error: print "error: not a number: <arg>"
+      to stderr, exit code 1
+    - Numbers may be negative or decimal
+
+  Include a jest test suite (`stats.test.ts`) covering:
+    - Default behavior (mean, min, max printed)
+    - --median flag includes median line
+    - --no-mean flag suppresses mean
+    - Empty args produces error + exit code 1
+    - Non-numeric arg produces error + exit code 1
+    - Decimal and negative numbers handled correctly
+
+  Use jest + ts-jest. Tests must invoke the CLI as a subprocess
+  (use child_process.execFileSync or similar) so they exercise the
+  actual binary path, not call internal functions.
+
+rubric:
+  - kind: file_exists
+    description: stats.ts implementation
+    path: stats.ts
+
+  - kind: file_exists
+    description: stats.test.ts test suite
+    path: stats.test.ts
+
+  - kind: file_exists
+    description: package.json
+    path: package.json
+
+  - kind: file_exists
+    description: tsconfig.json
+    path: tsconfig.json
+
+  - kind: command
+    description: install succeeds
+    cmd: npm install
+    timeout_ms: 120000
+
+  - kind: command
+    description: typecheck passes
+    cmd: npx tsc --noEmit
+    timeout_ms: 30000
+
+  - kind: command
+    description: tests pass
+    cmd: npx jest --testPathPattern=stats.test.ts
+    timeout_ms: 60000
+
+  - kind: command_output_contains
+    description: default output includes mean, min, max
+    cmd: npx ts-node stats.ts 1 2 3 4 5
+    expect_text: "mean:"
+
+  - kind: command
+    description: empty args exits with code 1
+    cmd: npx ts-node stats.ts
+    expect_exit_code: 1
+    timeout_ms: 10000
+
+  - kind: semantic
+    description: tests are meaningful (exercise CLI as subprocess, not internal calls)
+    rubric: |
+      The test file must invoke the stats CLI as a subprocess
+      (child_process.execFileSync, execSync, or spawnSync) and
+      assert against its stdout/stderr/exitCode. A test suite
+      that imports a function from stats.ts and unit-tests it
+      directly is NOT acceptable for this fixture — the
+      requirement explicitly tests the CLI binary path, not
+      internal logic.
+
+  - kind: semantic
+    description: error cases are tested, not just happy paths
+    rubric: |
+      The test suite must include at least one test that triggers
+      an error path (empty args OR non-numeric arg) AND verifies
+      both the error message AND the non-zero exit code. A test
+      file that only covers "happy paths" missed the requirement.
+
+has_reference: false
+
+modes: [interactive, autopilot]
+budget_seconds: 900

@@ -1,0 +1,239 @@
+/* webview-ui/src/components/SpecStepper.css
+ *
+ * Stepper styles. All colors come from VS Code theme variables so
+ * the component looks correct in light/dark/high-contrast themes.
+ * Hard-coded greens/reds use the editor's diff-style accents
+ * (gitDecoration), which are guaranteed to exist across themes.
+ */
+
+.spec-stepper {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 18px 20px;
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    border-radius: 8px;
+    margin: 12px 0;
+}
+
+.spec-stepper__track {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0;
+    width: 100%;
+}
+
+/* ── Node (the circle + label + hint) ────────────────────────────── */
+
+.spec-stepper__node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    min-width: 100px;
+    flex: 0 0 auto;
+    text-align: center;
+}
+
+.spec-stepper__circle {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 13px;
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+    border: 2px solid var(--vscode-input-border, var(--vscode-panel-border));
+    background: var(--vscode-editor-background);
+    color: var(--vscode-descriptionForeground);
+}
+
+.spec-stepper__index {
+    line-height: 1;
+}
+
+.spec-stepper__label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--vscode-foreground);
+    line-height: 1.3;
+}
+
+.spec-stepper__hint {
+    font-size: 11px;
+    font-style: italic;
+    color: var(--vscode-descriptionForeground);
+    max-width: 140px;
+    line-height: 1.3;
+}
+
+/* ── Status variants ─────────────────────────────────────────────── */
+
+/* Idle: muted gray, just shows the number */
+.spec-stepper__node--idle .spec-stepper__circle {
+    border-color: var(--vscode-input-border, #555);
+    color: var(--vscode-descriptionForeground);
+    background: transparent;
+}
+
+/* Active: blue ring + spinner inside, label gets emphasis */
+.spec-stepper__node--active .spec-stepper__circle {
+    border-color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+    background: var(--vscode-editor-background);
+    color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+}
+.spec-stepper__node--active .spec-stepper__label {
+    color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+    font-weight: 600;
+}
+
+/* Completed: green fill + white check */
+.spec-stepper__node--completed .spec-stepper__circle {
+    background: var(--vscode-gitDecoration-addedResourceForeground, #4ec9b0);
+    border-color: var(--vscode-gitDecoration-addedResourceForeground, #4ec9b0);
+    color: var(--vscode-editor-background);
+}
+.spec-stepper__node--completed .spec-stepper__label {
+    color: var(--vscode-gitDecoration-addedResourceForeground, #4ec9b0);
+}
+
+/* Error: red fill + white X */
+.spec-stepper__node--error .spec-stepper__circle {
+    background: var(--vscode-errorForeground, #f48771);
+    border-color: var(--vscode-errorForeground, #f48771);
+    color: var(--vscode-editor-background);
+}
+.spec-stepper__node--error .spec-stepper__label {
+    color: var(--vscode-errorForeground, #f48771);
+    font-weight: 600;
+}
+
+/* ── Connector line between phases ───────────────────────────────── */
+
+.spec-stepper__connector {
+    flex: 1 1 auto;
+    height: 2px;
+    background: var(--vscode-input-border, #555);
+    margin-top: 18px; /* Vertically center against the circle */
+    min-width: 30px;
+    max-width: 80px;
+    transition: background-color 0.3s ease;
+}
+
+.spec-stepper__connector--lit {
+    background: var(--vscode-gitDecoration-addedResourceForeground, #4ec9b0);
+}
+
+/* ── Spinner animation ───────────────────────────────────────────── */
+
+.spec-stepper__spinner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: spec-stepper-spin 1s linear infinite;
+}
+
+@keyframes spec-stepper-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+
+/* ── Error banner (the prominent fix for the silent-failure bug) ── */
+
+.spec-stepper__error {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--vscode-inputValidation-errorBackground, rgba(244, 135, 113, 0.1));
+    border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground, #f48771));
+    border-radius: 6px;
+}
+
+.spec-stepper__error-icon {
+    flex: 0 0 auto;
+    color: var(--vscode-errorForeground, #f48771);
+    font-size: 18px;
+    line-height: 1;
+    margin-top: 2px;
+}
+
+.spec-stepper__error-body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.spec-stepper__error-title {
+    font-weight: 600;
+    color: var(--vscode-errorForeground, #f48771);
+    margin-bottom: 4px;
+    font-size: 13px;
+}
+
+.spec-stepper__error-message {
+    color: var(--vscode-foreground);
+    font-size: 12px;
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+.spec-stepper__error-actions {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.spec-stepper__btn {
+    padding: 5px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid var(--vscode-button-border, transparent);
+    background: var(--vscode-button-secondaryBackground, transparent);
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    transition: background-color 0.15s ease;
+}
+
+.spec-stepper__btn:hover {
+    background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.spec-stepper__btn--primary {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+}
+
+.spec-stepper__btn--primary:hover {
+    background: var(--vscode-button-hoverBackground);
+}
+
+/* ── Responsive: collapse to vertical on narrow widths ───────────── */
+
+@media (max-width: 480px) {
+    .spec-stepper__track {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+    }
+    .spec-stepper__connector {
+        display: none;
+    }
+    .spec-stepper__node {
+        flex-direction: row;
+        justify-content: flex-start;
+        gap: 12px;
+        text-align: left;
+    }
+    .spec-stepper__error {
+        flex-direction: column;
+    }
+    .spec-stepper__error-actions {
+        align-self: flex-end;
+    }
+}

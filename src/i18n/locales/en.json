@@ -114,7 +114,7 @@
   },
   "project": {
     "describe_idea": "Describe your app idea. Attach API docs or reference files to enforce exact payloads.",
-    "start_new": "Start a New Project"
+    "start_new": "Start a New Task"
   },
   "search": {
     "header": "Search Workspace",

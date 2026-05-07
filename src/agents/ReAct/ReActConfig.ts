@@ -17,7 +17,7 @@
 
 import type { ToolDefinition, ChatMessage, ToolCall, AssistantMessage } from '../../llm';
 import type { ToolEventEmitter } from '../toolEventEmitter';
-import type { PreDispatchHook } from '../toolDispatchWithEvents';
+import type { PreDispatchHook, ApprovalHook } from '../toolDispatchWithEvents';
 import type { ToolDispatchResult } from '../toolProtocol';
 
 /**
@@ -197,6 +197,11 @@ export interface ReActConfig {
 
     /** Pre-dispatch hook (security gate). Same shape as dispatchWithEvents. */
     preDispatchHook: PreDispatchHook;
+
+    /** V2.1.2 spec-fix-12 — Bug #1: optional approval hook. When set,
+     *  human approval is required for write_file / edit_file calls
+     *  (gated by AutoPilot state inside the hook itself). */
+    approvalHook?: ApprovalHook;
 
     /** Lifecycle event emitter — if provided, events fire with `eventSource`. */
     emitter?: ToolEventEmitter;

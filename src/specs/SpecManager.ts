@@ -95,6 +95,15 @@ export class SpecManager {
         return vscode.Uri.joinPath(this.nexusDir(), 'hooks');
     }
 
+    /** `<workspace>/.nexus/cache` (V2.1.2 spec-fix-7). Persistent storage for
+     *  derived state that's expensive to recompute — currently the
+     *  traceability matrix (5+ LLM calls per refresh) but additional
+     *  caches may slot in here over time. Auto-created on first write.
+     *  Recommended to gitignore: derived state, not source-of-truth. */
+    cacheDir(): vscode.Uri {
+        return vscode.Uri.joinPath(this.nexusDir(), 'cache');
+    }
+
     /** `<workspace>/.nexus/specs/<slug>` (creates it on disk). */
     async featureDir(featureSlug: string = DEFAULT_FEATURE): Promise<vscode.Uri> {
         const slug = this.slugify(featureSlug);
@@ -156,7 +165,7 @@ export class SpecManager {
     /** Reads tasks.json, returns null if missing or unparseable. */
     async readTasksJson(featureSlug: string = DEFAULT_FEATURE): Promise<any | null> {
         const text = await this.readSafe(this.tasksJsonUri(featureSlug));
-        if (!text) return null;
+        if (!text) { return null; }
         try { return JSON.parse(text); } catch { return null; }
     }
 
@@ -174,9 +183,9 @@ export class SpecManager {
         ]);
 
         const sections: string[] = [];
-        if (product)   sections.push(`### Product\n${product}`);
-        if (structure) sections.push(`### Structure\n${structure}`);
-        if (tech)      sections.push(`### Tech\n${tech}`);
+        if (product) { sections.push(`### Product\n${product}`); }
+        if (structure) { sections.push(`### Structure\n${structure}`); }
+        if (tech) { sections.push(`### Tech\n${tech}`); }
 
         return {
             product, structure, tech,
@@ -234,7 +243,7 @@ export class SpecManager {
         const uri = this.tasksMdUri(featureSlug);
         try {
             let md = await this.readSafe(uri);
-            if (!md) return;
+            if (!md) { return; }
             md = md.replace(`[ ] **${taskDescription}**`, `[x] **${taskDescription}**`);
             md = md.replace(`[ ] ${taskDescription}`, `[x] ${taskDescription}`);
             await vscode.workspace.fs.writeFile(uri, Buffer.from(md, 'utf8'));
@@ -257,7 +266,7 @@ export class SpecManager {
      */
     async readPhaseState(featureSlug: string = DEFAULT_FEATURE): Promise<PhaseState> {
         const text = await this.readSafe(this.phaseStateUri(featureSlug));
-        if (!text) return { ...DEFAULT_PHASE_STATE };
+        if (!text) { return { ...DEFAULT_PHASE_STATE }; }
         try {
             const parsed = JSON.parse(text);
             // Defend against partial / hand-edited files
@@ -342,6 +351,78 @@ export class SpecManager {
         return next;
     }
 
+    // ─── Multi-feature management (V2.1.2 spec-fix-4) ──────────────────
+    //
+    // Until V2.1.2, every operation defaulted to the `'main'` feature
+    // slug because the webview hardcoded it. The data model on disk
+    // already supported per-feature directories; we just had no UI for
+    // selecting between them. listFeatures() walks the specs/ directory
+    // and returns every feature found with its phase status, so the
+    // webview can render a switcher dropdown.
+
+    /**
+     * Public access to the slug normalizer. Useful for the webview's
+     * "preview the on-disk slug while you type the name" affordance —
+     * users see "My Checkout Flow!" become "my-checkout-flow" before
+     * they commit, avoiding surprise.
+     */
+    slugifyName(s: string): string {
+        return this.slugify(s);
+    }
+
+    /**
+     * Check whether a feature slug already exists on disk. Used to
+     * detect duplicate names before we try to create a new feature
+     * (which would silently merge into the existing one).
+     */
+    async featureExists(featureSlug: string): Promise<boolean> {
+        try {
+            const stat = await vscode.workspace.fs.stat(
+                vscode.Uri.joinPath(this.specsDir(), this.slugify(featureSlug))
+            );
+            return stat.type === vscode.FileType.Directory;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * List all feature directories under `.nexus/specs/`, with their
+     * phase state. Returns an empty array when the specs/ directory
+     * doesn't exist yet (fresh workspace).
+     *
+     * Sort order: alphabetical by slug, with `'main'` always first
+     * if present (it's the implicit default and users navigate to
+     * it the most).
+     */
+    async listFeatures(): Promise<{ slug: string; phaseState: PhaseState }[]> {
+        let entries: [string, vscode.FileType][];
+        try {
+            entries = await vscode.workspace.fs.readDirectory(this.specsDir());
+        } catch {
+            // specs/ doesn't exist yet — no features.
+            return [];
+        }
+
+        const dirs = entries
+            .filter(([_name, type]) => type === vscode.FileType.Directory)
+            .map(([name]) => name);
+
+        // Sort: 'main' first, then alphabetical
+        dirs.sort((a, b) => {
+            if (a === DEFAULT_FEATURE) { return -1; }
+            if (b === DEFAULT_FEATURE) { return 1; }
+            return a.localeCompare(b);
+        });
+
+        const out: { slug: string; phaseState: PhaseState }[] = [];
+        for (const slug of dirs) {
+            const phaseState = await this.readPhaseState(slug);
+            out.push({ slug, phaseState });
+        }
+        return out;
+    }
+
     // ─── Internal helpers ───────────────────────────────────────────────
 
     private coerceStatus(s: any): PhaseStatus {
@@ -357,6 +438,10 @@ export class SpecManager {
     }
 
     private slugify(s: string): string {
-        return s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/(^-|-$)/g, '') || DEFAULT_FEATURE;
+        return s.toLowerCase()
+            .replace(/[^a-z0-9-]+/g, '-')
+            .replace(/-+/g, '-')         // V2.1.2 spec-fix-4: collapse multiple dashes
+            .replace(/^-+|-+$/g, '')     // V2.1.2 spec-fix-4: strip ALL leading/trailing
+            || DEFAULT_FEATURE;
     }
 }

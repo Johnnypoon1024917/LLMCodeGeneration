@@ -33,13 +33,14 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.DEFAULT_ENDPOINT = void 0;
+exports.EmptyCompletionError = exports.CHAT_CONTEXT_CHAR_BUDGET = exports.DEFAULT_ENDPOINT = void 0;
 exports.resilientFetch = resilientFetch;
 exports.getLLMConfig = getLLMConfig;
 exports.getThinkingProfile = getThinkingProfile;
 exports.authHeaders = authHeaders;
 exports.safeParseJSON = safeParseJSON;
 exports.determineIntent = determineIntent;
+exports.truncateContextForChat = truncateContextForChat;
 exports.streamChat = streamChat;
 exports.generateRequirements = generateRequirements;
 exports.validateTasksPlan = validateTasksPlan;
@@ -49,6 +50,7 @@ exports.generateTests = generateTests;
 exports.healError = healError;
 exports.generateAtomicEdits = generateAtomicEdits;
 exports.getAvailableModels = getAvailableModels;
+exports.stripThinkingPreamble = stripThinkingPreamble;
 exports.generateDesign = generateDesign;
 exports.generateTasks = generateTasks;
 exports.verifyAgainstSpec = verifyAgainstSpec;
@@ -69,6 +71,7 @@ const RetryManager_1 = require("./infrastructure/RetryManager");
 const RateLimitManager_1 = require("./infrastructure/RateLimitManager");
 const errors_1 = require("./utilities/errors");
 const jsonRequest_1 = require("./llm/jsonRequest");
+const errors_2 = require("./llm/errors");
 const llm_1 = require("./llm");
 const jsonSchemas_1 = require("./llm/jsonSchemas");
 const logger_1 = require("./logger");
@@ -474,6 +477,58 @@ Return JSON: {"intent": "<one of: build, explore, explain, ask>"}`;
         return 'ask';
     }
 }
+/**
+ * Maximum character count for the gathered-context block sent to
+ * streamChat. Calibrated for the Qwen 3.6 27B 32K-token context
+ * window, leaving room for the system prompt (~600 chars), history
+ * (variable), user query (variable), and the response itself.
+ *
+ * 80,000 chars ≈ 20,000-24,000 tokens depending on content (code is
+ * denser per char than prose; English averages ~4 chars/token, code
+ * a bit lower). Past this we silently return 200 + empty completion
+ * on the lab endpoint — not what we want.
+ *
+ * V2.4 (long-context survival) will replace this with proper token
+ * counting via tiktoken or a model-aware tokenizer. Until then this
+ * is the safety net.
+ *
+ * Exported so tests and the chat-context builder can reference the
+ * same constant rather than re-magic-numbering elsewhere.
+ */
+exports.CHAT_CONTEXT_CHAR_BUDGET = 80_000;
+/**
+ * Truncate the gathered-context block to a safe size for the model's
+ * context window. When truncation happens, we insert a visible marker
+ * so the model knows the context was cut — important for accurate
+ * answers ("based on what I can see, X" rather than "X is true",
+ * which becomes a hallucination when the missing piece would have
+ * contradicted X).
+ *
+ * Truncation strategy: keep the head (first 75% of the budget) and
+ * the tail (remaining 25%). Codebases tend to bury the most-relevant
+ * file at unpredictable positions, so a head-only trim would lose
+ * common patterns like "context starts with the README, ends with
+ * the open file the user was looking at".
+ *
+ * Pure function — no I/O — for testability.
+ */
+function truncateContextForChat(contextStr) {
+    if (contextStr.length <= exports.CHAT_CONTEXT_CHAR_BUDGET) {
+        return contextStr;
+    }
+    const headBudget = Math.floor(exports.CHAT_CONTEXT_CHAR_BUDGET * 0.75);
+    const tailBudget = exports.CHAT_CONTEXT_CHAR_BUDGET - headBudget;
+    const head = contextStr.substring(0, headBudget);
+    const tail = contextStr.substring(contextStr.length - tailBudget);
+    const omittedChars = contextStr.length - headBudget - tailBudget;
+    return (head +
+        '\n\n' +
+        '─── [CONTEXT TRUNCATED — ' +
+        omittedChars.toLocaleString() +
+        ' characters omitted to fit context window. The middle of the gathered evidence was cut. If the user\'s question depends on the omitted region, ask them to narrow the scope.] ───' +
+        '\n\n' +
+        tail);
+}
 async function streamChat(prompt, contextStr, history, onToken, abortSignal) {
     // Provider abstraction (Component 1, Session 1):
     // streamChat is now an orchestration layer over `Provider.streamCompletion`.
@@ -511,7 +566,7 @@ You MUST prioritize the "Currently Open Files" and "Directory Tree".
 If the Vector search results (like C, Python, or FFmpeg scripts) completely clash with the open files (like a React/HTML project), IGNORE the Vector results entirely and ONLY explain the actual project files provided.
 
 Always format your response in clean, highly readable Markdown. Use bullet points and code blocks where appropriate.`;
-    const userPrompt = `--- GATHERED CODEBASE CONTEXT ---\n${contextStr}\n\n--- USER QUERY ---\n${prompt}`;
+    const userPrompt = `--- GATHERED CODEBASE CONTEXT ---\n${truncateContextForChat(contextStr)}\n\n--- USER QUERY ---\n${prompt}`;
     const formattedHistory = history.map(msg => {
         // If this is a compacted memory block, inject it as a system prompt!
         if (msg.isCompacted) {
@@ -528,14 +583,48 @@ Always format your response in clean, highly readable Markdown. Use bullet point
     ];
     try {
         const completionOptions = {
-            temperature: 0.3
+            temperature: 0.3,
+            // V2.1.2 spec-fix-15: chat path explicitly excludes the
+            // model's chain-of-thought. The user sees the answer, not
+            // the reasoning trace — same UX as ChatGPT, Claude, etc.
+            excludeReasoning: true
         };
         if (abortSignal) {
             completionOptions.signal = abortSignal;
         }
         const stream = await provider.streamCompletion(messages, completionOptions);
+        // Track whether ANY non-empty token was emitted. The provider can
+        // yield chunks that are empty strings (e.g. trailing-buffer
+        // flushes that parse but carry no content), which would still
+        // count as "got data" if we just incremented a counter — we
+        // want "did the user see any actual text?".
+        //
+        // Why this matters: Qwen 3.6 27B with our 32K context cap has
+        // been observed to return 200 + empty choices on context
+        // overflow. The for-await loop runs zero iterations, the
+        // function returns success, and the user sees the read tools
+        // fire and then nothing. Without this guard, that's how
+        // "Analyzing evidence... [silence]" reports happen.
+        //
+        // We throw a specific EmptyCompletionError rather than logging
+        // a warning, because the caller is the only place that knows
+        // how to surface this to the user (chat UI vs spec UI vs
+        // background audit log). This way callers MUST handle it.
+        let sawAnyTokenContent = false;
         for await (const chunk of stream) {
+            if (chunk && chunk.length > 0) {
+                sawAnyTokenContent = true;
+            }
             onToken(chunk);
+        }
+        if (!sawAnyTokenContent) {
+            // Audit it as an error path even though the network call
+            // itself was 200, because from the user's perspective
+            // this IS a failure.
+            auditPayload.status = 'error';
+            auditPayload.errorMessage = 'Empty completion (zero tokens emitted)';
+            void (0, container_1.getDeps)().audit.logLlmCall(auditPayload);
+            throw new errors_2.EmptyCompletionError('The LLM returned an empty response. This usually means the prompt + context exceeded the model\'s context window, or the model declined to answer. Try a shorter prompt, fewer attached files, or breaking the question into smaller parts.');
         }
     }
     catch (error) {
@@ -553,6 +642,15 @@ Always format your response in clean, highly readable Markdown. Use bullet point
     // routes through this path with a usage callback, we can add them.
     void (0, container_1.getDeps)().audit.logLlmCall(auditPayload);
 }
+/**
+ * Re-exported from src/llm/errors.ts. The class moved to a shared
+ * module so jsonRequest.ts (non-streaming path) can throw the same
+ * class without importing back from llmService.ts (which would create
+ * an import cycle). Existing callers are unchanged: this file still
+ * exposes EmptyCompletionError as a top-level export.
+ */
+var errors_3 = require("./llm/errors");
+Object.defineProperty(exports, "EmptyCompletionError", { enumerable: true, get: function () { return errors_3.EmptyCompletionError; } });
 async function generateRequirements(rawIdea, contextStr = "", abortSignal) {
     const systemPrompt = `You are an elite Staff Product Manager. 
     The user will give you a raw idea. Expand this into a strict, Agile Product Requirements Document (PRD).
@@ -706,7 +804,7 @@ function buildCorrectiveMessage(issues) {
         `Do not return placeholder strings, single spaces, or empty strings for these fields. ` +
         `Each task should describe a concrete file-creation or code-editing action with a real target path.`);
 }
-async function generatePlan(prompt, projectContext) {
+async function generatePlan(prompt, projectContext, scaffoldHint) {
     // Hotfix (post-2B audit): generatePlan was using `aiPlanSchema` /
     // `implementationTaskSchema` which has fields `{id, description,
     // targetFile, instructions}`. The webview (App.tsx) reads
@@ -725,6 +823,48 @@ async function generatePlan(prompt, projectContext) {
     // We also reuse the same `validateTasksPlan` post-validation +
     // one-shot retry pattern as `generateTasks` so empty fields can't
     // slip through here either.
+    const scaffoldGuidance = scaffoldHint
+        ? `
+
+GREENFIELD PROJECT — SCAFFOLDING REQUIRED:
+You are working in an empty (or near-empty) workspace. The user wants a NEW project, not edits to an existing one. Detection confidence: ${scaffoldHint.confidence}${scaffoldHint.stackHint ? `, stack hint: ${scaffoldHint.stackHint}` : ''}.
+
+Your FIRST task in implementationTasks MUST be a scaffolding task. Two options:
+
+OPTION A — Use a shipped template (PREFERRED when one fits):
+${scaffoldHint.availableTemplates.length === 0
+            ? '   No shipped templates match this stack. Use Option B.'
+            : `Available templates (pick the best match):
+${scaffoldHint.availableTemplates.map(t => `   - id: "${t.id}" — ${t.displayName} (${t.description}) — tags: [${t.stackTags.join(', ')}]`).join('\n')}
+
+If one template fits the user's request, emit task[0] like this:
+   {
+     "kind": "scaffold-template",
+     "templateId": "<one of the ids above>",
+     "step": "Scaffold project from <displayName>",
+     "file": "(scaffold)",
+     "detailedInstructions": "Apply the <templateId> template — package.json, tsconfig, src/ skeleton, etc.",
+     "relatedRequirement": "Project bootstrap",
+     "dependencies": [],
+     "verificationRules": ["package.json exists", "src/ directory exists"],
+     "testStrategy": "Verify scaffold files written and project compiles."
+   }`}
+
+OPTION B — LLM-driven scaffolding (when no template fits):
+Emit task[0] like this:
+   {
+     "kind": "scaffold-llm",
+     "step": "Scaffold <stack-name> project from scratch",
+     "file": "(scaffold)",
+     "detailedInstructions": "Create the boilerplate for a <stack> project: <enumerate exact files needed, e.g. Cargo.toml, src/main.rs for Rust>. Include sensible defaults for build config and a 'hello world' entry point.",
+     "relatedRequirement": "Project bootstrap",
+     "dependencies": [],
+     "verificationRules": ["<verify files exist>", "<verify project compiles/runs>"],
+     "testStrategy": "Run <stack-specific> build/test command to verify."
+   }
+
+After the scaffold task, emit code tasks for the user's actual feature request. List the scaffold task's "step" in their dependencies array so they wait for it.`
+        : '';
     const systemPrompt = `You are the Coordinator Agent (Lead Architect).
 Your job is to analyze the user's request and the EXISTING DIRECTORY STRUCTURE, then break it down into atomic tasks.
 YOU DO NOT WRITE THE FINAL CODE. You only generate the blueprint for the Coder Agent.
@@ -753,7 +893,7 @@ CRITICAL RULES:
 - ATOMIC TASKS: Break down "implementationTasks" so EACH task targets ONE file.
 - Every task MUST have non-empty values for "step", "file", and "detailedInstructions".
 - "implementationTasks" MUST contain AT LEAST ONE task. NEVER return an empty array. If you are unsure how to break the request down, produce one well-scoped task targeting the most important file.
-- For new projects (empty directory tree), START with bootstrapping tasks: package.json, tsconfig.json, src/index.tsx, src/App.tsx, etc. Each as a separate task.`;
+- For new projects (empty directory tree), START with bootstrapping tasks: package.json, tsconfig.json, src/index.tsx, src/App.tsx, etc. Each as a separate task.${scaffoldGuidance}`;
     const baseMessages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `EXISTING DIRECTORY STRUCTURE:\n${projectContext}\n\nUSER REQUEST: ${prompt}` }
@@ -902,6 +1042,83 @@ async function getAvailableModels() {
     const fixedModel = (0, container_1.getDeps)().config.get('model') || DEFAULT_MODEL;
     return [fixedModel];
 }
+/**
+ * V2.1.2 spec-redesign-fix: strip the "Here's a thinking process:" /
+ * "Let me analyze this..." prose preamble that Qwen 3.6 27B emits before
+ * the actual structured response. The model is in reasoning mode and
+ * sometimes writes its scratch work into the content channel rather than
+ * the reasoning channel — when that happens, the preamble lands in the
+ * saved spec file and the user sees pages of "1. Analyze User Input..."
+ * before any real content.
+ *
+ * Heuristic: find the first occurrence of the genuine content start —
+ * a YAML frontmatter `---` opener, a top-level markdown heading (`# `),
+ * or the first XML structural tag the prompt asked for. Strip everything
+ * before that marker. If no marker is found, return the input unchanged
+ * (legitimate plain-prose responses aren't ours to truncate).
+ *
+ * Conservative by design: false negatives (preamble survives) are
+ * cosmetic; false positives (real content stripped) corrupt the spec.
+ * We only strip when we can clearly identify the structural start.
+ *
+ * Pure function for testability — no I/O.
+ */
+function stripThinkingPreamble(text) {
+    if (typeof text !== 'string' || text.length === 0) {
+        return text;
+    }
+    // Markers we look for, in priority order. Each must be at line start
+    // (`^` plus newline-handling) so we don't false-match inside prose.
+    // Order matters when multiple markers exist; we want the EARLIEST one.
+    const markers = [
+        /(^|\n)---\n/, // YAML frontmatter
+        /(^|\n)# [A-Z]/, // Top-level markdown heading
+        /(^|\n)<architecture_components>/i, // Design XML markers
+        /(^|\n)<data_models>/i,
+        /(^|\n)<er_diagram>/i,
+        /(^|\n)<business_interaction>/i,
+        /(^|\n)<api_routes>/i,
+        /(^|\n)<tasks>/i, // Tasks XML
+        /(^|\n)<task /i,
+        /(^|\n)<epic /i, // Requirements XML
+        /(^|\n)<story /i,
+    ];
+    let earliestMatch = -1;
+    let earliestMatchPrefix = 0; // length of the leading newline we matched
+    for (const re of markers) {
+        const m = re.exec(text);
+        if (m && m.index !== undefined) {
+            // m.index points to the start of the match (the optional newline);
+            // the actual content starts after the leading newline (if any).
+            const prefixLen = m[1] === '\n' ? 1 : 0;
+            const contentStart = m.index + prefixLen;
+            if (earliestMatch === -1 || contentStart < earliestMatch) {
+                earliestMatch = contentStart;
+                earliestMatchPrefix = prefixLen;
+            }
+        }
+    }
+    // No structural marker found — return unchanged. Better to leave a
+    // noisy spec than to mangle a clean one.
+    if (earliestMatch === -1) {
+        return text;
+    }
+    // Sanity check: if the marker is at position 0, there's nothing to
+    // strip. Don't bother allocating a substring.
+    if (earliestMatch === 0) {
+        return text;
+    }
+    // Sanity check 2: if the "preamble" we'd strip is shorter than 50
+    // chars, it's probably whitespace or a brief note — not a thinking
+    // trace. Leave it alone to avoid eating actual content.
+    if (earliestMatch < 50) {
+        return text;
+    }
+    return text.substring(earliestMatch);
+    // (earliestMatchPrefix is captured for symmetry but unused — we
+    // already include the marker in the substring start position.)
+    void earliestMatchPrefix;
+}
 async function generateDesign(requirements, abortSignal) {
     const systemPrompt = `You are an elite FAANG Software Architect.
 Analyze the provided PRD and design a highly scalable System Architecture.
@@ -936,12 +1153,53 @@ Example:
 
 <er_diagram>
 ## Entity-Relationship (ER) Diagram
-(Use Mermaid.js \`erDiagram\` syntax to map out the database relations. Wrap it in a \`\`\`mermaid code block.)
+(Use Mermaid.js \`erDiagram\` syntax to map out the database relations. Wrap it in a \`\`\`mermaid code block.
+
+VALID erDiagram skeleton — follow this exact shape:
+\`\`\`mermaid
+erDiagram
+    USER ||--o{ ORDER : places
+    USER {
+        uuid id PK
+        string email
+    }
+    ORDER {
+        uuid id PK
+        uuid user_id FK
+    }
+\`\`\`
+Cardinality symbols: ||--o{ (one to many), ||--|| (one to one), }o--o{ (many to many).
+NO flowchart arrows. NO comments inside attribute lists.)
 </er_diagram>
 
 <business_interaction>
 ## Business Interaction Flow
-(Use Mermaid.js \`sequenceDiagram\` syntax to show the core business logic and system interactions. Wrap it in a \`\`\`mermaid code block.)
+(Use Mermaid.js \`sequenceDiagram\` syntax to show the core business logic and system interactions. Wrap it in a \`\`\`mermaid code block.
+
+VALID sequenceDiagram skeleton — follow this exact shape:
+\`\`\`mermaid
+sequenceDiagram
+    participant User
+    participant API
+    participant DB
+    User->>API: POST /book
+    API->>DB: INSERT booking
+    DB-->>API: ok
+    alt Recurrence requested
+        API->>DB: INSERT recurrence_rule
+        DB-->>API: ok
+    else One-off booking
+        Note over API: skip recurrence
+    end
+    API-->>User: 201 Created
+\`\`\`
+
+CRITICAL syntax rules — these are the common parse errors:
+1. \`alt\` / \`else\` / \`end\` MUST appear as a triplet. Every \`else\` requires a preceding \`alt\` on its own line. Every \`alt\` block must be closed with \`end\`.
+2. Lines inside alt/else blocks MUST be valid sequenceDiagram statements (participant references, arrows like ->>, -->>, or \`Note over X: text\`).
+3. Use sequenceDiagram arrows ONLY: ->> (sync), -->> (return), -x (failure). Do NOT use flowchart arrows (-> or -->) — they'll cause parse errors.
+4. \`participant Name\` declarations go at the top, before any arrows.
+5. Indent consistently (4 spaces). Mermaid is whitespace-sensitive in some contexts.)
 </business_interaction>
 
 <api_routes>
@@ -967,7 +1225,7 @@ Example:
         { role: 'system', content: systemPrompt },
         { role: 'user', content: `Requirements:\n${requirements}` }
     ], completionOptions);
-    return fullDesign.trim();
+    return stripThinkingPreamble(fullDesign.trim());
 }
 async function generateTasks(requirements, design, existingStructure, abortSignal, 
 /** P1.2: project-specific steering rules injected into the planner's

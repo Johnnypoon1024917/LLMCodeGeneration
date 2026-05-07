@@ -1,8 +1,90 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from 'react';
 import { useTranslation } from 'react-i18next';
 import './App.css';
-import ReactMarkdown from 'react-markdown';
+// V2.1.2 spec-fix-9: ReactMarkdown wrapper with GFM (tables, task lists,
+// strikethrough, autolinks) and inline mermaid rendering.
+//
+// Why a wrapper instead of editing each call site: there are 4
+// <ReactMarkdown> invocations across this file (chat task reasoning,
+// requirements display × 2, design display). All of them want the
+// same plugins. Pre-configuring at import time means we never forget
+// to pass them.
+//
+// The `components` prop overrides default element renderers. We only
+// override `code` to detect language=mermaid and route to MermaidBlock;
+// everything else falls through to the default. Other code blocks
+// (no language, language-typescript, etc.) still render as ordinary
+// preformatted code.
+import BaseReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { MermaidBlock } from './components/MermaidBlock';
+
+// Wrapper that pre-applies remarkGfm + the mermaid code-block override.
+// Identical API to ReactMarkdown — drop-in replacement at every call site.
+function ReactMarkdown({ children }: { children: string }) {
+    return (
+        <BaseReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+                code(props) {
+                    // ReactMarkdown's `code` prop signature:
+                    //   inline?: boolean       — true for `inline`, false for fenced
+                    //   className?: string     — `language-X` for fenced blocks
+                    //   children?: ReactNode   — the code content
+                    // We narrow these manually because react-markdown's
+                    // typings have shifted across versions and a strict
+                    // signature couples us tightly to one minor.
+                    const { className, children: codeChildren, ...rest } = props as {
+                        inline?: boolean;
+                        className?: string;
+                        children?: React.ReactNode;
+                    };
+                    const isInline = (props as { inline?: boolean }).inline;
+                    const code = String(codeChildren ?? '').replace(/\n$/, '');
+
+                    if (!isInline && className === 'language-mermaid') {
+                        return <MermaidBlock chart={code} />;
+                    }
+
+                    // Default rendering for everything else (inline code,
+                    // other language blocks, no-language fences). Preserve
+                    // any extra props the caller might have set.
+                    return (
+                        <code className={className} {...rest}>
+                            {codeChildren}
+                        </code>
+                    );
+                },
+            }}
+        >
+            {children}
+        </BaseReactMarkdown>
+    );
+}
 import { advanceAutonomyQueue, buildInitialAutonomyQueue } from './autonomyQueue';
+// V2.1.2b — scaffold confirmation flow. State machine + dialog
+// component live separately so the rules (when to dialog, when to
+// submit) are unit-tested without React. App.tsx just wires React
+// state to the reducer's side-effect flags.
+import {
+    reduceScaffoldDecision,
+    initialScaffoldDecisionState,
+    type ScaffoldDecisionState,
+    type ScaffoldDecisionAction,
+    type CapturedPayload,
+} from './scaffoldDecisionState';
+import ScaffoldConfirmationDialog from './components/ScaffoldConfirmationDialog';
+import { SpecStepper, type SpecStepperPhase } from './components/SpecStepper';
+import { TimelineView } from './timeline/TimelineView';
+import { AttachmentPreview } from './components/AttachmentPreview';
+import { extractPdfText } from './utils/pdfExtract';
+import { buildAttachmentContext, type SpecAttachment } from './utils/attachmentTypes';
+import {
+    buildImporterIndex,
+    buildNodeContext,
+    type CodeGraphContextView,
+    type WorkspaceGraphData,
+} from './codeGraphContext';
 import {
     aggregateThinkingState,
     bulkToggleFromState,
@@ -53,7 +135,11 @@ import { CommandCard } from './components/CommandCard';
 import { WorkingBar } from './components/WorkingBar';
 // Component 2B-4: tool-call card rendering and state management.
 import { ToolCallCard } from './components/ToolCallCard';
+import { ReadActivityGroup, partitionReadActivity } from './components/ReadActivityGroup';
 import { HookFireCard } from './components/HookFireCard';
+import { ToolApprovalCard, type ToolApprovalRequest } from './components/ToolApprovalCard';
+import { FixApplicationCard } from './components/FixApplicationCard';
+import { CrossTaskRegressionBanner, type RemediationTaskPayload } from './components/CrossTaskRegressionBanner';
 import { applyToolEvent, type ToolCallState, type ToolLifecycleEvent } from './toolEvents';
 import { applyHookEvent, sortedHookFires, type HookFireState, type HookLifecycleEvent } from './hookEvents';
 import {
@@ -101,6 +187,102 @@ let chatTokenBuffer = "";
 let lastChatUpdate = Date.now();
 let reasoningTokenBuffer = "";
 let lastReasoningUpdate = Date.now();
+
+/**
+ * V2.1.2 spec-fix-12 — Bug #2: collapse runs of 3+ consecutive newlines
+ * to exactly 2 (paragraph spacing) so streamed assistant messages don't
+ * render with sprawling vertical whitespace.
+ *
+ * V2.1.2 spec-fix-14: also strip empty list items. Models with a
+ * "thinking" preamble often emit lines like "- " or "* " or "1. " with
+ * no content — markdown renders these as empty <li> elements that each
+ * take a full line of vertical space. The screenshot showed paragraph-
+ * level cleanup wasn't enough because the gaps were coming from these
+ * blank bullets, not from raw newline runs.
+ *
+ * Inside fenced code blocks (```…```) the content is preserved verbatim
+ * because Python / YAML / Makefiles / shell heredocs all care about
+ * blank-line semantics. The split regex matches the full fenced block
+ * (opening ``` on its own line through closing ``` on its own line), so
+ * we can collapse the OUTSIDE regions and leave the INSIDE alone.
+ *
+ * Idempotent: applying twice produces the same result.
+ */
+export function collapseExcessBlankLines(text: string): string {
+    const cleanOutside = (s: string): string => {
+        // Step 1: strip empty list items. Match any indentation, then a
+        // bullet/number marker, then optional whitespace, then end-of-
+        // line. We require the line to contain ONLY the marker + whitespace.
+        //
+        //   "- "                  → empty bullet, drop
+        //   "  * "                → indented empty bullet, drop
+        //   "1. "                 → empty numbered item, drop
+        //   "- foo"               → has content, KEEP
+        //   "  -"                 → marker only, no trailing space, drop
+        //   "    "                → whitespace-only line, leave for newline collapse
+        const emptyListItemRe = /^[ \t]*(?:[-*+]|\d+\.)[ \t]*$/gm;
+        let cleaned = s.replace(emptyListItemRe, '');
+        // Step 2: collapse runs of 3+ newlines (which step 1 may have
+        // increased by leaving bare newlines where bullets used to be).
+        cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+        return cleaned;
+    };
+
+    // Match a fenced code block: ```optional-lang\n…\n```
+    // Non-greedy on the inner content, anchored on backtick lines.
+    const fenceRe = /```[^\n]*\n[\s\S]*?\n```/g;
+    let out = "";
+    let lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = fenceRe.exec(text)) !== null) {
+        const before = text.slice(lastIndex, m.index);
+        out += cleanOutside(before);
+        out += m[0]; // fence content unchanged
+        lastIndex = m.index + m[0].length;
+    }
+    const tail = text.slice(lastIndex);
+    out += cleanOutside(tail);
+    return out;
+}
+
+/**
+ * V2.1.2 spec-redesign helper: read a File as a base64 data URL.
+ * Used for image attachments where we want to render an inline preview
+ * without copying the file to disk. Wrapper around FileReader because
+ * its API is event-based; we want a Promise.
+ */
+function readAsDataURL(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            if (typeof reader.result === 'string') {
+                resolve(reader.result);
+            } else {
+                reject(new Error('FileReader returned non-string result'));
+            }
+        };
+        reader.onerror = () => reject(reader.error ?? new Error('FileReader failed'));
+        reader.readAsDataURL(file);
+    });
+}
+
+/**
+ * V2.1.2 spec-fix-4: client-side slug preview. Mirrors the host's
+ * SpecManager.slugify() so users see the on-disk slug live as they
+ * type. Critical to match exactly — if these diverge, the user sees
+ * one thing in the input and a different thing in the file system.
+ *
+ * Rules: lowercase, replace any run of non-alphanumeric chars with
+ * a single dash, strip leading/trailing dashes. Empty result becomes
+ * 'main' to match the host's fallback.
+ */
+function slugifyForPreview(s: string): string {
+    return s.toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/-+/g, '-')         // V2.1.2 spec-fix-4: collapse multiple dashes
+        .replace(/^-+|-+$/g, '')     // V2.1.2 spec-fix-4: strip ALL leading/trailing
+        || 'main';
+}
 
 // Exported for unit testing. Used internally by App() but the function
 // is pure and string-shaped so it's testable in isolation.
@@ -185,7 +367,7 @@ export const cleanTraceabilityTags = (text: string) => {
         cleaned = cleaned.replace(/<description>([^<]+)<\/description>/gi, '\n> $1\n\n');
 
         // 6. Strip all REMAINING invisible structural matrix tags
-        cleaned = cleaned.replace(/<\/?(epic|story|criteria|metadata|target_audience|nfr_list|architecture_components|data_models|api_routes|folder_structure|tasks|task|instructions)[^>]*>/gi, '');
+        cleaned = cleaned.replace(/<\/?(epic|story|criteria|metadata|target_audience|nfr_list|architecture_components|data_models|er_diagram|business_interaction|api_routes|folder_structure|tasks|task|instructions)[^>]*>/gi, '');
 
         // 7. Enforce strict Markdown spacing (fixes ReactMarkdown choking on lists)
         cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
@@ -205,6 +387,12 @@ interface ProjectTask {
     file: string;
     detailedInstructions: string;
     relatedRequirement: string;
+    // V2.1.3: optional scaffold-task discriminator. Mirrors the host
+    // ProjectTask shape. Webview reads this to flag scaffold tasks
+    // distinctly in the plan card and to pass kind/templateId through
+    // executeTask dispatch.
+    kind?: 'code' | 'scaffold-template' | 'scaffold-llm';
+    templateId?: string;
 }
 
 interface AIPlan {
@@ -218,11 +406,148 @@ interface Message {
     plan?: AIPlan;
     attachments?: AttachedContext[];
     isCompacted?: boolean;
+    // V2.1.2 spec-fix-10 P5.2: explore-mode tracking.
+    // Set when this assistant message was streamed in response to an
+    // intent === 'explore' user prompt. Used to render the
+    // "Apply this fix" button below the message and to send the
+    // original prompt + this response back to the host on click.
+    intent?: 'build' | 'explore' | 'explain' | 'ask';
+    originalPrompt?: string;
+    // Tracks whether the user has already clicked Apply Fix on this
+    // message — once clicked, we hide the button to prevent
+    // double-firing (could otherwise create two parallel build tasks
+    // for the same diagnosis).
+    fixApplied?: boolean;
+    // V2.1.2 spec-fix-13: when this message is the SYNTHESIZED user
+    // prompt that Apply Fix posts (the "re-feed"), these fields hold
+    // the parts so the bubble renders compactly instead of dumping
+    // the whole 19KB synthesized prompt. Absent on regular user msgs.
+    isFixApplication?: boolean;
+    fixApplicationOriginalPrompt?: string;
+    fixApplicationDiagnosisLength?: number;
 }
 
 interface AttachedContext { file: string; code: string; language: string; }
 interface AtomicEdit { filepath: string; code: string; action: 'replace' | 'append' | 'inject'; target?: string; }
 interface AgentStep { type: string; description: string; details?: string; }
+
+// V2.1.2 spec-fix-10 P5.2: heuristic — does this explore-mode response
+// describe a concrete fix we could apply, or is it diagnosis-only?
+//
+// Two signals required (both must be true):
+//   1. At least one fenced code block — `\`\`\`...\`\`\``
+//      Without code, the model is just describing the problem, not
+//      proposing a patch.
+//   2. At least one file-path mention — `index.html`, `src/app.ts`,
+//      backtick-wrapped paths, etc.
+//      Without a file reference, we don't know what to edit.
+//
+// Both deliberately conservative. We hide the button when in doubt
+// rather than hand the user a button that triggers a build task on
+// thin evidence. Build tasks are expensive and visible — false
+// positives would erode trust in the affordance.
+function isActionableExploreFix(content: string): boolean {
+    if (!content || typeof content !== 'string') { return false; }
+
+    // Fenced code block: triple-backtick anywhere, with at least
+    // some content after it. Empty fences (``` ```) don't count.
+    const hasCodeBlock = /```[\s\S]+?```/.test(content);
+    if (!hasCodeBlock) { return false; }
+
+    // File path: either backtick-wrapped paths (`src/foo.ts`) or
+    // bare path-like tokens with common extensions. The extension
+    // list captures the languages we'd realistically generate code
+    // for; expand if customers ship in less-common stacks.
+    const FILE_PATH_RE = /(?:`[^`]*\.(?:ts|tsx|js|jsx|py|go|java|rs|vue|svelte|html|css|md|json|yaml|yml|sh|sql)[^`]*`)|(?:\b[\w/.-]+\.(?:ts|tsx|js|jsx|py|go|java|rs|vue|svelte|html|css|md|json|yaml|yml|sh|sql)\b)/i;
+    return FILE_PATH_RE.test(content);
+}
+
+interface ApplyFixCardProps {
+    originalPrompt: string;
+    exploreResponse: string;
+    autoApply: boolean;
+    onApply: (source: 'button' | 'auto') => void;
+}
+
+/**
+ * V2.1.2 spec-fix-10 P5.2: Apply this fix card.
+ *
+ * Two visual modes depending on the autoApply prop:
+ *
+ *   autoApply=false (default) — static "Apply this fix" button.
+ *      User clicks → onApply('button') → host fires a build task.
+ *
+ *   autoApply=true (opt-in setting) — countdown card.
+ *      Shows "Auto-applying in 3… 2… 1…" with a Cancel button.
+ *      Auto-fires onApply('auto') when countdown reaches 0.
+ *      Cancel stops the timer and falls back to the static button
+ *      (in case the user changes their mind about cancelling).
+ *
+ * The component lives only as long as msg.fixApplied stays false.
+ * Once fired, the parent sets fixApplied=true and unmounts this card
+ * — preventing double-fires.
+ */
+function ApplyFixCard({ originalPrompt: _originalPrompt, exploreResponse: _exploreResponse, autoApply, onApply }: ApplyFixCardProps) {
+    // Suppress unused-prop warnings — these are the source of truth
+    // for the apply payload but the card itself doesn't need to
+    // display them. The parent reads them when calling onApply.
+    void _originalPrompt;
+    void _exploreResponse;
+
+    // Countdown state — only meaningful when autoApply is true.
+    const [secondsLeft, setSecondsLeft] = useState<number>(3);
+    const [cancelled, setCancelled] = useState<boolean>(false);
+
+    useEffect(() => {
+        if (!autoApply || cancelled) { return; }
+
+        if (secondsLeft <= 0) {
+            // Countdown complete — fire the auto-apply.
+            onApply('auto');
+            return;
+        }
+
+        const timer = setTimeout(() => {
+            setSecondsLeft(s => s - 1);
+        }, 1000);
+
+        return () => clearTimeout(timer);
+    }, [autoApply, cancelled, secondsLeft, onApply]);
+
+    // Static button mode (autoApply off, OR user cancelled the countdown).
+    if (!autoApply || cancelled) {
+        return (
+            <div className="nexus-apply-fix-card">
+                <div className="nexus-apply-fix-label">
+                    💡 The diagnosis above includes a concrete fix.
+                </div>
+                <button
+                    className="nexus-apply-fix-button"
+                    onClick={() => onApply('button')}
+                    title="Route this diagnosis through the build pipeline as a coded fix"
+                >
+                    Apply this fix
+                </button>
+            </div>
+        );
+    }
+
+    // Countdown mode (autoApply on, not cancelled).
+    return (
+        <div className="nexus-apply-fix-card nexus-apply-fix-card-auto">
+            <div className="nexus-apply-fix-label">
+                ⚡ Auto-applying in {secondsLeft}…
+            </div>
+            <button
+                className="nexus-apply-fix-button-cancel"
+                onClick={() => setCancelled(true)}
+                title="Cancel the auto-apply. Falls back to manual button."
+            >
+                Cancel
+            </button>
+        </div>
+    );
+}
 
 /**
  * Icon registry. Wraps Lucide icons in <span> nodes so consumers can drop them
@@ -288,6 +613,22 @@ export default function App() {
     const [activeMapType, setActiveMapType] = useState<'codeMap' | 'reqMap' | 'combinedMap'>('combinedMap');
     const [isGraphLoading, setIsGraphLoading] = useState<boolean>(false);
 
+    // V2.1.2 spec-fix-6: per-spec filter for the matrix views.
+    //
+    // When the workspace has multiple specs, the reqMap and combinedMap can
+    // get noisy fast — 5 specs × 8 epics = 40 nodes plus criteria, plus
+    // file-level edges from each. The filter lets the user hide specs they
+    // don't want to look at right now without re-running LLM calls (the
+    // host already aggregated everything; we filter the rendered nodes
+    // webview-side).
+    //
+    // null = "all specs visible" (default + when there's only one spec,
+    // the dropdown stays hidden). A Set<string> holds the slugs the user
+    // explicitly chose to include. We use Set for O(1) lookups inside
+    // the visualGraphData filter.
+    const [selectedSpecSlugs, setSelectedSpecSlugs] = useState<Set<string> | null>(null);
+    const [showSpecFilterMenu, setShowSpecFilterMenu] = useState<boolean>(false);
+
     const [globalTokens, setGlobalTokens] = useState({ prompt: 0, completion: 0 });
     const [taskTokens, setTaskTokens] = useState<Record<string, { prompt: number, completion: number }>>({});
 
@@ -296,6 +637,28 @@ export default function App() {
     // carries one). The reducer in toolEvents.ts handles created/updated
     // semantics. Cards are filtered + rendered by taskId matching.
     const [toolCallState, setToolCallState] = useState<Map<string, ToolCallState>>(new Map());
+    // V2.1.2 spec-fix-12 — Bug #1: pending approval requests, keyed by
+    // callId. Populated when host posts `requestToolApproval`; cleared
+    // either when the user clicks Approve/Reject (we post the response
+    // back, the host resolves its pending promise, dispatch completes,
+    // and the toolCallCompleted event fires) or when the corresponding
+    // tool call lands in toolCallState as completed (covers the
+    // edge case where the approval was bypassed by AutoPilot mid-flight).
+    const [pendingApprovals, setPendingApprovals] = useState<Map<string, ToolApprovalRequest>>(new Map());
+
+    // V2.2 cross-task remediation: when the host detects new tsc
+    // errors after a task, it posts crossTaskRegression. We render a
+    // banner inline. List (not Map) because each banner is keyed on
+    // sourceTaskKey + a per-event id; we rarely see more than 1-2
+    // open at once.
+    const [crossTaskRegressions, setCrossTaskRegressions] = useState<Array<{
+        id: string;
+        sourceTaskKey: string;
+        newErrorCount: number;
+        attributable: boolean;
+        summary: string;
+        remediationTask?: RemediationTaskPayload;
+    }>>([]);
     // P1.4: hook fires state. Keyed by hookFireId. The reducer in
     // hookEvents.ts handles created/updated semantics. Cards render
     // inline in the chat thread, sorted by start time.
@@ -349,7 +712,7 @@ export default function App() {
         currentStateRef.current = { messages, taskSteps, taskReasoning };
     }, [messages, taskSteps, taskReasoning]);
 
-    const [activeTab, setActiveTab] = useState<'coder' | 'builder' | 'rules' | 'Map'>('coder');
+    const [activeTab, setActiveTab] = useState<'coder' | 'builder' | 'rules' | 'Map' | 'timeline'>('coder');
     const [nexusRules, setNexusRules] = useState<string>('');
     const [requirements, setRequirements] = useState<string>('');
     // Phase-gate state (audit §11). null until first initState payload arrives.
@@ -365,6 +728,116 @@ export default function App() {
     const [isGeneratingDesign, setIsGeneratingDesign] = useState(false);
     const [isEditingDesign, setIsEditingDesign] = useState(false);
     const [isGeneratingTasks, setIsGeneratingTasks] = useState(false);
+
+    // V2.1.2 spec-redesign: Stepper-related state.
+    //
+    // specError: the EmptyCompletionError or other failure surfaced from
+    // the host. Sticks until the user retries or dismisses (no longer
+    // gets blown away by generationFailed reverting the UI).
+    //
+    // specAttachments: list of TextAttachment / PdfAttachment / ImageAttachment.
+    // Replaces the prior single-string attachment context with a structured
+    // list so the preview can show per-file metadata and badges.
+    const [specError, setSpecError] = useState<{ phase: 'requirements' | 'design' | 'tasks'; title: string; message: string } | null>(null);
+    const [specAttachments, setSpecAttachments] = useState<SpecAttachment[]>([]);
+    const specFileInputRef = useRef<HTMLInputElement>(null);
+
+    // V2.1.2 spec-fix-4: multi-feature state.
+    //
+    // currentFeature mirrors the host's _currentFeature. Set initially
+    // from initState's currentFeature field (defaults to 'main' for
+    // existing users who never explicitly created another feature).
+    //
+    // featureList caches the host's view of all features in the workspace.
+    // Refreshed on initState and on featureChanged messages.
+    //
+    // featureNameInput is what the user types in the empty-state name field.
+    // The slugified preview is displayed live as they type. Empty string
+    // means "use the current feature's name" (fresh install: 'main').
+    const [currentFeature, setCurrentFeature] = useState<string>('main');
+    const [featureList, setFeatureList] = useState<{ slug: string; phaseState: any }[]>([]);
+    const [featureNameInput, setFeatureNameInput] = useState<string>('');
+    const [showFeatureSwitcher, setShowFeatureSwitcher] = useState<boolean>(false);
+    // V2.2 hotfix: Save & New Project dialog state. The dialog
+    // prompts the user for a feature name; on submit we post
+    // createFeature to the host. The current feature's content stays
+    // intact on disk — just the active feature pointer switches.
+    const [showSaveNewProjectDialog, setShowSaveNewProjectDialog] = useState<boolean>(false);
+    const [saveNewProjectName, setSaveNewProjectName] = useState<string>('');
+
+    // P3.1 timeline tab state. Events come in via a 'timelineEvents'
+    // host message after the user clicks Refresh (or initial mount).
+    // The TimelineView reduces them into a TimelineModel for display.
+    // We keep raw events in App-level state so the view can re-render
+    // without re-fetching when expanding/collapsing.
+    const [timelineEvents, setTimelineEvents] = useState<{ type: string; [k: string]: unknown }[] | null>(null);
+    const [timelineLoading, setTimelineLoading] = useState<boolean>(false);
+    const [featureChangeError, setFeatureChangeError] = useState<string>('');
+
+    /**
+     * Process files dropped from the OS file picker into spec attachments.
+     * Three branches by MIME type:
+     *   - text/* and known code MIMEs → TextAttachment (raw text content)
+     *   - application/pdf → PdfAttachment (text extracted via pdfjs)
+     *   - image/* → ImageAttachment (preview only, NOT sent to LLM)
+     *
+     * Failures (e.g. corrupted PDF) surface as specError so the user
+     * sees them — silent skips are worse than honest errors.
+     */
+    const handleSpecFiles = async (files: FileList | null) => {
+        if (!files || files.length === 0) { return; }
+        const newAttachments: SpecAttachment[] = [];
+
+        for (const file of Array.from(files)) {
+            try {
+                if (file.type.startsWith('image/')) {
+                    const dataUrl = await readAsDataURL(file);
+                    newAttachments.push({
+                        kind: 'image',
+                        name: file.name,
+                        dataUrl,
+                        mimeType: file.type,
+                        sizeBytes: file.size,
+                    });
+                } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+                    const buffer = await file.arrayBuffer();
+                    const result = await extractPdfText(buffer);
+                    newAttachments.push({
+                        kind: 'pdf',
+                        name: file.name,
+                        extractedText: result.text,
+                        pageCount: result.pageCount,
+                        hasExtractableText: result.hasExtractableText,
+                        thumbnailDataUrl: '', // First-page render is heavier; deferred for now
+                    });
+                } else {
+                    // Treat everything else as text. Browsers can read most
+                    // text files even when MIME is missing or generic.
+                    const content = await file.text();
+                    newAttachments.push({
+                        kind: 'text',
+                        name: file.name,
+                        content,
+                    });
+                }
+            } catch (e) {
+                setSpecError({
+                    phase: 'requirements',
+                    title: `Could not read "${file.name}"`,
+                    message: e instanceof Error ? e.message : String(e),
+                });
+            }
+        }
+
+        if (newAttachments.length > 0) {
+            setSpecAttachments(prev => [...prev, ...newAttachments]);
+        }
+
+        // Reset the input so the same file can be re-uploaded if needed
+        if (specFileInputRef.current) {
+            specFileInputRef.current.value = '';
+        }
+    };
 
     const [activePlan, setActivePlan] = useState<AIPlan | null>(null);
 
@@ -401,6 +874,57 @@ export default function App() {
     const [graphDims, setGraphDims] = useState({ width: 800, height: 600 });
 
     const [isAutopilot, setIsAutopilot] = useState(false);
+    // V2.1.2 spec-fix-10 P5.2: separate toggle for explore-mode auto-apply.
+    // Independent from isAutopilot (which is bash-confirmation skipping)
+    // because the two operations have different blast radii — bash skip
+    // affects only the in-flight task, auto-apply expands the surface
+    // where edits can originate from "I asked a question."
+    // Default false matches the regulated-industry positioning.
+    const [autoApplyExploreFixes, setAutoApplyExploreFixes] = useState(false);
+
+    // ─── V2.1.2b: scaffold confirmation flow ──────────────────────────
+    //
+    // When the user submits a chat or PRD prompt, we run a scaffold
+    // pre-check first: ask the host "is this greenfield?", and if yes
+    // show a dialog to pick a starter template before we let the
+    // agent begin generating. The reducer in scaffoldDecisionState.ts
+    // owns the rules (when to dialog, when to submit, when to drop
+    // the prompt entirely on cancel). This component just executes
+    // the side effects the reducer asks for.
+    const [scaffoldState, setScaffoldState] =
+        useState<ScaffoldDecisionState>(initialScaffoldDecisionState);
+
+    // Single dispatcher — every action goes through here. After
+    // reducing, we (a) commit the new state, (b) execute the side
+    // effects flagged in the step output. Keeping this in one place
+    // means we never forget to e.g. post the original payload after
+    // an ack — the reducer tells us to.
+    const dispatchScaffoldAction = (action: ScaffoldDecisionAction): void => {
+        setScaffoldState(prev => {
+            const step = reduceScaffoldDecision(prev, action);
+
+            if (step.shouldRequestScaffoldCheck && step.state.capturedPayload) {
+                const promptText = typeof step.state.capturedPayload['text'] === 'string'
+                    ? step.state.capturedPayload['text'] as string
+                    : '';
+                vscode.postMessage({
+                    type: 'requestScaffoldDecision',
+                    prompt: promptText,
+                });
+            }
+
+            if (step.shouldSubmitOriginal && prev.capturedPayload) {
+                // Route the captured payload back to the host. The
+                // payload's 'type' field is whatever the original
+                // submit handler wanted (processUserMessage,
+                // generateRequirements, etc.) so we just post it
+                // through verbatim.
+                vscode.postMessage(prev.capturedPayload);
+            }
+
+            return step.state;
+        });
+    };
 
     // ─── Execution mode (V2 phase) ─────────────────────────────────────
     //
@@ -465,7 +989,12 @@ export default function App() {
     // handler, which would close over a stale state value. A ref
     // gives the handler the always-current snapshot. We don't render
     // off these values; we only read them inside event callbacks.
-    const taskDescriptorsRef = useRef<Record<string, { taskTitle: string; prompt: string }>>({});
+    const taskDescriptorsRef = useRef<Record<string, {
+        taskTitle: string;
+        prompt: string;
+        kind?: 'code' | 'scaffold-template' | 'scaffold-llm';
+        templateId?: string;
+    }>>({});
 
     const [sessions, setSessions] = useState<{ id: string, name: string }[]>([{ id: '1', name: 'New Session' }]);
     const [activeSessionId, setActiveSessionId] = useState('1');
@@ -604,14 +1133,136 @@ export default function App() {
             });
         });
 
+        // V2.1.2 spec-fix-6: per-spec filter. When the user has hidden
+        // some specs via the toolbar dropdown, drop nodes belonging to
+        // those specs + the edges that would orphan as a result.
+        //
+        // Codepath conditions:
+        //  - Only applies to reqMap and combinedMap (codeMap doesn't
+        //    have a per-spec dimension; every code file is workspace-
+        //    wide regardless of which spec it serves).
+        //  - Only applies when selectedSpecSlugs is non-null (null = the
+        //    "show all" default; no filtering needed).
+        //
+        // Slug detection: prefixed nodes look like "checkout-flow::EPIC-04".
+        // We split on "::" and treat the first segment as the slug. Nodes
+        // without "::" (raw file paths, task nodes that pre-date prefix
+        // slugging) are kept regardless — they're spec-agnostic in nature.
+        const filterBySpec = selectedSpecSlugs !== null && (activeMapType === 'reqMap' || activeMapType === 'combinedMap');
+        if (filterBySpec) {
+            const allowed = selectedSpecSlugs as Set<string>;
+            const keptNodeIds = new Set<string>();
+            const filteredNodes = nodes.filter(n => {
+                const idx = n.id.indexOf('::');
+                if (idx < 0) {
+                    // No slug prefix — always keep (code files, generic tasks).
+                    keptNodeIds.add(n.id);
+                    return true;
+                }
+                const slug = n.id.substring(0, idx);
+                // Heuristic: if the segment before "::" looks like a feature
+                // slug we know about (it's in the user's featureList), apply
+                // the filter. Otherwise the "::" is part of some other id
+                // structure (e.g. a symbol-level "filepath::funcName") and
+                // we keep it.
+                const isFeatureSlug = featureList.some(f => f.slug === slug);
+                if (!isFeatureSlug) {
+                    keptNodeIds.add(n.id);
+                    return true;
+                }
+                if (allowed.has(slug)) {
+                    keptNodeIds.add(n.id);
+                    return true;
+                }
+                return false;
+            });
+            const filteredLinks = links.filter(l => {
+                const src = typeof l.source === 'object' ? l.source.id : String(l.source);
+                const tgt = typeof l.target === 'object' ? l.target.id : String(l.target);
+                return keptNodeIds.has(src) && keptNodeIds.has(tgt);
+            });
+            return { nodes: filteredNodes, links: filteredLinks };
+        }
+
         return { nodes, links };
-    }, [graphData, graphGranularity]);
+    }, [graphData, graphGranularity, selectedSpecSlugs, activeMapType, featureList]);
+
+    // Inverse import index for the side-panel "Importers" section.
+    // Forward imports (this file → those files) live on each
+    // FileNode; "who imports me" requires walking the graph once
+    // to build the inverse. We do that once per graph load and
+    // memoize on graphData identity.
+    //
+    // Skipped for FORMAT-1 (traceability) graphs that come as
+    // {nodes,edges} arrays — those don't have FileNode shape.
+    const importerIndex = useMemo<Record<string, string[]>>(() => {
+        if (!graphData || Array.isArray((graphData as any).nodes)) { return {}; }
+        return buildImporterIndex(graphData as unknown as WorkspaceGraphData);
+    }, [graphData]);
+
+    // Derived 360° context for the currently-selected graph node.
+    // Pure: depends on the node id, the graph dictionary, and the
+    // importer index. When no node is selected, this is null and
+    // the panel falls back to the existing minimal info card.
+    const selectedNodeContext = useMemo<CodeGraphContextView>(() => {
+        if (!selectedGraphNode || !graphData) { return null; }
+        if (Array.isArray((graphData as any).nodes)) { return null; }
+        return buildNodeContext(
+            selectedGraphNode.id,
+            graphData as unknown as WorkspaceGraphData,
+            importerIndex
+        );
+    }, [selectedGraphNode, graphData, importerIndex]);
 
     useEffect(() => { codingStyleRef.current = codingStyle; }, [codingStyle]);
 
     useEffect(() => {
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages, terminalStreams, glassBrainContext, pendingCommand]);
+    }, [messages, terminalStreams, glassBrainContext, pendingCommand, pendingApprovals]);
+
+    // P1.4-compaction (2026-05): when a task transitions to
+    // 'reviewing' (active execution), scroll its header to the top of
+    // the viewport. This addresses the user's "if the action in the
+    // task are long, I need to scroll a lot to show the next task"
+    // complaint. The bottom-scroll effect above keeps following the
+    // chat; THIS effect ensures the user lands on the active task's
+    // header when one starts running, so they always see "what's
+    // running now" without manual scrolling.
+    //
+    // Implementation: ref tracks the previously-active task; whenever
+    // a different task becomes 'reviewing', we scroll its details
+    // element into view. We use querySelector against the
+    // data-task-key attribute we put on <details> rather than
+    // threading refs through the deeply-nested render.
+    const lastActiveReviewingTaskRef = useRef<string | null>(null);
+    useEffect(() => {
+        // Find the active reviewing task. There's typically only one,
+        // but if multiple are 'reviewing' (rare race), pick the last
+        // one in entry order — that's the most recently dispatched.
+        const activeKey = Object.entries(taskStatuses)
+            .filter(([, s]) => s === 'reviewing')
+            .map(([k]) => k)
+            .pop() ?? null;
+        if (activeKey === null) {
+            lastActiveReviewingTaskRef.current = null;
+            return;
+        }
+        if (activeKey === lastActiveReviewingTaskRef.current) {
+            return;
+        }
+        lastActiveReviewingTaskRef.current = activeKey;
+        // Defer to next paint so the <details> with data-task-key has
+        // rendered. Without this rAF, the querySelector misses on the
+        // first transition.
+        requestAnimationFrame(() => {
+            const el = document.querySelector(
+                `details.nexus-task-card[data-task-key="${CSS.escape(activeKey)}"]`
+            );
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        });
+    }, [taskStatuses]);
 
     useEffect(() => {
         vscode.postMessage({ type: 'webviewReady' });
@@ -649,6 +1300,38 @@ export default function App() {
             // not the other. Per-branch logic below stays unchanged.
             const data = parseHostMessage(event.data);
             if (!data) { return; }
+
+            // V2.2 hotfix #2 (2b): session replay protocol. The host
+            // streams recorded events on webview connect via these
+            // three message types. We re-dispatch the inner replayed
+            // event through this same handler so every existing
+            // branch (toolCallEvent, chatToken, structureResponse,
+            // etc.) processes it as if it had arrived live.
+            if (data.type === 'replayBegin') {
+                console.log(`[Replay] starting: ${data.count} events`);
+                return;
+            }
+            if (data.type === 'replayEnd') {
+                console.log(`[Replay] complete`);
+                return;
+            }
+            if (data.type === 'replayEvent' && data.event && typeof data.event === 'object') {
+                // Re-dispatch the inner event. Synthesize a
+                // MessageEvent so downstream handlers see the same
+                // shape as a live message.
+                messageHandler(new MessageEvent('message', { data: data.event }));
+                return;
+            }
+
+            // P3.1: timeline data response from host. The host fetched
+            // all events-*.jsonl for the active feature and passes
+            // them up here. TimelineView reduces them into the model.
+            if (data.type === 'timelineEvents') {
+                const incoming = Array.isArray(data.events) ? data.events as { type: string; [k: string]: unknown }[] : [];
+                setTimelineEvents(incoming);
+                setTimelineLoading(false);
+                return;
+            }
 
             if (data.type === 'tokenUsage') {
                 // Accumulate Global Tokens
@@ -692,7 +1375,11 @@ export default function App() {
 
             if (data.type === 'tasksGenerated') {
                 setIsGeneratingTasks(false);
-                setActiveTab('coder');
+                // V2.1.2 spec-redesign-fix: do NOT auto-bounce to Coder tab here.
+                // The user needs to see the generated tasks on the spec page first
+                // and explicitly approve via the Approve Tasks button. After
+                // approval, they get a "Go to Coder" button. Auto-navigation here
+                // skipped the approval step entirely — the canonical bug.
             }
 
             // M-8: security monitor itself failed (vs. declining a command).
@@ -752,6 +1439,28 @@ export default function App() {
                 vscode.postMessage({ type: 'executeTask', task: task, codingStyle: codingStyleRef.current, feedback: feedback });
             }
 
+            // V2.1.2b — scaffold decision flow.
+            // Both messages route into the reducer rather than mutating
+            // state directly — every transition runs through one path
+            // so submit / dialog / cancel side effects can't drift.
+            if (data.type === 'scaffoldDecisionAvailable') {
+                dispatchScaffoldAction({
+                    type: 'decisionAvailable',
+                    decision: {
+                        isGreenfield: data.detection.isGreenfield,
+                        confidence: data.detection.confidence,
+                        ...(data.detection.stackHint !== undefined ? { stackHint: data.detection.stackHint } : {}),
+                        templates: data.templates,
+                    },
+                });
+            }
+            if (data.type === 'scaffoldDecisionAcknowledged') {
+                dispatchScaffoldAction({
+                    type: 'decisionAcknowledged',
+                    applyError: data.applyError ?? null,
+                });
+            }
+
             if (data.type === 'injectTerminalTask') {
                 const terminalTask = data.task;
                 setMessages(prev => [...prev,
@@ -795,6 +1504,118 @@ export default function App() {
             // event types, so newer events don't crash an older bundle.
             if (data.type === 'toolCallEvent') {
                 setToolCallState(prev => applyToolEvent(prev, data.event as ToolLifecycleEvent));
+                // V2.1.2 spec-fix-12 — Bug #1: when a tool call completes
+                // (either approved+executed or rejected+errored), drop
+                // any matching approval card from pending state so it
+                // doesn't linger on screen.
+                const evt = data.event as ToolLifecycleEvent;
+                if (evt && evt.type === 'toolCallCompleted') {
+                    setPendingApprovals(prev => {
+                        if (!prev.has(evt.callId)) { return prev; }
+                        const next = new Map(prev);
+                        next.delete(evt.callId);
+                        return next;
+                    });
+                }
+            }
+
+            // V2.2 hotfix #4: clear stale tool-call cards from a previous
+            // retry attempt. The host fires this when a task transitions
+            // from attempt N to attempt N+1. Without this, retried tasks
+            // accumulated read_file/list_directory/tsc cards from each
+            // attempt visually stacked, making it very hard to read what
+            // the current attempt was doing (production logs showed tasks
+            // hitting all 5 retries with cards from every attempt still
+            // visible on screen).
+            //
+            // Match logic: the host sends taskId in the form
+            // "task-N::filepath". Coder tool cards carry exactly that
+            // taskId. Verifier cards carry "task-N::verifier::filepath"
+            // (different middle segment). We extract the "task-N" prefix
+            // (everything before the FIRST "::") and clear every card
+            // whose taskId starts with that prefix — covers both Coder
+            // and Verifier sub-scopes for the task being retried.
+            //
+            // Also clears matching pendingApprovals: if a write_file
+            // approval was hanging when the retry triggered, it belongs
+            // to the dead attempt and shouldn't carry over.
+            if (data.type === 'taskRetry' && typeof data.taskId === 'string') {
+                const retriedFullTaskId: string = data.taskId;
+                const taskPrefix = retriedFullTaskId.split('::')[0]!;
+                const prefixWithSep = taskPrefix + '::';
+
+                setToolCallState(prev => {
+                    let mutated = false;
+                    const next = new Map(prev);
+                    for (const [callId, card] of prev) {
+                        const cardTaskId = card.taskId;
+                        if (cardTaskId === taskPrefix || cardTaskId.startsWith(prefixWithSep)) {
+                            next.delete(callId);
+                            mutated = true;
+                        }
+                    }
+                    return mutated ? next : prev;
+                });
+
+                setPendingApprovals(prev => {
+                    if (prev.size === 0) { return prev; }
+                    let mutated = false;
+                    const next = new Map(prev);
+                    for (const [callId, req] of prev) {
+                        // pendingApprovals doesn't carry taskId directly;
+                        // we cross-reference the toolCallState we just
+                        // mutated. Approvals whose callId no longer has
+                        // a card belong to the dead attempt.
+                        // (After the setToolCallState above schedules,
+                        // we can't synchronously read the new state — so
+                        // we trust the call we just made and conservatively
+                        // keep approvals whose callId would NOT have been
+                        // cleared. The check looks at the old prev map.)
+                        // Simpler: just clear all approvals on retry. A
+                        // mid-flight approval after retry is rare and
+                        // surfaces an obvious "approve again" prompt
+                        // for the new attempt's first write_file call.
+                        next.delete(callId);
+                        mutated = true;
+                        void req; // silence unused warning
+                    }
+                    return mutated ? next : prev;
+                });
+            }
+
+            // V2.1.2 spec-fix-12 — Bug #1: host requests user approval
+            // before dispatching write_file / edit_file. The card
+            // renders inline in chat; click posts approveToolCall or
+            // rejectToolCall back to the host.
+            if (data.type === 'requestToolApproval') {
+                const req: ToolApprovalRequest = {
+                    callId: String(data.callId),
+                    toolName: data.toolName,
+                    filepath: String(data.filepath),
+                    preview: data.preview,
+                };
+                setPendingApprovals(prev => {
+                    const next = new Map(prev);
+                    next.set(req.callId, req);
+                    return next;
+                });
+            }
+
+            // V2.2 cross-task remediation: host detected new tsc
+            // errors after a successful task. Add a banner; user
+            // dismisses or clicks Fix to remove.
+            if (data.type === 'crossTaskRegression') {
+                setCrossTaskRegressions(prev => [
+                    ...prev,
+                    {
+                        id: `regression-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                        sourceTaskKey: String(data.sourceTaskKey),
+                        newErrorCount: Number(data.newErrorCount) || 0,
+                        attributable: Boolean(data.attributable),
+                        summary: String(data.summary || ''),
+                        remediationTask: data.remediationTask,
+                    },
+                ]);
             }
 
             // P1.4: hook lifecycle events from HookManager. Same shape
@@ -860,15 +1681,34 @@ export default function App() {
             }
 
             if (data.type === 'addUserMessageAndSubmit') {
+                // V2.1.2 spec-fix-13: detect the Apply-Fix re-feed and
+                // tag the message so the renderer shows a compact card
+                // instead of dumping the full synthesized prompt.
+                const isFixApply = Boolean(data.applySource);
                 const displayContent = `${data.text}\n\n*(Attached from Editor)*\n${data.context || ''}`;
-                setMessages(prev => [...prev, { role: 'user', content: displayContent }]);
+                const newMsg: Message = isFixApply
+                    ? {
+                        role: 'user',
+                        content: data.text,
+                        isFixApplication: true,
+                        fixApplicationOriginalPrompt: typeof data.applyOriginalPrompt === 'string' ? data.applyOriginalPrompt : '',
+                        fixApplicationDiagnosisLength: typeof data.applyDiagnosisLength === 'number' ? data.applyDiagnosisLength : 0,
+                    }
+                    : { role: 'user', content: displayContent };
+                setMessages(prev => [...prev, newMsg]);
                 setLoading(true);
                 vscode.postMessage({
                     type: 'processUserMessage',
                     text: data.text,
                     context: data.context,
                     codingStyle: codingStyleRef.current,
-                    autopilot: isAutopilot
+                    autopilot: isAutopilot,
+                    // V2.1.2 spec-fix-10 P5.2: optional intent override.
+                    // Set when applyExploreFix re-emits via this path —
+                    // forces the build pipeline without re-running
+                    // determineIntent (which could misclassify a "fix"
+                    // prompt back to 'explore').
+                    ...(data.forceIntent ? { forceIntent: data.forceIntent } : {})
                 });
             }
 
@@ -882,6 +1722,18 @@ export default function App() {
                 if (data.design) { setDesign(data.design); }
                 if (data.nexusRules) { setNexusRules(data.nexusRules); }
                 if (data.phaseState) { setPhaseState(data.phaseState); }
+
+                // V2.1.2 spec-fix-4: hydrate multi-feature state.
+                // Existing users land with currentFeature='main' + a
+                // featureList that just contains main. If they explicitly
+                // created another feature in a previous session, the
+                // workspaceState restore puts them back in that one.
+                if (typeof data.currentFeature === 'string') {
+                    setCurrentFeature(data.currentFeature);
+                }
+                if (Array.isArray(data.featureList)) {
+                    setFeatureList(data.featureList);
+                }
 
                 // V2.0 follow-up: inline thinking-mode toggle. The
                 // host reads VS Code settings on webviewReady and
@@ -938,10 +1790,61 @@ export default function App() {
 
             if (data.type === 'phaseStateUpdated') {
                 setPhaseState(data.phaseState);
+                // V2.2 hotfix #4: startOver sends an updated featureList
+                // alongside the phaseState reset. Other senders of
+                // phaseStateUpdated (generation completions, approvals)
+                // don't include it; in those cases we leave featureList
+                // alone since nothing about the directory listing changed.
+                if (Array.isArray(data.featureList)) {
+                    setFeatureList(data.featureList);
+                }
             }
 
             if (data.type === 'reqStep') {
                 setReqLogs(prev => [...prev, data.message]);
+            }
+
+            if (data.type === 'specError') {
+                // V2.1.2 spec-redesign: error banner replaces the prior
+                // "❌ Error" reqStep line that got blown away by generationFailed.
+                setSpecError({
+                    phase: data.phase,
+                    title: data.title,
+                    message: data.message,
+                });
+                setIsGeneratingReqs(false);
+                setIsGeneratingDesign(false);
+                setIsGeneratingTasks(false);
+            }
+
+            if (data.type === 'featureChanged') {
+                // V2.1.2 spec-fix-4: host switched the active feature
+                // (either user-initiated via setCurrentFeature, or just
+                // created via createFeature). Re-hydrate everything from
+                // scratch with the new feature's content.
+                setCurrentFeature(data.currentFeature);
+                setFeatureList(data.featureList);
+                setRequirements(data.requirements || '');
+                setDesign(data.design || '');
+                setActivePlan(data.tasks || null);
+                setPhaseState(data.phaseState);
+                // Reset ephemeral state — the previous feature's drafts
+                // and errors don't apply to the new feature.
+                setRawIdea('');
+                setReqLogs([]);
+                setSpecError(null);
+                setSpecAttachments([]);
+                setIsEditingReqs(false);
+                setIsEditingDesign(false);
+                setShowFeatureSwitcher(false);
+                setFeatureChangeError('');
+                setFeatureNameInput('');
+            }
+
+            if (data.type === 'featureChangeFailed') {
+                // Host rejected the feature switch/create. Show the reason
+                // inline in the switcher / empty-state name field area.
+                setFeatureChangeError(data.reason);
             }
 
             if (data.type === 'generationFailed') {
@@ -961,7 +1864,9 @@ export default function App() {
                 setMessages(prev => [...prev, { role: 'assistant', plan: data.value }]);
                 setLoading(false);
                 setIsGeneratingTasks(false);
-                setActiveTab('coder');
+                // V2.1.2 spec-redesign-fix: do NOT auto-bounce to Coder tab.
+                // See tasksGenerated handler above for the rationale —
+                // user needs to approve tasks on the spec page first.
             }
 
             if (data.type === 'statusUpdate') { setAgentStatus(data.message); }
@@ -1034,7 +1939,7 @@ export default function App() {
                     // the same batch as the current update.
                     setTimeout(() => {
                         if (autonomyHaltRef.current) { return; }
-                        dispatchTaskExecution(nextKey, desc.taskTitle, desc.prompt);
+                        dispatchTaskExecution(nextKey, desc.taskTitle, desc.prompt, desc.kind, desc.templateId);
                     }, 0);
                     return decision.nextQueue;
                 });
@@ -1059,7 +1964,20 @@ export default function App() {
             }
 
             if (data.type === 'startChatStream') {
-                setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+                // V2.1.2 spec-fix-10 P5.2: capture intent + originalPrompt
+                // from the host so the webview knows whether this
+                // assistant message is an explore-mode answer (and thus
+                // eligible for the Apply Fix button).
+                const intent = (data.intent === 'build' || data.intent === 'explore' || data.intent === 'explain' || data.intent === 'ask')
+                    ? data.intent
+                    : undefined;
+                const originalPrompt = typeof data.originalPrompt === 'string' ? data.originalPrompt : undefined;
+                setMessages(prev => [...prev, {
+                    role: 'assistant',
+                    content: '',
+                    ...(intent ? { intent } : {}),
+                    ...(originalPrompt ? { originalPrompt } : {})
+                }]);
                 setLoading(false);
                 setGlassBrainContext("");
             }
@@ -1074,8 +1992,32 @@ export default function App() {
                         setMessages(prev => {
                             const newMessages = [...prev];
                             const lastIdx = newMessages.length - 1;
-                            if (newMessages[lastIdx] && newMessages[lastIdx].role === 'assistant') {
-                                newMessages[lastIdx].content = (newMessages[lastIdx].content || "") + flush;
+                            const last = newMessages[lastIdx];
+                            if (last && last.role === 'assistant') {
+                                // V2.1.2 fix: REPLACE the message object instead
+                                // of mutating it in place. P3.2 wrapped the
+                                // Message component in React.memo, which does a
+                                // shallow prop comparison — if the message
+                                // reference doesn't change, memo skips the
+                                // re-render and the streamed content stays
+                                // invisible until something forces a full
+                                // remount (e.g. extension host reload). Spread
+                                // into a new object so memo sees a new ref.
+                                //
+                                // V2.1.2 spec-fix-12 — Bug #2: collapse runs
+                                // of 3+ consecutive newlines down to 2 so the
+                                // explore "thinking process" doesn't render
+                                // with sprawling vertical whitespace. The
+                                // collapse runs OUTSIDE fenced code blocks
+                                // only — code formatting is sacred. We can do
+                                // this safely on every flush because re-
+                                // applying it is idempotent (\n\n stays \n\n).
+                                const merged = (last.content || "") + flush;
+                                const cleaned = collapseExcessBlankLines(merged);
+                                newMessages[lastIdx] = {
+                                    ...last,
+                                    content: cleaned,
+                                };
                             }
                             return newMessages;
                         });
@@ -1130,7 +2072,12 @@ export default function App() {
     const dispatchTaskExecution = React.useCallback((
         taskKey: string,
         taskTitleForBackend: string,
-        prompt: string
+        prompt: string,
+        // V2.1.3: optional scaffold-task fields. When kind is set to
+        // scaffold-template / scaffold-llm, the host routes via the
+        // scaffold path instead of the standard CoderAgent dispatch.
+        kind?: 'code' | 'scaffold-template' | 'scaffold-llm',
+        templateId?: string
     ) => {
         setTaskStatuses(prev => ({ ...prev, [taskKey]: 'reviewing' }));
         setTaskSteps(prev => ({ ...prev, [taskKey]: [] }));
@@ -1141,6 +2088,8 @@ export default function App() {
             taskTitle: taskTitleForBackend,
             prompt,
             codingStyle: codingStyleRef.current,
+            ...(kind && kind !== 'code' ? { taskKind: kind } : {}),
+            ...(templateId ? { templateId } : {}),
         });
     }, []);
 
@@ -1164,7 +2113,14 @@ export default function App() {
         // queue with `buildInitialAutonomyQueue`, which skips
         // already-approved tasks (resume-from-mid-list semantics).
         const allKeys: string[] = [];
-        const descriptors: Record<string, { taskTitle: string; prompt: string }> = {};
+        // V2.1.3: descriptors carry the optional task kind so dispatch
+        // can route scaffold tasks via the host's scaffold path.
+        const descriptors: Record<string, {
+            taskTitle: string;
+            prompt: string;
+            kind?: 'code' | 'scaffold-template' | 'scaffold-llm';
+            templateId?: string;
+        }> = {};
         planMsg.plan.implementationTasks.forEach((rawTask, tIdx) => {
             const isObj = typeof rawTask !== 'string';
             const taskObj = isObj ? (rawTask as ProjectTask) : null;
@@ -1174,7 +2130,14 @@ export default function App() {
             const prompt = taskObj
                 ? `Task: ${taskObj.step}\nTarget File: ${taskObj.file}\nRelated PRD Requirement: ${taskReq}\n\nDetailed Instructions: ${taskObj.detailedInstructions}`
                 : (rawTask as string);
-            descriptors[taskKey] = { taskTitle, prompt };
+            const desc: typeof descriptors[string] = { taskTitle, prompt };
+            if (taskObj?.kind && taskObj.kind !== 'code') {
+                desc.kind = taskObj.kind;
+                if (taskObj.kind === 'scaffold-template' && taskObj.templateId) {
+                    desc.templateId = taskObj.templateId;
+                }
+            }
+            descriptors[taskKey] = desc;
             allKeys.push(taskKey);
         });
 
@@ -1195,7 +2158,7 @@ export default function App() {
         // taskCompleted handler in the message useEffect.
         const firstKey = queue[0]!;
         const desc = descriptors[firstKey]!;
-        dispatchTaskExecution(firstKey, desc.taskTitle, desc.prompt);
+        dispatchTaskExecution(firstKey, desc.taskTitle, desc.prompt, desc.kind, desc.templateId);
     }, [messages, taskStatuses, dispatchTaskExecution]);
 
     const haltAutonomyRun = React.useCallback(() => {
@@ -1235,11 +2198,33 @@ export default function App() {
                 groups[key]!.push(card);
             }
         }
-        // Sort each group's cards by start order (deterministic render).
+        // V2.2 hotfix #2: composite sort key (startedAt, startSeq).
+        //
+        // The host-side seq counter is allocated PER taskId
+        // (toolEventEmitter.ts line 71: seqByTask map). When the
+        // Coder dispatches under taskId="task-0::package.json" and
+        // the Verifier dispatches under
+        // taskId="task-0::verifier::package.json", BOTH get seq=0
+        // for their first tool call. After resolveTaskKey collapses
+        // both sub-task scopes into the same UI taskKey ("task-0"),
+        // their seqs collide and a sort by startSeq alone
+        // interleaves them in the wrong order — the screenshot
+        // showed `tsc compile` (verifier seq=0) appearing BEFORE
+        // later Coder reads (coder seq=2,3,4).
+        //
+        // startedAt is the host-side Date.now() at emit time, which
+        // is monotonic across all taskIds. Using it as the primary
+        // sort key gives correct chronological order. startSeq stays
+        // as a tiebreaker for tool calls dispatched in the same
+        // millisecond (rare but possible on fast machines).
+        const compare = (a: ToolCallState, b: ToolCallState): number => {
+            if (a.startedAt !== b.startedAt) { return a.startedAt - b.startedAt; }
+            return a.startSeq - b.startSeq;
+        };
         for (const key of Object.keys(groups)) {
-            groups[key]!.sort((a, b) => a.startSeq - b.startSeq);
+            groups[key]!.sort(compare);
         }
-        unscoped.sort((a, b) => a.startSeq - b.startSeq);
+        unscoped.sort(compare);
         return { groups, unscoped };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [toolCallState, taskBackendIdToKey]);
@@ -1332,14 +2317,21 @@ export default function App() {
         setMessages(prev => [...prev, { role: 'user', content: finalQuery, attachments: attachedContexts }]);
         setLoading(true);
 
-        vscode.postMessage({
+        // V2.1.2b — route through the scaffold pre-check. If the host
+        // classifies this as greenfield AND we have templates, the
+        // dispatcher will pause and show the confirmation dialog
+        // before posting the original payload. Otherwise it submits
+        // immediately. Either way, the reducer guarantees the payload
+        // is exactly what we'd have posted directly.
+        const chatPayload: CapturedPayload = {
             type: 'processUserMessage',
             text: finalQuery,
             context: contextStr,
             codingStyle: codingStyleRef.current,
             autopilot: isAutopilot,
-            history: messages
-        });
+            history: messages,
+        };
+        dispatchScaffoldAction({ type: 'userSubmitted', payload: chatPayload });
 
         setInput('');
         setAttachedContexts([]);
@@ -1381,11 +2373,17 @@ export default function App() {
             setMessages([]);
         }
 
-        setTaskSteps({});
-        setTaskReasoning({});
-        setTaskStatuses({});
-        setTaskSummaries({});
-        setTaskFiles({});
+        // V2.2 hotfix: do NOT clear taskSteps/taskReasoning/taskStatuses/
+        // taskSummaries/taskFiles on chat clear. These represent task
+        // progression state, orthogonal to chat content. Wiping them
+        // meant clearing chat made the preserved plan card look like
+        // a fresh plan with no progress, even though the host's
+        // tasks.md / tasks.json on disk still tracked which tasks
+        // were complete.
+        //
+        // The Start Over flow handles "true reset" by deleting the
+        // spec files AND clearing all this state. clearHistory is
+        // strictly chat-only now.
 
         sessionStoreRef.current = {};
         setSessions([{ id: '1', name: 'New Session' }]);
@@ -1410,6 +2408,7 @@ export default function App() {
     };
 
     return (
+        <>
         <AppShell
             rail={
                 <Rail
@@ -1567,6 +2566,30 @@ export default function App() {
                                     archiveIcon={Icons.Archive}
                                     fileIcon={Icons.File}
                                 />
+                            );
+                        }
+
+                        // V2.1.2 spec-fix-13: when the user clicks
+                        // "Apply this fix", the host re-feeds a
+                        // synthesized prompt that bundles the original
+                        // request + the entire diagnosis. Don't render
+                        // that 19KB blob as a message bubble — show a
+                        // compact card instead. The diagnosis is still
+                        // visible in the assistant message above; the
+                        // synthesized text the LLM actually sees is
+                        // unchanged.
+                        if (msg.isFixApplication) {
+                            return (
+                                <div
+                                    key={idx}
+                                    className="nexus-message user"
+                                    style={{ marginBottom: '12px' }}
+                                >
+                                    <FixApplicationCard
+                                        originalPrompt={msg.fixApplicationOriginalPrompt || ''}
+                                        diagnosisLength={msg.fixApplicationDiagnosisLength || 0}
+                                    />
+                                </div>
                             );
                         }
 
@@ -1809,6 +2832,8 @@ export default function App() {
                                                             'nexus-task-card' +
                                                             (isQueuedBehindHead ? ' is-queued' : '')
                                                         }
+                                                        data-task-key={taskKey}
+                                                        data-task-status={status ?? 'pending'}
                                                         // Auto-open if not yet started or currently running.
                                                         // Behavior preserved from pre-Phase-1.5 code.
                                                         open={!status || status === 'reviewing' || status === 'error'}
@@ -1946,9 +2971,63 @@ export default function App() {
                                                                 affinity. */}
                                                             {cardsByTaskKey.groups[taskKey] && cardsByTaskKey.groups[taskKey]!.length > 0 && (
                                                                 <div className="tool-call-cards-region per-task" data-task-key={taskKey}>
-                                                                    {cardsByTaskKey.groups[taskKey]!.map(state => (
-                                                                        <ToolCallCard key={state.callId} state={state} />
-                                                                    ))}
+                                                                    {/* P1.4-compaction (2026-05): partition
+                                                                        chronological cards into groups
+                                                                        (consecutive reads) and singletons
+                                                                        (writes, bash_exec, etc). Reads
+                                                                        collapse to a single line; writes
+                                                                        keep their full ToolCallCard.
+
+                                                                        Approval cards only attach to writes
+                                                                        — reads don't go through approval
+                                                                        gates so we don't need to render
+                                                                        approvals inside read groups. */}
+                                                                    {partitionReadActivity(cardsByTaskKey.groups[taskKey]!).map((unit, uIdx) => {
+                                                                        if (unit.kind === 'group') {
+                                                                            return (
+                                                                                <ReadActivityGroup
+                                                                                    key={`group-${uIdx}-${unit.cards[0]!.callId}`}
+                                                                                    cards={unit.cards}
+                                                                                />
+                                                                            );
+                                                                        }
+                                                                        const state = unit.card;
+                                                                        return (
+                                                                            <React.Fragment key={state.callId}>
+                                                                                <ToolCallCard state={state} />
+                                                                                {/* Inline approval card —
+                                                                                    only fires for write
+                                                                                    tools / bash_exec. The
+                                                                                    global approval region
+                                                                                    below renders only
+                                                                                    orphans (callIds not
+                                                                                    matched here). */}
+                                                                                {pendingApprovals.has(state.callId) && (
+                                                                                    <ToolApprovalCard
+                                                                                        request={pendingApprovals.get(state.callId)!}
+                                                                                        onApprove={(callId) => {
+                                                                                            vscode.postMessage({ type: 'approveToolCall', callId });
+                                                                                            setPendingApprovals(prev => {
+                                                                                                if (!prev.has(callId)) { return prev; }
+                                                                                                const next = new Map(prev);
+                                                                                                next.delete(callId);
+                                                                                                return next;
+                                                                                            });
+                                                                                        }}
+                                                                                        onReject={(callId) => {
+                                                                                            vscode.postMessage({ type: 'rejectToolCall', callId });
+                                                                                            setPendingApprovals(prev => {
+                                                                                                if (!prev.has(callId)) { return prev; }
+                                                                                                const next = new Map(prev);
+                                                                                                next.delete(callId);
+                                                                                                return next;
+                                                                                            });
+                                                                                        }}
+                                                                                    />
+                                                                                )}
+                                                                            </React.Fragment>
+                                                                        );
+                                                                    })}
                                                                 </div>
                                                             )}
 
@@ -2014,7 +3093,7 @@ export default function App() {
                                                                                 className="micro-btn btn-primary"
                                                                                 style={{ background: 'var(--vscode-button-background)', color: 'var(--vscode-button-foreground)' }}
                                                                                 disabled={isQueuedBehindHead}
-                                                                                onClick={() => { dispatchTaskExecution(taskKey, taskTitleForBackend, taskPrompt); }}
+                                                                                onClick={() => { dispatchTaskExecution(taskKey, taskTitleForBackend, taskPrompt, taskObj?.kind, taskObj?.templateId); }}
                                                                                 title={isQueuedBehindHead
                                                                                     ? 'Queued — autonomy run is in progress. Halt it to interact with this task manually.'
                                                                                     : t("buttons.auto_execute")}
@@ -2032,6 +3111,33 @@ export default function App() {
                                             })}
                                         </div>
                                     </details>
+                                )}
+                                {msg.isCompacted ? null : null}
+
+                                {/* V2.1.2 spec-fix-10 P5.2: Apply this fix
+                                    affordance for explore-mode answers.
+                                    Hidden if response isn't actionable
+                                    (no code blocks / no file path) or
+                                    fix has already been applied. */}
+                                {msg.role === 'assistant' && msg.intent === 'explore' && !msg.fixApplied && msg.originalPrompt && msg.content && isActionableExploreFix(msg.content) && (
+                                    <ApplyFixCard
+                                        originalPrompt={msg.originalPrompt}
+                                        exploreResponse={msg.content}
+                                        autoApply={autoApplyExploreFixes}
+                                        onApply={(source) => {
+                                            // Mark this message as applied
+                                            // BEFORE posting, so re-renders
+                                            // during the host's processing
+                                            // don't show a duplicate button.
+                                            setMessages(prev => prev.map((m, i) => i === idx ? { ...m, fixApplied: true } : m));
+                                            vscode.postMessage({
+                                                type: 'applyExploreFix',
+                                                originalPrompt: msg.originalPrompt!,
+                                                exploreResponse: msg.content!,
+                                                source,
+                                            });
+                                        }}
+                                    />
                                 )}
                             </MessageView>
                         );
@@ -2075,6 +3181,107 @@ export default function App() {
 
                       Hidden when there are no unscoped cards.
                     */}
+                    {/* V2.1.2 spec-fix-12 — Bug #1: pending approval
+                        cards render inline in the chat thread when
+                        AutoPilot is OFF and the agent wants to make a
+                        file change. Always visible (this is a blocking
+                        question, not a log line). Removes itself when
+                        the user clicks Approve/Reject (and again,
+                        idempotently, when the host's tool-completed
+                        event arrives).
+
+                        P1.4-compaction (2026-05): approvals whose
+                        callId already has a ToolCallCard inline in a
+                        task group get a SECOND approval render here.
+                        That was the duplicate-card bug. We now skip
+                        those — the inline approval next to its
+                        ToolCallCard is the source of truth. Only
+                        approvals without a matching inline card
+                        (orphaned / pre-task-mapping) fall through to
+                        this global region.
+                    */}
+                    {(() => {
+                        // Build set of callIds that already render
+                        // inline (in some task group). Approvals with
+                        // those callIds are NOT rendered here.
+                        const inlineCallIds = new Set<string>();
+                        for (const groupKey of Object.keys(cardsByTaskKey.groups)) {
+                            const group = cardsByTaskKey.groups[groupKey];
+                            if (!group) { continue; }
+                            for (const card of group) {
+                                inlineCallIds.add(card.callId);
+                            }
+                        }
+                        const orphanedApprovals = Array.from(pendingApprovals.values())
+                            .filter(req => !inlineCallIds.has(req.callId));
+                        if (orphanedApprovals.length === 0) { return null; }
+                        return (
+                            <div className="tool-approval-region" aria-label="Pending approvals">
+                                {orphanedApprovals.map(req => (
+                                    <ToolApprovalCard
+                                        key={req.callId}
+                                        request={req}
+                                        onApprove={(callId) => {
+                                            vscode.postMessage({ type: 'approveToolCall', callId });
+                                            setPendingApprovals(prev => {
+                                                if (!prev.has(callId)) { return prev; }
+                                                const next = new Map(prev);
+                                                next.delete(callId);
+                                                return next;
+                                            });
+                                        }}
+                                        onReject={(callId) => {
+                                            vscode.postMessage({ type: 'rejectToolCall', callId });
+                                            setPendingApprovals(prev => {
+                                                if (!prev.has(callId)) { return prev; }
+                                                const next = new Map(prev);
+                                                next.delete(callId);
+                                                return next;
+                                            });
+                                        }}
+                                    />
+                                ))}
+                            </div>
+                        );
+                    })()}
+
+                    {/* V2.2 cross-task remediation: banners shown
+                        when the host detects new tsc errors after a
+                        successful task. Click "Fix automatically" to
+                        dispatch a synthesized remediation task; click
+                        "Dismiss" to ignore. */}
+                    {crossTaskRegressions.length > 0 && (
+                        <div className="cross-task-regression-region" aria-label="Cross-task regressions">
+                            {crossTaskRegressions.map(reg => (
+                                <CrossTaskRegressionBanner
+                                    key={reg.id}
+                                    sourceTaskKey={reg.sourceTaskKey}
+                                    newErrorCount={reg.newErrorCount}
+                                    summary={reg.summary}
+                                    attributable={reg.attributable}
+                                    {...(reg.remediationTask ? { remediationTask: reg.remediationTask } : {})}
+                                    onApplyRemediation={(rt) => {
+                                        // Dispatch the remediation task through
+                                        // the existing executeTask path. The host
+                                        // routes it through CoderAgent like any
+                                        // normal task; the synthesized prompt
+                                        // contains the failure context.
+                                        dispatchTaskExecution(
+                                            rt.taskKey,
+                                            rt.taskTitle,
+                                            rt.prompt,
+                                            'code',
+                                        );
+                                        setCrossTaskRegressions(prev => prev.filter(r => r.id !== reg.id));
+                                    }}
+                                    onDismiss={() => {
+                                        setCrossTaskRegressions(prev => prev.filter(r => r.id !== reg.id));
+                                    }}
+                                />
+                            ))}
+                        </div>
+                    )}
+
                     {cardsByTaskKey.unscoped.length > 0 && (
                         <div className="tool-call-cards-region unscoped" aria-label="Unscoped tool activity">
                             <div className="tool-cards-region-label">
@@ -2382,6 +3589,32 @@ export default function App() {
                                 />
                                 Autopilot
                             </label>
+
+                            {/* V2.1.2 spec-fix-10 P5.2: Auto-apply explore fixes.
+                                Independent from Autopilot — different blast radius.
+                                When ON, Apply Fix buttons that appear under explore-mode
+                                answers auto-fire after a 3s countdown (with cancel option). */}
+                            <label
+                                style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: autoApplyExploreFixes ? 'var(--vscode-charts-blue, #4a90e2)' : 'var(--nexus-subtext)', cursor: 'pointer', fontWeight: autoApplyExploreFixes ? 'bold' : 'normal', marginLeft: '8px' }}
+                                title="When ON, fixes diagnosed by explore mode auto-apply after a 3s countdown (cancellable). Default OFF — click 'Apply this fix' below explore answers to apply manually."
+                            >
+                                <div style={{
+                                    width: '24px', height: '14px', borderRadius: '10px', background: autoApplyExploreFixes ? 'var(--vscode-charts-blue, #4a90e2)' : 'var(--vscode-input-background)',
+                                    position: 'relative', transition: '0.2s'
+                                }}>
+                                    <div style={{
+                                        width: '10px', height: '10px', borderRadius: '50%', background: 'white',
+                                        position: 'absolute', top: '2px', left: autoApplyExploreFixes ? '12px' : '2px', transition: '0.2s'
+                                    }}></div>
+                                </div>
+                                <input
+                                    type="checkbox"
+                                    checked={autoApplyExploreFixes}
+                                    onChange={(e) => setAutoApplyExploreFixes(e.target.checked)}
+                                    style={{ display: 'none' }}
+                                />
+                                Auto-Apply
+                            </label>
                         </div>
 
                         <div className="toolbar-group" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
@@ -2407,6 +3640,57 @@ export default function App() {
                                 title={t("buttons.clear_chat")}>
                                 {Icons.Trash} Clear
                             </button>
+                            {/* V2.2 hotfix: Export Session button.
+                                Sends current chat messages + task state
+                                to the host, which bundles them with on-
+                                disk specs + event log + audit info into
+                                a single JSON file under .nexus/exports/
+                                and opens it in a new editor tab. */}
+                            <button
+                                className="micro-btn"
+                                style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }}
+                                onClick={() => {
+                                    vscode.postMessage({
+                                        type: 'exportSession',
+                                        messages,
+                                        taskStatuses,
+                                        taskSummaries,
+                                        taskFiles,
+                                        taskSteps,
+                                        taskReasoning,
+                                        activePlan,
+                                    });
+                                }}
+                                title="Export this session (chat + specs + tasks + event log) as JSON for sharing">
+                                ⬇ Export
+                            </button>
+                            {/* V2.2 hotfix: Restore Plan button. Re-
+                                injects the active plan card into chat
+                                if it's been dismissed or scrolled past
+                                in a long session. Renders only when
+                                there's a plan to restore AND the most
+                                recent message isn't already a plan card
+                                (avoids duplicate adds).
+
+                                This is a webview-only operation — no
+                                host roundtrip needed. activePlan is
+                                already in React state. */}
+                            {activePlan && activePlan.implementationTasks && activePlan.implementationTasks.length > 0 &&
+                             messages.length > 0 &&
+                             !(messages[messages.length - 1]?.plan) && (
+                                <button
+                                    className="micro-btn"
+                                    style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }}
+                                    onClick={() => {
+                                        setMessages(prev => [
+                                            ...prev,
+                                            { role: 'assistant', content: 'Active Implementation Plan (restored):', plan: activePlan }
+                                        ]);
+                                    }}
+                                    title="Re-inject the active plan card into chat">
+                                    📋 Restore Plan
+                                </button>
+                            )}
                             <button
                                 className="micro-btn"
                                 style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--vscode-foreground)', background: 'transparent', border: 'none', cursor: 'pointer', opacity: 0.7, padding: 0 }}
@@ -2432,13 +3716,146 @@ export default function App() {
                 {/* PR 3.1: phase stepper. Renders only when phaseState
                     has been hydrated from initState — before that there's
                     nothing meaningful to show. The stepper sits sticky at
-                    the top of the spec column. */}
-                {phaseState && <PhaseStepper state={phaseState as PhaseStateForStepper} />}
+                    the top of the spec column.
+
+                    V2.1.2 spec-redesign: hide this top stepper while the
+                    bottom SpecStepper is showing (during generation OR when
+                    there's a sticky error). The two trackers serve different
+                    purposes — top tracks approval state, bottom tracks live
+                    generation — but stacking them looked redundant. The
+                    bottom one is the more informative view during action,
+                    so it wins; the top one resumes its role once generation
+                    completes and the user is looking at draft/approved state. */}
+                {phaseState && !(isGeneratingReqs || isGeneratingDesign || isGeneratingTasks || specError) && (
+                    <PhaseStepper state={phaseState as PhaseStateForStepper} />
+                )}
 
                 {(!requirements || requirements.trim() === '') && !isGeneratingReqs && (
                     <div className="nexus-spec-intro">
                         <h3 className="nexus-spec-intro-title">{t("project.start_new")}</h3>
                         <p className="nexus-spec-intro-description">{t("project.describe_idea")}</p>
+
+                        {/* V2.1.2 spec-fix-10: "View an existing spec" affordance.
+                            Renders only when the workspace has at least one
+                            existing feature. Re-uses the existing feature
+                            switcher's menu component pattern — clicking a
+                            feature fires setCurrentFeature, which loads that
+                            feature's PRD/design/tasks into the same pretty
+                            layout used everywhere else.
+
+                            The previous UX gap: the regular switcher pill
+                            (top right of the spec view) was only rendered
+                            when `requirements` was non-empty. From the empty
+                            state, users had no discoverable way to view an
+                            old spec without clicking through to a different
+                            feature first. This section closes that gap. */}
+                        {/* V2.2 hotfix #4: filter out empty features from the
+                            "View existing spec" picker.
+
+                            Background: when the user clicks "Start Over" on a
+                            feature, the host deletes requirements.md/design.md/
+                            tasks.md/tasks.json BUT leaves the feature directory
+                            and its phaseState.json on disk. The feature still
+                            shows up in featureList, so it appeared in this
+                            picker as a clickable item — but clicking it loaded
+                            empty content and just showed the empty state again.
+
+                            A "real" feature has at least requirements drafted
+                            (status 'draft' or 'approved'). All three phases
+                            being 'pending' means nothing was ever saved (or
+                            startOver wiped everything). Hide those.
+
+                            Defensive: if phaseState is missing/malformed, we
+                            treat as empty and hide. Safer than showing a
+                            feature we can't introspect. */}
+                        {(() => {
+                            const hasContent = (f: { phaseState?: { requirements?: string; design?: string; tasks?: string } }): boolean => {
+                                const ps = f.phaseState;
+                                if (!ps) { return false; }
+                                return ps.requirements !== 'pending'
+                                    || ps.design !== 'pending'
+                                    || ps.tasks !== 'pending';
+                            };
+                            const realFeatures = featureList.filter(hasContent);
+                            if (realFeatures.length === 0) { return null; }
+                            return (
+                                <div className="nexus-spec-existing-bar">
+                                    <div className="nexus-feature-switcher">
+                                        <button
+                                            className="nexus-spec-existing-button"
+                                            onClick={() => setShowFeatureSwitcher(v => !v)}
+                                        >
+                                            📂 View an existing spec ({realFeatures.length}) ▾
+                                        </button>
+                                        {showFeatureSwitcher && (
+                                            <div className="nexus-feature-switcher-menu" onMouseLeave={() => setShowFeatureSwitcher(false)}>
+                                                {realFeatures.map(f => (
+                                                    <button
+                                                        key={f.slug}
+                                                        className={`nexus-feature-switcher-item${f.slug === currentFeature ? ' active' : ''}`}
+                                                        onClick={() => {
+                                                            if (f.slug !== currentFeature) {
+                                                                vscode.postMessage({ type: 'setCurrentFeature', slug: f.slug });
+                                                            }
+                                                            setShowFeatureSwitcher(false);
+                                                        }}
+                                                    >
+                                                        <span>{f.slug === currentFeature ? '● ' : '  '}{f.slug}</span>
+                                                        <span className="nexus-feature-switcher-status">
+                                                            {f.phaseState?.tasks === 'approved'
+                                                                ? '✅ ready'
+                                                                : f.phaseState?.tasks === 'draft'
+                                                                ? '📝 tasks'
+                                                                : f.phaseState?.design === 'approved'
+                                                                ? '🎨 design'
+                                                                : f.phaseState?.requirements === 'approved'
+                                                                ? '📋 PRD'
+                                                                : '○ empty'}
+                                                        </span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <span className="nexus-spec-existing-or">or describe a new one below</span>
+                                </div>
+                            );
+                        })()}
+
+                        {/* V2.1.2 spec-fix-4: spec name field. Users name
+                            their spec at the moment they describe it — the
+                            name slugifies to a directory under .nexus/specs/
+                            so multiple specs can coexist in one workspace.
+                            Empty input falls back to the current feature
+                            (default 'main' for new users). The slug preview
+                            below the input shows what will land on disk. */}
+                        <div className="nexus-spec-name-field">
+                            <label className="nexus-spec-name-label" htmlFor="nexus-spec-name-input">
+                                Spec name <span style={{ color: 'var(--vscode-descriptionForeground)', fontWeight: 'normal' }}>(optional — defaults to current)</span>
+                            </label>
+                            <input
+                                id="nexus-spec-name-input"
+                                type="text"
+                                className="nexus-spec-name-input"
+                                value={featureNameInput}
+                                onChange={(e) => { setFeatureNameInput(e.target.value); setFeatureChangeError(''); }}
+                                placeholder={`e.g. checkout-flow  (currently on: ${currentFeature})`}
+                                autoComplete="off"
+                            />
+                            {featureNameInput.trim() !== '' && (
+                                <div className="nexus-spec-name-preview">
+                                    Will save to: <code>.nexus/specs/{slugifyForPreview(featureNameInput)}/</code>
+                                    {slugifyForPreview(featureNameInput) === currentFeature && (
+                                        <span style={{ marginLeft: '8px', color: 'var(--vscode-descriptionForeground)' }}>
+                                            (same as current — will overwrite)
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                            {featureChangeError && (
+                                <div className="nexus-spec-name-error">⚠ {featureChangeError}</div>
+                            )}
+                        </div>
 
                         {builderContexts.length > 0 && (
                             <div className="context-chips" style={{ marginBottom: '5px' }}>
@@ -2461,7 +3878,37 @@ export default function App() {
                             >
                                 {Icons.Plus} Attach Specs / API Docs
                             </button>
+
+                            {/* V2.1.2 spec-redesign: PDF + image upload from disk.
+                                Distinct from the existing button (which searches
+                                workspace files) because PDFs/images typically live
+                                outside the repo (Confluence exports, screenshots,
+                                etc.). */}
+                            <button
+                                className="nexus-spec-attach-button"
+                                onClick={() => specFileInputRef.current?.click()}
+                                title="Upload PDF or image from disk. Image content is preview-only — it is not sent to the model in the current configuration."
+                            >
+                                {Icons.Plus} Upload PDF / Image
+                            </button>
+                            <input
+                                ref={specFileInputRef}
+                                type="file"
+                                accept="application/pdf,image/*,.txt,.md"
+                                multiple
+                                style={{ display: 'none' }}
+                                onChange={(e) => { void handleSpecFiles(e.target.files); }}
+                            />
                         </div>
+
+                        {/* V2.1.2 spec-redesign: chip row showing each attachment
+                            with type-specific preview + remove. Image chips include
+                            an "image not analyzed" badge so users know that visual
+                            content isn't ingested. */}
+                        <AttachmentPreview
+                            attachments={specAttachments}
+                            onRemove={(idx) => setSpecAttachments(prev => prev.filter((_, i) => i !== idx))}
+                        />
 
                         {isSearching && (
                             <div className="nexus-spec-search-panel">
@@ -2505,14 +3952,50 @@ export default function App() {
                             onClick={() => {
                                 if (!rawIdea.trim()) { return; }
                                 setReqLogs([]);
-                                setIsGeneratingReqs(true);
+                                setSpecError(null);
 
-                                let contextStr = "";
-                                if (builderContexts.length > 0) {
-                                    contextStr = builderContexts.map(c => `File: ${c.file}\n\`\`\`${c.language}\n${c.code}\n\`\`\``).join('\n\n');
+                                // V2.1.2 spec-fix-4: create-feature-first if the
+                                // user typed a new name. The host queues messages
+                                // serially, so by the time the planner LLM finishes
+                                // and tries to writeRequirements, _currentFeature
+                                // will already be the new slug. If they left the
+                                // name empty or it matches the current slug, skip
+                                // the create step (saving in place is OK).
+                                const inputName = featureNameInput.trim();
+                                if (inputName !== '') {
+                                    const newSlug = slugifyForPreview(inputName);
+                                    if (newSlug !== currentFeature) {
+                                        vscode.postMessage({ type: 'createFeature', name: inputName });
+                                    }
                                 }
 
-                                vscode.postMessage({ type: 'generateRequirements', text: rawIdea, context: contextStr });
+                                setIsGeneratingReqs(true);
+
+                                // V2.1.2 spec-redesign: merge two context sources
+                                //   1. builderContexts (workspace files attached
+                                //      via the search panel — existing path)
+                                //   2. specAttachments (uploaded PDFs/images/text
+                                //      via the new upload button)
+                                // The latter goes through buildAttachmentContext
+                                // which knows to include "image not analyzed" notes
+                                // so the model doesn't pretend it saw the diagram.
+                                const builderCtx = builderContexts.length > 0
+                                    ? builderContexts.map(c => `File: ${c.file}\n\`\`\`${c.language}\n${c.code}\n\`\`\``).join('\n\n')
+                                    : '';
+                                const attachCtx = buildAttachmentContext(specAttachments);
+                                const contextStr = [builderCtx, attachCtx].filter(Boolean).join('\n\n');
+
+                                // V2.1.2b — same scaffold pre-check as the
+                                // chat submit path. Spec generation in an
+                                // empty workspace is the canonical greenfield
+                                // case, so this is where the dialog is most
+                                // likely to fire.
+                                const prdPayload: CapturedPayload = {
+                                    type: 'generateRequirements',
+                                    text: rawIdea,
+                                    context: contextStr,
+                                };
+                                dispatchScaffoldAction({ type: 'userSubmitted', payload: prdPayload });
                             }}
                         >
                             {Icons.Wand} Auto-Generate RAG-Enhanced PRD
@@ -2520,58 +4003,273 @@ export default function App() {
                     </div>
                 )}
 
-                {(isGeneratingReqs || isGeneratingDesign) && (
-                    <div className="plan-card" style={{ flex: 1, display: 'flex', flexDirection: 'column', marginTop: '10px' }}>
-                        <div className="plan-card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 15px' }}>
-                            <div className="nexus-flex-block-row-gap-3">
-                                <div style={{ color: 'var(--vscode-button-background)' }}>{Icons.Loader}</div>
-                                <span style={{ fontWeight: 'bold' }}>
-                                    {isGeneratingReqs ? 'Drafting PRD...' : 'Architecting System Design...'}
-                                    <span style={{ color: 'var(--nexus-subtext)', marginLeft: '8px', fontFamily: 'monospace' }}>[{formatTime(specTimer)}]</span>
-                                </span>
-                            </div>
-                            <button
-                                className="nexus-spec-progress-stop"
-                                onClick={() => {
-                                    vscode.postMessage({ type: 'cancelTask' });
-                                    setIsGeneratingReqs(false);
-                                    setIsGeneratingDesign(false);
+                {/* V2.1.2 spec-redesign: Stepper replaces the prior plan-card
+                    progress UI. Visible whenever a phase is generating, OR
+                    when there's a sticky error to display. */}
+                {(isGeneratingReqs || isGeneratingDesign || isGeneratingTasks || specError) && (() => {
+                    // Compute per-phase status. Order of precedence:
+                    //   1. Active flag (this phase is currently generating)
+                    //   2. Error flag (specError targets this phase)
+                    //   3. Phase state from disk (approved/draft → completed)
+                    //   4. Default idle
+                    const phases: SpecStepperPhase[] = [
+                        {
+                            id: 'requirements',
+                            label: 'Requirements',
+                            status: isGeneratingReqs
+                                ? 'active'
+                                : specError?.phase === 'requirements'
+                                    ? 'error'
+                                    : (requirements && requirements.trim() !== '')
+                                        ? 'completed'
+                                        : 'idle',
+                            ...(isGeneratingReqs ? { activityHint: 'Drafting user stories & acceptance criteria...' } : {}),
+                        },
+                        {
+                            id: 'design',
+                            label: 'Design',
+                            status: isGeneratingDesign
+                                ? 'active'
+                                : specError?.phase === 'design'
+                                    ? 'error'
+                                    : (design && design.trim() !== '')
+                                        ? 'completed'
+                                        : 'idle',
+                            ...(isGeneratingDesign ? { activityHint: 'Drafting system architecture...' } : {}),
+                        },
+                        {
+                            id: 'tasks',
+                            label: 'Tasks',
+                            status: isGeneratingTasks
+                                ? 'active'
+                                : specError?.phase === 'tasks'
+                                    ? 'error'
+                                    : (activePlan && activePlan.implementationTasks && activePlan.implementationTasks.length > 0)
+                                        ? 'completed'
+                                        : 'idle',
+                            ...(isGeneratingTasks ? { activityHint: 'Generating implementation tasks...' } : {}),
+                        },
+                    ];
+
+                    return (
+                        <div className="nexus-spec-stepper-wrap" style={{ marginTop: '10px' }}>
+                            <SpecStepper
+                                phases={phases}
+                                error={specError}
+                                onDismissError={() => setSpecError(null)}
+                                onRetry={() => {
+                                    if (!specError) { return; }
+                                    setSpecError(null);
+                                    if (specError.phase === 'requirements') {
+                                        setIsGeneratingReqs(true);
+                                        const builderCtx = builderContexts.length > 0
+                                            ? builderContexts.map(c => `File: ${c.file}\n\`\`\`${c.language}\n${c.code}\n\`\`\``).join('\n\n')
+                                            : '';
+                                        const attachCtx = buildAttachmentContext(specAttachments);
+                                        const contextStr = [builderCtx, attachCtx].filter(Boolean).join('\n\n');
+                                        vscode.postMessage({ type: 'generateRequirements', text: rawIdea, context: contextStr });
+                                    }
+                                    // Design + tasks retry require their own
+                                    // approval-state plumbing; users hit the
+                                    // existing buttons in those panels for now.
                                 }}
-                            >
-                                {Icons.Stop} Stop
-                            </button>
+                            />
+
+                            {(isGeneratingReqs || isGeneratingDesign || isGeneratingTasks) && (
+                                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px' }}>
+                                    <button
+                                        className="nexus-spec-progress-stop"
+                                        onClick={() => {
+                                            vscode.postMessage({ type: 'cancelTask' });
+                                            setIsGeneratingReqs(false);
+                                            setIsGeneratingDesign(false);
+                                            setIsGeneratingTasks(false);
+                                        }}
+                                    >
+                                        {Icons.Stop} Stop
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* V2.2 hotfix: Save & New Project button.
+                                Visible on every spec page state (PRD,
+                                design, tasks, post-tasks). Click to
+                                save the current feature's state in
+                                place and create a new feature for a
+                                different project. The current feature
+                                stays intact on disk and reappears in
+                                the existing-spec picker so the user
+                                can resume it later. */}
+                            {!isGeneratingReqs && !isGeneratingDesign && !isGeneratingTasks && (
+                                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px', gap: '6px' }}>
+                                    <button
+                                        className="nexus-btn-ghost"
+                                        style={{ fontSize: '11px', opacity: 0.85 }}
+                                        onClick={() => {
+                                            setSaveNewProjectName('');
+                                            setShowSaveNewProjectDialog(true);
+                                        }}
+                                        title="Save current spec progress and start a new project. The current project stays intact and can be reopened from the spec picker.">
+                                        💾 Save & New Project
+                                    </button>
+                                </div>
+                            )}
+
+                            {showSaveNewProjectDialog && (
+                                <div style={{
+                                    marginTop: '10px',
+                                    padding: '12px',
+                                    border: '1px solid var(--vscode-widget-border)',
+                                    borderRadius: '6px',
+                                    background: 'var(--vscode-editor-background)'
+                                }}>
+                                    <div style={{ marginBottom: '8px', fontSize: '12px', opacity: 0.9 }}>
+                                        Save current project ({currentFeature}) and start a new one. The current state stays on disk — you can reopen it later from the existing-spec picker.
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                                        <input
+                                            type="text"
+                                            value={saveNewProjectName}
+                                            onChange={(e) => setSaveNewProjectName(e.target.value)}
+                                            placeholder="New project name (e.g. payment-flow)"
+                                            autoFocus
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter' && saveNewProjectName.trim()) {
+                                                    vscode.postMessage({ type: 'createFeature', name: saveNewProjectName.trim() });
+                                                    setShowSaveNewProjectDialog(false);
+                                                } else if (e.key === 'Escape') {
+                                                    setShowSaveNewProjectDialog(false);
+                                                }
+                                            }}
+                                            style={{
+                                                flex: 1,
+                                                padding: '6px 8px',
+                                                fontSize: '12px',
+                                                background: 'var(--vscode-input-background)',
+                                                color: 'var(--vscode-input-foreground)',
+                                                border: '1px solid var(--vscode-input-border, var(--vscode-widget-border))',
+                                                borderRadius: '3px'
+                                            }}
+                                        />
+                                        <button
+                                            className="nexus-btn-secondary"
+                                            style={{ fontSize: '11px', padding: '4px 10px' }}
+                                            onClick={() => setShowSaveNewProjectDialog(false)}>
+                                            Cancel
+                                        </button>
+                                        <button
+                                            className="nexus-btn-primary"
+                                            style={{ fontSize: '11px', padding: '4px 10px' }}
+                                            disabled={!saveNewProjectName.trim()}
+                                            onClick={() => {
+                                                vscode.postMessage({ type: 'createFeature', name: saveNewProjectName.trim() });
+                                                setShowSaveNewProjectDialog(false);
+                                            }}>
+                                            Save & Switch
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
-                        <div className="nexus-spec-progress">
-                            {reqLogs.map((log, i) => {
-                                /* Phase 1.9: log-line semantic kind moved from inline-style ternary
-                                   to a data-attribute. CSS owns the colors via [data-kind] selectors,
-                                   keeping the JSX clean. */
-                                let kind: 'header' | 'error' | 'property' | 'default' = 'default';
-                                if (log.includes('━━━')) { kind = 'header'; }
-                                else if (log.includes('❌') || log.includes('Error')) kind = 'error';
-                                else if (log.includes('Domain:') || log.includes('Product Type:')) kind = 'property';
-                                return <div key={i} className="nexus-spec-progress-line" data-kind={kind}>{log}</div>;
-                            })}
-                        </div>
-                    </div>
-                )}
+                    );
+                })()}
 
                 {(requirements && requirements.trim() !== '') && !design && !isGeneratingReqs && !isGeneratingDesign && (
                     <div className="nexus-flex-col">
                         <div className="nexus-flex-between-shrink">
                             <span className="nexus-flex-row nexus-text-success-bold">
                                 {phaseState?.requirements === 'approved'
-                                    ? <>{Icons.CheckCircle} PRD approved · .nexus/specs/main/requirements.md</>
-                                    : <>{Icons.FilePen} PRD draft · .nexus/specs/main/requirements.md</>}
+                                    ? <>{Icons.CheckCircle} PRD approved · .nexus/specs/{currentFeature}/requirements.md</>
+                                    : <>{Icons.FilePen} PRD draft · .nexus/specs/{currentFeature}/requirements.md</>}
                             </span>
                             <div className="nexus-flex-block-gap-3">
+                                {/* V2.1.2 spec-fix-4: feature switcher. Clickable
+                                    pill opens a menu listing all features in the
+                                    workspace + a "+ New Spec" entry. */}
+                                <div className="nexus-feature-switcher">
+                                    <button
+                                        className="nexus-feature-switcher-pill"
+                                        onClick={() => setShowFeatureSwitcher(v => !v)}
+                                        title="Switch spec or create new"
+                                    >
+                                        🗂️ {currentFeature} ▾
+                                    </button>
+                                    {showFeatureSwitcher && (
+                                        <div className="nexus-feature-switcher-menu" onMouseLeave={() => setShowFeatureSwitcher(false)}>
+                                            {featureList.map(f => (
+                                                <button
+                                                    key={f.slug}
+                                                    className={`nexus-feature-switcher-item${f.slug === currentFeature ? ' active' : ''}`}
+                                                    onClick={() => {
+                                                        if (f.slug !== currentFeature) {
+                                                            vscode.postMessage({ type: 'setCurrentFeature', slug: f.slug });
+                                                        }
+                                                        setShowFeatureSwitcher(false);
+                                                    }}
+                                                >
+                                                    <span>{f.slug === currentFeature ? '● ' : '  '}{f.slug}</span>
+                                                    <span className="nexus-feature-switcher-status">
+                                                        {f.phaseState?.tasks === 'approved'
+                                                            ? '✅ ready'
+                                                            : f.phaseState?.tasks === 'draft'
+                                                            ? '📝 tasks'
+                                                            : f.phaseState?.design === 'approved'
+                                                            ? '🎨 design'
+                                                            : f.phaseState?.requirements === 'approved'
+                                                            ? '📋 PRD'
+                                                            : '○ empty'}
+                                                    </span>
+                                                </button>
+                                            ))}
+                                            <div className="nexus-feature-switcher-divider" />
+                                            <button
+                                                className="nexus-feature-switcher-item nexus-feature-switcher-new"
+                                                onClick={() => {
+                                                    const name = window.prompt('Name your new spec (e.g. checkout-flow):');
+                                                    if (name && name.trim()) {
+                                                        vscode.postMessage({ type: 'createFeature', name: name.trim() });
+                                                    }
+                                                    setShowFeatureSwitcher(false);
+                                                }}
+                                            >
+                                                + New Spec
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
                                 <button className="nexus-btn-ghost" onClick={() => setIsEditingReqs(!isEditingReqs)}>
                                     {isEditingReqs ? <>{Icons.Eye} Preview</> : <>{Icons.Edit} Edit</>}
                                 </button>
+                                {/* V2.2 hotfix #3: non-destructive navigation
+                                    back to PRD. Only renders when PRD is
+                                    already approved (otherwise we're already
+                                    on/before the PRD phase, no point in
+                                    reopening). Distinct from Start Over —
+                                    keeps all files on disk, only flips
+                                    phaseState.requirements to 'draft' so the
+                                    user can edit + re-approve without losing
+                                    design and tasks. */}
+                                {phaseState?.requirements === 'approved' && (
+                                    <button className="nexus-btn-ghost"
+                                        onClick={() => {
+                                            vscode.postMessage({ type: 'reopenPRD' });
+                                        }}
+                                        title="Reopen the PRD for edits without deleting design or tasks">
+                                        {Icons.Edit} Reopen PRD
+                                    </button>
+                                )}
                                 <button className="nexus-btn-ghost"
                                     onClick={() => {
+                                        // V2.1.2 spec-fix-3: full reset via host. Local
+                                        // state clear alone left phaseState.json on disk
+                                        // with stale approved flags, breaking re-generation.
                                         setRequirements(''); setRawIdea(''); setReqLogs([]); setIsEditingReqs(false);
-                                        vscode.postMessage({ type: 'updateRequirements', text: '' });
+                                        setSpecError(null);
+                                        setSpecAttachments([]);
+                                        setActivePlan(null);
+                                        setDesign('');
+                                        setIsEditingDesign(false);
+                                        vscode.postMessage({ type: 'startOver' });
                                     }}>
                                     {Icons.Restart} Start Over
                                 </button>
@@ -2652,17 +4350,83 @@ export default function App() {
                         <div className="nexus-flex-between-shrink">
                             <span className="nexus-flex-row nexus-text-success-bold">
                                 {phaseState?.design === 'approved'
-                                    ? <>{Icons.CheckCircle} Design approved · .nexus/specs/main/</>
-                                    : <>{Icons.FilePen} Design draft · .nexus/specs/main/</>}
+                                    ? <>{Icons.CheckCircle} Design approved · .nexus/specs/{currentFeature}/</>
+                                    : <>{Icons.FilePen} Design draft · .nexus/specs/{currentFeature}/</>}
                             </span>
                             <div className="nexus-flex-block-gap-3">
+                                <div className="nexus-feature-switcher">
+                                    <button
+                                        className="nexus-feature-switcher-pill"
+                                        onClick={() => setShowFeatureSwitcher(v => !v)}
+                                        title="Switch spec or create new"
+                                    >
+                                        🗂️ {currentFeature} ▾
+                                    </button>
+                                    {showFeatureSwitcher && (
+                                        <div className="nexus-feature-switcher-menu" onMouseLeave={() => setShowFeatureSwitcher(false)}>
+                                            {featureList.map(f => (
+                                                <button
+                                                    key={f.slug}
+                                                    className={`nexus-feature-switcher-item${f.slug === currentFeature ? ' active' : ''}`}
+                                                    onClick={() => {
+                                                        if (f.slug !== currentFeature) {
+                                                            vscode.postMessage({ type: 'setCurrentFeature', slug: f.slug });
+                                                        }
+                                                        setShowFeatureSwitcher(false);
+                                                    }}
+                                                >
+                                                    <span>{f.slug === currentFeature ? '● ' : '  '}{f.slug}</span>
+                                                    <span className="nexus-feature-switcher-status">
+                                                        {f.phaseState?.tasks === 'approved'
+                                                            ? '✅ ready'
+                                                            : f.phaseState?.tasks === 'draft'
+                                                            ? '📝 tasks'
+                                                            : f.phaseState?.design === 'approved'
+                                                            ? '🎨 design'
+                                                            : f.phaseState?.requirements === 'approved'
+                                                            ? '📋 PRD'
+                                                            : '○ empty'}
+                                                    </span>
+                                                </button>
+                                            ))}
+                                            <div className="nexus-feature-switcher-divider" />
+                                            <button
+                                                className="nexus-feature-switcher-item nexus-feature-switcher-new"
+                                                onClick={() => {
+                                                    const name = window.prompt('Name your new spec (e.g. checkout-flow):');
+                                                    if (name && name.trim()) {
+                                                        vscode.postMessage({ type: 'createFeature', name: name.trim() });
+                                                    }
+                                                    setShowFeatureSwitcher(false);
+                                                }}
+                                            >
+                                                + New Spec
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
                                 <button className="nexus-btn-ghost" onClick={() => setIsEditingDesign(!isEditingDesign)}>
                                     {isEditingDesign ? <>{Icons.Eye} Preview</> : <>{Icons.Edit} Edit Design</>}
                                 </button>
+                                {/* V2.2 hotfix #3: non-destructive reopen
+                                    PRD button on the design+ view too. */}
+                                {phaseState?.requirements === 'approved' && (
+                                    <button className="nexus-btn-ghost"
+                                        onClick={() => {
+                                            vscode.postMessage({ type: 'reopenPRD' });
+                                        }}
+                                        title="Reopen the PRD for edits without deleting design or tasks">
+                                        {Icons.Edit} Reopen PRD
+                                    </button>
+                                )}
                                 <button className="nexus-btn-ghost"
                                     onClick={() => {
+                                        // V2.1.2 spec-fix-3: full reset via host.
                                         setRequirements(''); setDesign(''); setRawIdea(''); setReqLogs([]); setIsEditingReqs(false); setIsEditingDesign(false);
-                                        vscode.postMessage({ type: 'updateRequirements', text: '' });
+                                        setSpecError(null);
+                                        setSpecAttachments([]);
+                                        setActivePlan(null);
+                                        vscode.postMessage({ type: 'startOver' });
                                     }}>
                                     {Icons.Restart} Start Over
                                 </button>
@@ -2676,6 +4440,67 @@ export default function App() {
                                 <hr />
                                 <h2>2. System Design</h2>
                                 <ReactMarkdown>{cleanTraceabilityTags(design)}</ReactMarkdown>
+                                {/* V2.2 hotfix #5: render the implementation
+                                    tasks inline on the spec page so the user
+                                    can review them before clicking Approve.
+                                    Previously the tasks only appeared on the
+                                    workspace (chat) page, leaving the spec
+                                    page with just a count in the button label
+                                    — confusing UX (user expected to read the
+                                    plan in context with the PRD/design).
+
+                                    Renders gated on activePlan having content;
+                                    we don't gate on phaseState.tasks because
+                                    we want the user to see the tasks the
+                                    moment they're generated, even before
+                                    approval. Once approved, the section
+                                    keeps rendering — same content, just no
+                                    longer awaiting action. */}
+                                {activePlan && activePlan.implementationTasks && activePlan.implementationTasks.length > 0 && (
+                                    <>
+                                        <hr />
+                                        <h2>3. Implementation Tasks ({activePlan.implementationTasks.length})</h2>
+                                        <ol style={{ paddingLeft: '20px', marginTop: '8px' }}>
+                                            {activePlan.implementationTasks.map((rawTask, idx) => {
+                                                if (typeof rawTask === 'string') {
+                                                    return (
+                                                        <li key={idx} style={{ marginBottom: '8px' }}>
+                                                            {rawTask}
+                                                        </li>
+                                                    );
+                                                }
+                                                const task = rawTask as ProjectTask;
+                                                return (
+                                                    <li key={idx} style={{ marginBottom: '14px' }}>
+                                                        <div style={{ fontWeight: 600 }}>
+                                                            {task.step}
+                                                        </div>
+                                                        <div style={{ marginTop: '3px', fontSize: '12px', opacity: 0.85 }}>
+                                                            <code style={{
+                                                                padding: '1px 5px',
+                                                                borderRadius: '3px',
+                                                                background: 'var(--vscode-textCodeBlock-background, rgba(127,127,127,0.1))',
+                                                                fontSize: '11px'
+                                                            }}>
+                                                                {task.file}
+                                                            </code>
+                                                            {task.relatedRequirement && (
+                                                                <span style={{ marginLeft: '8px', opacity: 0.7 }}>
+                                                                    · {task.relatedRequirement}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        {task.detailedInstructions && (
+                                                            <div style={{ marginTop: '4px', fontSize: '12px', opacity: 0.75, lineHeight: 1.4 }}>
+                                                                {task.detailedInstructions}
+                                                            </div>
+                                                        )}
+                                                    </li>
+                                                );
+                                            })}
+                                        </ol>
+                                    </>
+                                )}
                             </div>
                         ) : (
                             <textarea
@@ -2686,18 +4511,39 @@ export default function App() {
                         )}
 
                         {isGeneratingTasks ? (
-                            <div className="nexus-spec-tasks-loader">
-                                <div className="nexus-flex-block-row-gap-3">
-                                    {Icons.Loader} Drafting Master Implementation Plan... <span style={{ fontFamily: 'monospace' }}>[{formatTime(specTimer)}]</span>
-                                </div>
-                                <button
-                                    className="nexus-spec-tasks-loader-stop"
-                                    onClick={() => { vscode.postMessage({ type: 'cancelTask' }); setIsGeneratingTasks(false); }}
-                                >
-                                    Stop
-                                </button>
-                            </div>
+                            // V2.1.2 spec-redesign-fix: the inline tasks loader was
+                            // a duplicate of the SpecStepper at the top of the page.
+                            // Hide action buttons during generation; the stepper
+                            // shows progress + the stop button. We render an empty
+                            // fragment here rather than removing the conditional
+                            // entirely so the structure mirrors design + requirements
+                            // phases (which also blank out their action rows during
+                            // generation).
+                            <></>
                         ) : (
+                            // V2.2 hotfix-2: when PRD has been reopened (e.g. via
+                            // the Reopen PRD button), phaseState.requirements is
+                            // 'draft' but design content is still on disk. The
+                            // page renders this design+ branch — but the design
+                            // approve button doesn't help advance the user. They
+                            // need to re-approve PRD first. Without this branch
+                            // the user is stuck with no actionable button.
+                            phaseState?.requirements === 'draft' ? (
+                                <div className="nexus-action-row">
+                                    <button
+                                        className="nexus-btn-secondary"
+                                        onClick={() => vscode.postMessage({ type: 'rejectPhase', phase: 'requirements' })}
+                                    >
+                                        <span className="nexus-flex-row">{Icons.Restart} Reject &amp; Regenerate PRD</span>
+                                    </button>
+                                    <button
+                                        className="nexus-btn-primary"
+                                        onClick={() => vscode.postMessage({ type: 'approvePhase', phase: 'requirements' })}
+                                    >
+                                        <span className="nexus-flex-row">{Icons.Check} Approve PRD</span>
+                                    </button>
+                                </div>
+                            ) :
                             // Phase-gate UX for the design → tasks transition. See audit §11.
                             phaseState?.design !== 'approved' ? (
                                 <div className="nexus-action-row">
@@ -2715,27 +4561,68 @@ export default function App() {
                                     </button>
                                 </div>
                             ) : (
-                                <div className="nexus-action-row">
-                                    <button
-                                        className="nexus-btn-secondary"
-                                        onClick={() => {
-                                            vscode.postMessage({ type: 'updateRequirements', text: requirements });
-                                            vscode.postMessage({ type: 'updateDesign', text: design });
-                                            setActiveTab('coder');
-                                        }}
-                                    >
-                                        <span className="nexus-flex-row">{Icons.Save} Just Save</span>
-                                    </button>
-                                    <button
-                                        className="nexus-btn-primary"
-                                        onClick={() => {
-                                            setIsGeneratingTasks(true);
-                                            vscode.postMessage({ type: 'generateProjectTasks' });
-                                        }}
-                                    >
-                                        <span className="nexus-flex-row">{Icons.Zap} Generate Implementation Plan</span>
-                                    </button>
-                                </div>
+                                /* Design approved — three sub-states for tasks phase:
+                                 *   1. Tasks not yet generated → Generate / Just Save
+                                 *   2. Tasks drafted (phaseState.tasks === 'draft')   → Reject / Approve Tasks
+                                 *   3. Tasks approved → Go to Coder
+                                 *
+                                 * V2.1.2 spec-redesign-fix: state 2 was previously
+                                 * missing entirely. Users who clicked "Generate
+                                 * Implementation Plan" got bounced to Coder with
+                                 * no chance to approve, AND the spec page kept
+                                 * showing the "Generate Implementation Plan" button
+                                 * (because nothing checked phaseState.tasks). Both
+                                 * are fixed by this state-machine. */
+                                phaseState?.tasks === 'approved' ? (
+                                    <div className="nexus-action-row">
+                                        <span className="nexus-flex-row nexus-text-success-bold" style={{ marginRight: 'auto' }}>
+                                            {Icons.CheckCircle} All phases approved
+                                        </span>
+                                        <button
+                                            className="nexus-btn-primary"
+                                            onClick={() => setActiveTab('coder')}
+                                        >
+                                            <span className="nexus-flex-row">{Icons.Zap} Go to Coder &amp; Execute</span>
+                                        </button>
+                                    </div>
+                                ) : phaseState?.tasks === 'draft' && activePlan ? (
+                                    <div className="nexus-action-row">
+                                        <button
+                                            className="nexus-btn-secondary"
+                                            onClick={() => vscode.postMessage({ type: 'rejectPhase', phase: 'tasks' })}
+                                        >
+                                            <span className="nexus-flex-row">{Icons.Restart} Reject &amp; Regenerate</span>
+                                        </button>
+                                        <button
+                                            className="nexus-btn-primary"
+                                            onClick={() => vscode.postMessage({ type: 'approvePhase', phase: 'tasks' })}
+                                        >
+                                            <span className="nexus-flex-row">{Icons.Check} Approve Tasks ({activePlan.implementationTasks.length})</span>
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="nexus-action-row">
+                                        <button
+                                            className="nexus-btn-secondary"
+                                            onClick={() => {
+                                                vscode.postMessage({ type: 'updateRequirements', text: requirements });
+                                                vscode.postMessage({ type: 'updateDesign', text: design });
+                                                setActiveTab('coder');
+                                            }}
+                                        >
+                                            <span className="nexus-flex-row">{Icons.Save} Just Save</span>
+                                        </button>
+                                        <button
+                                            className="nexus-btn-primary"
+                                            onClick={() => {
+                                                setIsGeneratingTasks(true);
+                                                vscode.postMessage({ type: 'generateProjectTasks' });
+                                            }}
+                                        >
+                                            <span className="nexus-flex-row">{Icons.Zap} Generate Implementation Plan</span>
+                                        </button>
+                                    </div>
+                                )
                             )
                         )}
                     </div>
@@ -2773,68 +4660,225 @@ export default function App() {
             {/* ========================================================= */}
             {/* 🌌 TAB 4: THE SPLIT-VIEW MATRIX (Traceability Map)        */}
             {/* ========================================================= */}
-            <div style={{ display: activeTab === 'Map' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden', background: '#0d1117' }}>
+            <div className="nexus-map-tab" style={{ display: activeTab === 'Map' ? 'flex' : 'none' }}>
 
-                {/* Header Controls with New Map Toggles */}
-                <div style={{ padding: '15px', borderBottom: '1px solid #30363d', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(13, 17, 23, 0.8)', zIndex: 1000, flexShrink: 0 }}>
-                    <div>
-                        <h3 style={{ margin: 0, color: 'white' }}>{t("traceability.header")}</h3>
-                        <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '4px' }}>{t("traceability.subheader")}</div>
-                    </div>
-
-                    {/*  TRACEABILITY TOGGLES */}
-                    <div className="nexus-map-toggle-group">
+                {/* V2.1.2 spec-fix-6 (Option A): compact toolbar. Single row,
+                    36px tall, using pill styling matching the rest of V2.1.2.
+                    The granularity toggle stays mounted (not conditionally
+                    rendered) so the layout doesn't shift when the user
+                    switches between codeMap/reqMap/combinedMap; we just
+                    disable it when irrelevant. */}
+                <div className="nexus-map-toolbar">
+                    {/* Map type pills — left cluster */}
+                    <div className="nexus-map-toolbar-cluster">
                         <button
-                            className={`nexus-map-toggle${activeMapType === 'codeMap' ? ' active' : ''}`}
+                            className={`nexus-map-pill${activeMapType === 'codeMap' ? ' active' : ''}`}
                             onClick={() => setActiveMapType('codeMap')}
-                        >{t("buttons.code_ast")}</button>
-
+                        >
+                            📊 Code
+                        </button>
                         <button
-                            className={`nexus-map-toggle${activeMapType === 'reqMap' ? ' active' : ''}`}
+                            className={`nexus-map-pill${activeMapType === 'reqMap' ? ' active' : ''}`}
                             onClick={() => setActiveMapType('reqMap')}
                         >
-                            Requirements {(isGraphLoading && activeMapType === 'reqMap') && <span className="spin">{Icons.Loader}</span>}
+                            📋 Reqs
+                            {(isGraphLoading && activeMapType === 'reqMap') && <span className="spin" style={{ marginLeft: '6px' }}>{Icons.Loader}</span>}
                         </button>
-
                         <button
-                            className={`nexus-map-toggle${activeMapType === 'combinedMap' ? ' active' : ''}`}
+                            className={`nexus-map-pill${activeMapType === 'combinedMap' ? ' active' : ''}`}
                             onClick={() => setActiveMapType('combinedMap')}
                         >
-                            Combined Traceability {(isGraphLoading && activeMapType === 'combinedMap') && <span className="spin">{Icons.Loader}</span>}
+                            🔗 Combined
+                            {(isGraphLoading && activeMapType === 'combinedMap') && <span className="spin" style={{ marginLeft: '6px' }}>{Icons.Loader}</span>}
                         </button>
                     </div>
 
-                    {/* Granularity toggle. Only relevant for codeMap.
-                        File: one node per file (architecture overview).
-                        Symbol: function/class nodes per file (call-trace level).
-                        v2.8 will replace the symbol path with full
-                        Tree-sitter cross-language symbol graph + cluster
-                        coloring + cross-file call edges. */}
-                    {activeMapType === 'codeMap' && (
-                        <div className="nexus-map-toggle-group" style={{ marginLeft: '8px' }}>
-                            <button
-                                className={`nexus-map-toggle${graphGranularity === 'file' ? ' active' : ''}`}
-                                onClick={() => setGraphGranularity('file')}
-                                title="Show one node per file. Edges represent imports between files. Best for architecture overview."
-                            >📄 Files</button>
-                            <button
-                                className={`nexus-map-toggle${graphGranularity === 'symbol' ? ' active' : ''}`}
-                                onClick={() => setGraphGranularity('symbol')}
-                                title="Show function and class nodes within each file. Best for tracing call chains. Full cross-file call graph ships with v2.8."
-                            >ƒ Symbols</button>
-                        </div>
+                    <div className="nexus-map-toolbar-divider" />
+
+                    {/* Granularity pills — middle cluster. Disabled when not
+                        in codeMap mode, but stays visible to prevent layout
+                        shift. v2.8 will extend symbol-level to non-TS/JS
+                        languages (see roadmap B2). */}
+                    <div className="nexus-map-toolbar-cluster">
+                        <button
+                            className={`nexus-map-pill${graphGranularity === 'file' ? ' active' : ''}${activeMapType !== 'codeMap' ? ' disabled' : ''}`}
+                            onClick={() => activeMapType === 'codeMap' && setGraphGranularity('file')}
+                            disabled={activeMapType !== 'codeMap'}
+                            title="Show one node per file. Edges represent imports between files."
+                        >
+                            📄 Files
+                        </button>
+                        <button
+                            className={`nexus-map-pill${graphGranularity === 'symbol' ? ' active' : ''}${activeMapType !== 'codeMap' ? ' disabled' : ''}`}
+                            onClick={() => activeMapType === 'codeMap' && setGraphGranularity('symbol')}
+                            disabled={activeMapType !== 'codeMap'}
+                            title="Show function and class nodes within each file. TypeScript/JavaScript only for now; multi-language support ships with backlog item B2."
+                        >
+                            ƒ Symbols
+                        </button>
+                    </div>
+
+                    {/* V2.1.2 spec-fix-6: spec filter. Only shown for reqMap
+                        and combinedMap (codeMap doesn't have a per-spec
+                        dimension), and only when there's more than one spec
+                        to filter between. */}
+                    {(activeMapType === 'reqMap' || activeMapType === 'combinedMap') && featureList.length > 1 && (
+                        <>
+                            <div className="nexus-map-toolbar-divider" />
+                            <div className="nexus-map-spec-filter">
+                                <button
+                                    className="nexus-map-pill"
+                                    onClick={() => setShowSpecFilterMenu(v => !v)}
+                                >
+                                    🗂️ {(() => {
+                                        if (selectedSpecSlugs === null) {
+                                            return `All specs (${featureList.length})`;
+                                        }
+                                        if (selectedSpecSlugs.size === 1) {
+                                            const only = Array.from(selectedSpecSlugs)[0];
+                                            return `${only} only`;
+                                        }
+                                        return `${selectedSpecSlugs.size} of ${featureList.length} specs`;
+                                    })()} ▾
+                                </button>
+                                {showSpecFilterMenu && (
+                                    <div className="nexus-map-spec-filter-menu" onMouseLeave={() => setShowSpecFilterMenu(false)}>
+                                        <div className="nexus-map-spec-filter-actions">
+                                            <button
+                                                className="nexus-map-spec-filter-action"
+                                                onClick={() => setSelectedSpecSlugs(null)}
+                                            >
+                                                Show all
+                                            </button>
+                                            <button
+                                                className="nexus-map-spec-filter-action"
+                                                onClick={() => setSelectedSpecSlugs(new Set())}
+                                            >
+                                                Hide all
+                                            </button>
+                                        </div>
+                                        <div className="nexus-map-spec-filter-divider" />
+                                        {featureList.map(f => {
+                                            const isShown = selectedSpecSlugs === null || selectedSpecSlugs.has(f.slug);
+                                            return (
+                                                <label key={f.slug} className="nexus-map-spec-filter-item">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={isShown}
+                                                        onChange={(e) => {
+                                                            // Materialize null → full set on first toggle so
+                                                            // we can mutate it. After that, normal Set ops.
+                                                            const next = selectedSpecSlugs === null
+                                                                ? new Set(featureList.map(x => x.slug))
+                                                                : new Set(selectedSpecSlugs);
+                                                            if (e.target.checked) { next.add(f.slug); }
+                                                            else { next.delete(f.slug); }
+                                                            // Convenience: if user re-selected everything, fold
+                                                            // back to null so the label shows "All specs" again.
+                                                            if (next.size === featureList.length) {
+                                                                setSelectedSpecSlugs(null);
+                                                            } else {
+                                                                setSelectedSpecSlugs(next);
+                                                            }
+                                                        }}
+                                                    />
+                                                    <span className="nexus-map-spec-filter-slug">{f.slug}</span>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </>
                     )}
 
-                    <div className="nexus-flex-block-gap-2">
-                        <button style={{ background: 'transparent', border: '1px solid #58a6ff', color: '#58a6ff', cursor: 'pointer', fontSize: '12px', padding: '6px 12px', borderRadius: '6px' }} onClick={() => vscode.postMessage({ type: 'requestWorkspaceGraph' })}>↻ Refresh</button>
-                    </div>
+                    {/* Right cluster: refresh button. Pushed to far right via
+                        auto margin. V2.1.2 spec-fix-8: always force-rebuild,
+                        bypassing the disk cache. The cache itself is kept up
+                        to date by passive opens; this button is the manual
+                        escape hatch when the user suspects staleness. */}
+                    <button
+                        className="nexus-map-pill nexus-map-pill-action"
+                        onClick={() => vscode.postMessage({ type: 'requestWorkspaceGraph', force: true })}
+                        title="Re-index workspace and re-parse all specs from scratch (bypasses cache, slower)"
+                        style={{ marginLeft: 'auto' }}
+                    >
+                        ↻ Refresh
+                    </button>
                 </div>
+
+                {/* V2.1.2 spec-fix-5: per-feature aggregation status. Shows
+                    the user how many specs made it into the matrix and which
+                    ones failed. Without this, partial failures look like
+                    "matrix is broken" with no diagnostic. Only relevant to
+                    reqMap and combinedMap views — codeMap is per-workspace,
+                    not per-spec. */}
+                {(activeMapType === 'reqMap' || activeMapType === 'combinedMap') && graphPayload && typeof graphPayload.featureCount === 'number' && graphPayload.featureCount > 0 && (
+                    <div className="nexus-traceability-aggregate-banner">
+                        {(() => {
+                            const total = graphPayload.featureCount as number;
+                            const ok = graphPayload.featuresWithReqs as number || 0;
+                            const warnings: { slug: string; phase: string; reason: string }[] = graphPayload.featureWarnings || [];
+                            // V2.1.2 spec-fix-8: cache stats. Counts are per-graph
+                            // (req + design) not per-feature, so a fully-cached
+                            // 5-spec workspace shows up to 10 hits.
+                            const cacheHits = graphPayload.cacheHits as number || 0;
+                            const cacheMisses = graphPayload.cacheMisses as number || 0;
+                            const totalParses = cacheHits + cacheMisses;
+                            const cacheBadge = totalParses > 0 ? (
+                                cacheMisses === 0
+                                    ? <span className="nexus-traceability-aggregate-cache"> · all from cache</span>
+                                    : cacheHits === 0
+                                        ? <span className="nexus-traceability-aggregate-cache"> · all freshly parsed</span>
+                                        : <span className="nexus-traceability-aggregate-cache"> · {cacheHits} from cache, {cacheMisses} fresh</span>
+                            ) : null;
+
+                            if (ok === total && warnings.length === 0) {
+                                return (
+                                    <span className="nexus-traceability-aggregate-ok">
+                                        ✓ Aggregating {total} spec{total === 1 ? '' : 's'} into the matrix
+                                        {cacheBadge}
+                                    </span>
+                                );
+                            }
+                            if (ok > 0) {
+                                return (
+                                    <details className="nexus-traceability-aggregate-partial">
+                                        <summary>
+                                            ⚠ Got {ok} of {total} specs into the matrix. {warnings.length} issue{warnings.length === 1 ? '' : 's'}.
+                                            {cacheBadge}
+                                        </summary>
+                                        <ul className="nexus-traceability-aggregate-issues">
+                                            {warnings.map((w, idx) => (
+                                                <li key={idx}>
+                                                    <code>{w.slug}</code> ({w.phase}): {w.reason}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </details>
+                                );
+                            }
+                            return (
+                                <details className="nexus-traceability-aggregate-failed">
+                                    <summary>✕ Could not aggregate any specs into the matrix.{cacheBadge}</summary>
+                                    <ul className="nexus-traceability-aggregate-issues">
+                                        {warnings.map((w, idx) => (
+                                            <li key={idx}>
+                                                <code>{w.slug}</code> ({w.phase}): {w.reason}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </details>
+                            );
+                        })()}
+                    </div>
+                )}
 
                 {/* Split View Body */}
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
 
                     {/* LEFT SIDE: WebGL 3D Canvas (60% Width) */}
-                    <div ref={graphContainerRef} style={{ flex: 3, position: 'relative', borderRight: '1px solid #30363d', overflow: 'hidden' }}>
+                    <div ref={graphContainerRef} className="nexus-map-canvas-container" style={{ flex: 3, position: 'relative', overflow: 'hidden' }}>
 
                         {/* 🚀 THE NEW HUD OVERLAY: Shows exactly what the LLM is doing in the background! */}
                         {isGraphLoading && (
@@ -2867,6 +4911,33 @@ export default function App() {
 
                         {!graphData ? (
                             <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>{t("search.scanning_workspace")}</div>
+                        ) : (visualGraphData.nodes.length === 0) ? (
+                            // V2.1.2 spec-fix-4: empty-state diagnostic. Without
+                            // this overlay the user just sees a blank canvas
+                            // when the graph is empty — they can't tell whether
+                            // the index is broken, the workspace has no code,
+                            // or they haven't generated requirements yet.
+                            <div className="nexus-codemap-empty-overlay">
+                                {activeMapType === 'codeMap' ? (
+                                    <>
+                                        <div className="nexus-codemap-empty-overlay-title">No source files indexed</div>
+                                        <div>The code map scans <code>.ts .tsx .js .jsx .py .go .java .rs .vue .svelte .html .css</code> files in your workspace.</div>
+                                        <div className="nexus-codemap-empty-overlay-hint">If your project uses other languages, file existence is not currently tracked. Try ↻ Refresh after adding code.</div>
+                                    </>
+                                ) : activeMapType === 'reqMap' ? (
+                                    <>
+                                        <div className="nexus-codemap-empty-overlay-title">No requirements found</div>
+                                        <div>No <code>requirements.md</code> exists in any spec under <code>.nexus/specs/</code>.</div>
+                                        <div className="nexus-codemap-empty-overlay-hint">Generate a PRD in the Spec tab, then ↻ Refresh here.</div>
+                                    </>
+                                ) : (
+                                    <>
+                                        <div className="nexus-codemap-empty-overlay-title">Combined map is empty</div>
+                                        <div>The combined view requires both source files AND a generated PRD.</div>
+                                        <div className="nexus-codemap-empty-overlay-hint">Check Code Map and Requirements Map tabs above to see which side is empty.</div>
+                                    </>
+                                )}
+                            </div>
                         ) : (
                             <Suspense fallback={
                                 <div style={{ color: '#8b949e', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)' }}>
@@ -2929,7 +5000,7 @@ export default function App() {
                     </div>
 
                     {/* RIGHT SIDE: Text Detail Sidebar (40% Width) */}
-                    <div style={{ flex: 2, overflowY: 'auto', padding: '15px', display: 'flex', flexDirection: 'column', gap: '15px', background: 'var(--vscode-editor-background)', position: 'relative' }}>
+                    <div className="nexus-map-side-panel">
                         {/* Selected-node detail card. Single click on a graph
                             node populates this; double click opens the file
                             in the editor. The card stays visible until the
@@ -2978,6 +5049,193 @@ export default function App() {
                                         Tip: double-click any node to jump straight to its source.
                                     </span>
                                 </div>
+
+                                {/* 360° context sections (Option A polish, May 2026).
+                                    Each section renders only when there's data,
+                                    so a stale or thin node stays minimal. List
+                                    items are buttons — clicking re-selects
+                                    the target node so the user can walk the
+                                    graph from the panel.
+                                    V2.8 will replace these with cluster-aware
+                                    callers/callees from the symbol-level call
+                                    graph; for now this is the file-level
+                                    neighborhood that the existing graphData
+                                    actually carries. */}
+                                {selectedNodeContext?.kind === 'file' && (
+                                    <>
+                                        {selectedNodeContext.importers.length > 0 && (
+                                            <div className="nexus-graph-selected-card__section">
+                                                <div className="nexus-graph-selected-card__section-title">
+                                                    ◀ Imported by ({selectedNodeContext.importers.length})
+                                                </div>
+                                                <ul className="nexus-graph-selected-card__list">
+                                                    {selectedNodeContext.importers.slice(0, 12).map(fp => (
+                                                        <li key={fp}>
+                                                            <button
+                                                                type="button"
+                                                                className="nexus-graph-selected-card__list-item"
+                                                                onClick={() => setSelectedGraphNode({
+                                                                    id: fp,
+                                                                    name: fp.split('/').pop() || fp,
+                                                                    group: 'file',
+                                                                    filepath: fp,
+                                                                })}
+                                                                title={fp}
+                                                            >📄 {fp.split('/').pop()}</button>
+                                                        </li>
+                                                    ))}
+                                                    {selectedNodeContext.importers.length > 12 && (
+                                                        <li className="nexus-graph-selected-card__list-overflow">
+                                                            +{selectedNodeContext.importers.length - 12} more…
+                                                        </li>
+                                                    )}
+                                                </ul>
+                                            </div>
+                                        )}
+
+                                        {selectedNodeContext.importsResolved.length > 0 && (
+                                            <div className="nexus-graph-selected-card__section">
+                                                <div className="nexus-graph-selected-card__section-title">
+                                                    ▶ Imports ({selectedNodeContext.importsResolved.length})
+                                                </div>
+                                                <ul className="nexus-graph-selected-card__list">
+                                                    {selectedNodeContext.importsResolved.slice(0, 12).map(fp => (
+                                                        <li key={fp}>
+                                                            <button
+                                                                type="button"
+                                                                className="nexus-graph-selected-card__list-item"
+                                                                onClick={() => setSelectedGraphNode({
+                                                                    id: fp,
+                                                                    name: fp.split('/').pop() || fp,
+                                                                    group: 'file',
+                                                                    filepath: fp,
+                                                                })}
+                                                                title={fp}
+                                                            >📄 {fp.split('/').pop()}</button>
+                                                        </li>
+                                                    ))}
+                                                    {selectedNodeContext.importsResolved.length > 12 && (
+                                                        <li className="nexus-graph-selected-card__list-overflow">
+                                                            +{selectedNodeContext.importsResolved.length - 12} more…
+                                                        </li>
+                                                    )}
+                                                </ul>
+                                            </div>
+                                        )}
+
+                                        {selectedNodeContext.externalImports.length > 0 && (
+                                            <div className="nexus-graph-selected-card__section">
+                                                <div className="nexus-graph-selected-card__section-title">
+                                                    📦 External libraries ({selectedNodeContext.externalImports.length})
+                                                </div>
+                                                <div className="nexus-graph-selected-card__chip-row">
+                                                    {selectedNodeContext.externalImports.slice(0, 8).map(name => (
+                                                        <span key={name} className="nexus-graph-selected-card__chip">{name}</span>
+                                                    ))}
+                                                    {selectedNodeContext.externalImports.length > 8 && (
+                                                        <span className="nexus-graph-selected-card__chip is-overflow">
+                                                            +{selectedNodeContext.externalImports.length - 8}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {selectedNodeContext.symbols.length > 0 && (
+                                            <div className="nexus-graph-selected-card__section">
+                                                <div className="nexus-graph-selected-card__section-title">
+                                                    ◆ Symbols in this file ({selectedNodeContext.symbols.length})
+                                                </div>
+                                                <ul className="nexus-graph-selected-card__list">
+                                                    {selectedNodeContext.symbols.slice(0, 12).map(sym => (
+                                                        <li key={`${sym.kind}::${sym.name}`}>
+                                                            <button
+                                                                type="button"
+                                                                className="nexus-graph-selected-card__list-item"
+                                                                onClick={() => setSelectedGraphNode({
+                                                                    id: `${selectedNodeContext.filepath}::${sym.name}`,
+                                                                    name: sym.name,
+                                                                    group: sym.kind,
+                                                                    filepath: selectedNodeContext.filepath,
+                                                                    symbol: sym.name,
+                                                                })}
+                                                                title={`${sym.kind}: ${sym.name}`}
+                                                            >
+                                                                {sym.kind === 'class' ? '© ' : sym.kind === 'function' ? 'ƒ ' : '◆ '}
+                                                                {sym.name}
+                                                                {selectedNodeContext.exports.includes(sym.name) && (
+                                                                    <span className="nexus-graph-selected-card__list-badge">exported</span>
+                                                                )}
+                                                            </button>
+                                                        </li>
+                                                    ))}
+                                                    {selectedNodeContext.symbols.length > 12 && (
+                                                        <li className="nexus-graph-selected-card__list-overflow">
+                                                            +{selectedNodeContext.symbols.length - 12} more…
+                                                        </li>
+                                                    )}
+                                                </ul>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+
+                                {selectedNodeContext?.kind === 'symbol' && (
+                                    <>
+                                        <div className="nexus-graph-selected-card__section">
+                                            <div className="nexus-graph-selected-card__meta-row">
+                                                <span className="nexus-graph-selected-card__meta-label">Kind:</span>
+                                                <span>{selectedNodeContext.symbolKind}</span>
+                                            </div>
+                                            {selectedNodeContext.isExported && (
+                                                <div className="nexus-graph-selected-card__meta-row">
+                                                    <span className="nexus-graph-selected-card__meta-label">Visibility:</span>
+                                                    <span className="nexus-graph-selected-card__list-badge">exported</span>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {selectedNodeContext.siblings.length > 0 && (
+                                            <div className="nexus-graph-selected-card__section">
+                                                <div className="nexus-graph-selected-card__section-title">
+                                                    ◆ Other symbols in this file ({selectedNodeContext.siblings.length})
+                                                </div>
+                                                <ul className="nexus-graph-selected-card__list">
+                                                    {selectedNodeContext.siblings.slice(0, 10).map(sym => (
+                                                        <li key={`${sym.kind}::${sym.name}`}>
+                                                            <button
+                                                                type="button"
+                                                                className="nexus-graph-selected-card__list-item"
+                                                                onClick={() => setSelectedGraphNode({
+                                                                    id: `${selectedNodeContext.filepath}::${sym.name}`,
+                                                                    name: sym.name,
+                                                                    group: sym.kind,
+                                                                    filepath: selectedNodeContext.filepath,
+                                                                    symbol: sym.name,
+                                                                })}
+                                                                title={`${sym.kind}: ${sym.name}`}
+                                                            >
+                                                                {sym.kind === 'class' ? '© ' : sym.kind === 'function' ? 'ƒ ' : '◆ '}
+                                                                {sym.name}
+                                                            </button>
+                                                        </li>
+                                                    ))}
+                                                    {selectedNodeContext.siblings.length > 10 && (
+                                                        <li className="nexus-graph-selected-card__list-overflow">
+                                                            +{selectedNodeContext.siblings.length - 10} more…
+                                                        </li>
+                                                    )}
+                                                </ul>
+                                            </div>
+                                        )}
+
+                                        <div className="nexus-graph-selected-card__section">
+                                            <div className="nexus-graph-selected-card__v2-hint">
+                                                ⓘ Cross-file callers and callees ship in v2.8 (GitNexus-class symbol graph).
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
                             </div>
                         )}
 
@@ -3175,6 +5433,52 @@ export default function App() {
                     </div>
                 </div>
             </div>
+
+            {/* ========================================================= */}
+            {/* ⏱️ TAB 5: TIMELINE (P3.1 telemetry retrospective)         */}
+            {/* ========================================================= */}
+            <div className="nexus-timeline-tab" style={{ display: activeTab === 'timeline' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+                <TimelineView
+                    incomingEvents={timelineEvents}
+                    loading={timelineLoading}
+                    onRefresh={() => {
+                        setTimelineLoading(true);
+                        vscode.postMessage({ type: 'getTimelineEvents' });
+                    }}
+                />
+            </div>
         </AppShell>
+
+        {/* V2.1.2b — scaffold confirmation dialog. Renders only when
+            the reducer is in 'deciding' or 'failed' phase. Side effects
+            (postMessage to host) live here rather than in the reducer
+            so the reducer stays pure and unit-testable. */}
+        {(scaffoldState.phase === 'deciding' || scaffoldState.phase === 'failed') && scaffoldState.decision && (
+            <ScaffoldConfirmationDialog
+                templates={scaffoldState.decision.templates}
+                stackHint={scaffoldState.decision.stackHint}
+                confidence={scaffoldState.decision.confidence}
+                busy={false /* acknowledging phase clears the dialog;
+                              from deciding/failed it's always interactive */}
+                lastError={scaffoldState.lastError}
+                onPick={(action, templateId) => {
+                    dispatchScaffoldAction({ type: 'userPicked', action, templateId });
+                    vscode.postMessage({
+                        type: 'scaffoldDecisionMade',
+                        action,
+                        templateId,
+                    });
+                }}
+                onCancel={() => {
+                    dispatchScaffoldAction({ type: 'userPicked', action: 'cancel', templateId: null });
+                    vscode.postMessage({
+                        type: 'scaffoldDecisionMade',
+                        action: 'cancel',
+                        templateId: null,
+                    });
+                }}
+            />
+        )}
+        </>
     );
 }
