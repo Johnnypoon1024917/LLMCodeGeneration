@@ -203,9 +203,15 @@ describe('parseMcpConfig — successful parse', () => {
             expect(r.servers).toHaveLength(1);
             const s = r.servers[0]!;
             expect(s.id).toBe('fs');
-            expect(s.command).toBe('npx');
-            expect(s.args).toEqual([]);
-            expect(s.env).toEqual({});
+            // Discriminated-union narrowing: only stdio entries carry
+            // command/args/env; HTTP entries carry url/headers instead.
+            // Configs with `command` parse as stdio per mcpConfig.ts.
+            expect(s.transport).toBe('stdio');
+            if (s.transport === 'stdio') {
+                expect(s.command).toBe('npx');
+                expect(s.args).toEqual([]);
+                expect(s.env).toEqual({});
+            }
             expect(s.disabled).toBe(false);
             expect(s.description).toBeUndefined();
         }
@@ -228,8 +234,11 @@ describe('parseMcpConfig — successful parse', () => {
             expect(r.servers).toHaveLength(1);
             const s = r.servers[0]!;
             expect(s.id).toBe('github');
-            expect(s.args).toEqual(['-y', '@modelcontextprotocol/server-github']);
-            expect(s.env).toEqual({ GITHUB_TOKEN: '${env:GITHUB_TOKEN}' });
+            expect(s.transport).toBe('stdio');
+            if (s.transport === 'stdio') {
+                expect(s.args).toEqual(['-y', '@modelcontextprotocol/server-github']);
+                expect(s.env).toEqual({ GITHUB_TOKEN: '${env:GITHUB_TOKEN}' });
+            }
             expect(s.disabled).toBe(false);
             expect(s.description).toBe('GitHub MCP server');
         }
@@ -268,7 +277,11 @@ describe('parseMcpConfig — successful parse', () => {
             }
         }`);
         if (!isMcpConfigError(r)) {
-            expect(r.servers[0]!.args).toEqual(['-y', 'server', '/tmp', '--flag']);
+            const s = r.servers[0]!;
+            expect(s.transport).toBe('stdio');
+            if (s.transport === 'stdio') {
+                expect(s.args).toEqual(['-y', 'server', '/tmp', '--flag']);
+            }
         }
     });
 

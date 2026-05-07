@@ -1,6 +1,0 @@
-{
-  "id": "react-vite",
-  "displayName": "React + Vite + Tailwind",
-  "description": "Modern React frontend: Vite for dev/build, TypeScript strict mode, Tailwind v4 for styling. Includes a sample counter component.",
-  "stackTags": ["react", "vite", "typescript", "tailwind", "frontend"]
-}

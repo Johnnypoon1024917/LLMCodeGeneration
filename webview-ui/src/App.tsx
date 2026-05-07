@@ -140,6 +140,7 @@ import { HookFireCard } from './components/HookFireCard';
 import { ToolApprovalCard, type ToolApprovalRequest } from './components/ToolApprovalCard';
 import { FixApplicationCard } from './components/FixApplicationCard';
 import { CrossTaskRegressionBanner, type RemediationTaskPayload } from './components/CrossTaskRegressionBanner';
+import { VerifierAttemptsPanel, type VerifierAttempt } from './components/VerifierAttemptsPanel';
 import { applyToolEvent, type ToolCallState, type ToolLifecycleEvent } from './toolEvents';
 import { applyHookEvent, sortedHookFires, type HookFireState, type HookLifecycleEvent } from './hookEvents';
 import {
@@ -659,6 +660,15 @@ export default function App() {
         summary: string;
         remediationTask?: RemediationTaskPayload;
     }>>([]);
+    // V2.2.3 "things I tried" — per-task verifier attempts with
+    // structured failure data. Keyed by the backend task id we receive
+    // in verifierAttempt messages (matches `data.task` from executeTask).
+    // We aggregate attempts in arrival order; the panel renders them
+    // chronologically. Cleared on taskRetry callback so a fresh attempt
+    // doesn't visually stack on top of the previous run's panel.
+    const [verifierAttemptsByTask, setVerifierAttemptsByTask] = useState<
+        Map<string, VerifierAttempt[]>
+    >(new Map());
     // P1.4: hook fires state. Keyed by hookFireId. The reducer in
     // hookEvents.ts handles created/updated semantics. Cards render
     // inline in the chat thread, sorted by start time.
@@ -1616,6 +1626,60 @@ export default function App() {
                         remediationTask: data.remediationTask,
                     },
                 ]);
+            }
+
+            // V2.2.3 "things I tried" — verifier emitted structured
+            // failures during a task's retry loop. We append per-task
+            // and dedupe by attempt number (host fires once per
+            // attempt; a re-run from session replay would re-fire).
+            if (data.type === 'verifierAttempt') {
+                const taskRef = typeof data.task === 'string' ? data.task : '';
+                if (!taskRef) { return; }
+                const attemptNum = Number(data.attempt);
+                if (!Number.isFinite(attemptNum)) { return; }
+                const incoming: VerifierAttempt = {
+                    attempt: attemptNum,
+                    selfHealed: Boolean(data.selfHealed),
+                    critique: typeof data.critique === 'string' ? data.critique : '',
+                    failures: Array.isArray(data.failures)
+                        ? (data.failures as VerifierAttempt['failures'])
+                        : [],
+                };
+                setVerifierAttemptsByTask(prev => {
+                    const next = new Map(prev);
+                    const existing = next.get(taskRef) ?? [];
+                    // Dedupe by attempt number — replay can re-fire.
+                    const filtered = existing.filter(a => a.attempt !== incoming.attempt);
+                    const merged = [...filtered, incoming].sort(
+                        (a, b) => a.attempt - b.attempt
+                    );
+                    next.set(taskRef, merged);
+                    return next;
+                });
+            }
+
+            // V2.2.3: when a task is retried at the outer (executeTask)
+            // level — i.e. the webview redispatches via dispatchTaskExecution
+            // for a new run of the same plan task — the previous run's
+            // verifier attempts are stale. The host already fires
+            // taskRetry for the inner Coder retry boundary, but that's
+            // the WRONG boundary to clear at: the outer retry is what
+            // means "start over." For now we leave attempts in place
+            // across inner retries (they're cumulative dead-ends, which
+            // is what we want to surface) and clear only when a brand-
+            // new task starts via taskExecutionStarted.
+            if (data.type === 'taskExecutionStarted') {
+                const taskRef = typeof (data as { task?: unknown }).task === 'string'
+                    ? (data as { task: string }).task
+                    : '';
+                if (taskRef) {
+                    setVerifierAttemptsByTask(prev => {
+                        if (!prev.has(taskRef)) { return prev; }
+                        const next = new Map(prev);
+                        next.delete(taskRef);
+                        return next;
+                    });
+                }
             }
 
             // P1.4: hook lifecycle events from HookManager. Same shape
@@ -3277,6 +3341,24 @@ export default function App() {
                                     onDismiss={() => {
                                         setCrossTaskRegressions(prev => prev.filter(r => r.id !== reg.id));
                                     }}
+                                />
+                            ))}
+                        </div>
+                    )}
+
+                    {/* V2.2.3 "things I tried" panels. One per task that
+                        produced verifier failures, regardless of final
+                        outcome. Self-healed attempts get amber accent;
+                        terminal failures get red. Collapsed by default
+                        to avoid dominating the chat thread when every
+                        task has 1-2 attempts. */}
+                    {verifierAttemptsByTask.size > 0 && (
+                        <div className="verifier-attempts-region" aria-label="Verifier attempts">
+                            {Array.from(verifierAttemptsByTask.entries()).map(([tk, attempts]) => (
+                                <VerifierAttemptsPanel
+                                    key={`verifier-attempts-${tk}`}
+                                    taskKey={tk}
+                                    attempts={attempts}
                                 />
                             ))}
                         </div>

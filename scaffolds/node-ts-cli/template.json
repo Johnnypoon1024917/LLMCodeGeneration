@@ -1,0 +1,6 @@
+{
+  "id": "node-ts-cli",
+  "displayName": "Node.js + TypeScript CLI",
+  "description": "TypeScript command-line tool with subcommand routing, argv parsing, structured exit codes, and a working test suite. No external runtime dependencies — pure stdlib.",
+  "stackTags": ["node", "typescript", "cli", "command-line", "tool"]
+}

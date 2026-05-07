@@ -1,6 +1,0 @@
-{
-  "id": "python-cli",
-  "displayName": "Python CLI",
-  "description": "Modern Python CLI using pyproject.toml + src layout. Compatible with pip install -e . for editable installs and uv for fast resolution.",
-  "stackTags": ["python", "cli"]
-}

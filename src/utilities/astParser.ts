@@ -1,5 +1,11 @@
 import * as vscode from 'vscode';
 import { log } from '../logger';
+import {
+    detectLanguage,
+    extractSymbolsAsync,
+    initTreeSitter,
+    isTreeSitterEnabled,
+} from './treeSitterParser';
 
 /**
  * Symbol extraction result from a single source file.
@@ -63,10 +69,77 @@ export interface ExtractedSymbols {
  *      syntax errors — wrap it in try/catch with the same fallback.
  */
 export class ASTParser {
-    public static async init(_context: vscode.ExtensionContext) {
-        //  We have stripped out the fragile WebAssembly Tree-Sitter dependency.
-        // The AST Engine is now powered by a bulletproof, zero-dependency RegExp engine.
-        log.info("AST Regex Engine initialized successfully.");
+    /**
+     * Initialise both parser backends.
+     *
+     * The regex parser is always available — it's the default and the
+     * sync fallback. Tree-Sitter is OPT-IN behind the
+     * `nexuscode.experimental.treeSitter` setting; when enabled, we
+     * pre-warm its wasm runtime here so the first parse doesn't pay
+     * the ~250ms init cost on the user's critical path.
+     *
+     * Why init unconditionally even when the flag is off: the flag is
+     * read per-call (workspace settings can change at runtime). Pre-
+     * warming when the user might flip the flag mid-session is cheap
+     * insurance — but only if the wasms actually ship in the VSIX.
+     * Per the recon in session 1 of the language-coverage work, the
+     * wasms DO ship (vsce ls confirmed parser/*.wasm and the
+     * web-tree-sitter + tree-sitter-typescript node_modules entries).
+     * If wasm loading fails on a user's machine, initTreeSitter logs
+     * the failure and downstream calls fall back to the regex parser
+     * via the dispatcher in extractSymbolsAuto below.
+     */
+    public static async init(context: vscode.ExtensionContext) {
+        log.info("AST Regex Engine initialized");
+        // Pre-warm Tree-Sitter when opted in. Failure here doesn't
+        // block init — the dispatcher detects the flag at call time
+        // and the regex parser remains available regardless.
+        try {
+            if (isTreeSitterEnabled()) {
+                await initTreeSitter(context.extensionPath);
+                log.info("Tree-Sitter parser pre-warmed");
+            }
+        } catch (e) {
+            log.warn("Tree-Sitter pre-warm failed; falling back to regex parser", e);
+        }
+    }
+
+    /**
+     * Async dispatcher: route to Tree-Sitter when opted in AND the
+     * file extension is supported, else fall back to the sync regex
+     * parser. Same return shape either way (ExtractedSymbols).
+     *
+     * Callers in production code (codeGraph.ts) should prefer this
+     * over the sync `extractSymbols` so the user can flip the feature
+     * flag and get the better parser without any code change.
+     *
+     * Tests can keep calling `extractSymbols` directly — they want
+     * deterministic regex behavior independent of the user's setting.
+     *
+     * Failure mode: if Tree-Sitter throws or rejects (wasm load
+     * failure on the user's machine, parser core unavailable, etc.),
+     * we log and fall through to the regex parser. The user gets a
+     * worse parse, not a crash.
+     */
+    public static async extractSymbolsAuto(
+        filepath: string,
+        content: string,
+        extensionPath: string,
+    ): Promise<ExtractedSymbols> {
+        if (isTreeSitterEnabled()) {
+            const lang = detectLanguage(filepath);
+            if (lang) {
+                try {
+                    return await extractSymbolsAsync(extensionPath, content, lang);
+                } catch (e) {
+                    log.warn(`[ASTParser] Tree-Sitter failed for ${filepath}; falling back to regex`, e);
+                    // Fall through to regex
+                }
+            }
+            // detectLanguage returned null → file extension not yet
+            // supported by the Tree-Sitter walker. Use regex.
+        }
+        return ASTParser.extractSymbols(content);
     }
 
     public static extractSymbols(content: string): ExtractedSymbols {

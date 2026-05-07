@@ -1,0 +1,22 @@
+{
+  "name": "my-cli",
+  "version": "0.1.0",
+  "description": "A TypeScript CLI scaffolded by NexusCode",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "my-cli": "dist/index.js"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0",
+    "@types/node": "^20.11.0"
+  }
+}

@@ -202,6 +202,27 @@ export type HostToWebview =
     | { type: 'requestToolApproval'; callId: string; toolName: string; filepath: string; preview?: unknown }
     // V2.2 cross-task remediation banner.
     | { type: 'crossTaskRegression'; [k: string]: unknown }
+    // V2.2.3 "things I tried" — emitted per verifier attempt during a
+    // task's retry loop. Carries structured VerifierFailure[] so the
+    // webview can render dead-ends instead of just the final outcome.
+    // selfHealed=true means a SUBSEQUENT attempt fixed it; false means
+    // this was the terminal failure (max retries exhausted).
+    | {
+        type: 'verifierAttempt';
+        task: string;
+        attempt: number;
+        selfHealed: boolean;
+        critique: string;
+        failures: Array<{
+            kind: 'compile' | 'test' | 'review';
+            file: string | null;
+            line?: number;
+            column?: number;
+            code?: string;
+            message: string;
+            severity: 'error' | 'unambiguous_typo' | 'warning';
+        }>;
+      }
     | { type: 'specError'; phase: 'requirements' | 'design' | 'tasks'; title: string; message: string }
     | { type: 'featureChanged'; currentFeature: string; requirements: string; design: string; tasks: any; phaseState: any; featureList: { slug: string; phaseState: any }[] }
     | { type: 'featureChangeFailed'; slug: string; reason: string }
@@ -322,6 +343,8 @@ const KNOWN_HOST_TO_WEBVIEW_TYPES: ReadonlySet<HostToWebview['type']> = new Set(
     'requestToolApproval',
     // V2.2 cross-task remediation
     'crossTaskRegression',
+    // V2.2.3 verifier attempt with structured failures
+    'verifierAttempt',
 ]);
 
 // ─── runtime validator ───────────────────────────────────────────────

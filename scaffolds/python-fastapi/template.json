@@ -1,0 +1,6 @@
+{
+  "id": "python-fastapi",
+  "displayName": "Python + FastAPI",
+  "description": "FastAPI service with Pydantic models, /health probe, /api/items CRUD example, structured error handling, lifespan hooks, and a working pytest + httpx test suite. Python 3.10+.",
+  "stackTags": ["python", "api", "fastapi", "rest", "web"]
+}

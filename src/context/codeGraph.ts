@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { ASTParser } from '../utilities/astParser';
+import { isTreeSitterEnabled } from '../utilities/treeSitterParser';
 import { log } from '../logger';
 
 export interface FileNode {
@@ -29,10 +30,28 @@ export interface ScoredNode {
 }
 
 /**
- * Parses file content and adds it to the workspace graph using AST
+ * Parses file content and adds it to the workspace graph using AST.
+ *
+ * V2 language-coverage Session 1: when `extensionPath` is provided
+ * AND the user has opted into the experimental Tree-Sitter parser,
+ * this routes parsing through Tree-Sitter for better symbol
+ * extraction (renamed imports, dynamic imports, re-exports). Falls
+ * back to the regex parser otherwise — same return shape, same
+ * graph behavior.
+ *
+ * `extensionPath` is optional for backward compat with tests that
+ * call this directly without an ExtensionContext. When omitted, the
+ * dispatcher unconditionally uses the regex parser (which needs no
+ * extensionPath).
  */
-export async function addFileToGraph(filepath: string, content: string) {
-    const symbols = ASTParser.extractSymbols(content);
+export async function addFileToGraph(
+    filepath: string,
+    content: string,
+    extensionPath?: string,
+) {
+    const symbols = extensionPath
+        ? await ASTParser.extractSymbolsAuto(filepath, content, extensionPath)
+        : ASTParser.extractSymbols(content);
 
     const node: FileNode = {
         filepath,
@@ -317,13 +336,19 @@ function extractImportsLite(filepath: string, content: string): string[] {
     return imports;
 }
 
-export async function buildWorkspaceGraph(rootUri?: vscode.Uri) {
+export async function buildWorkspaceGraph(rootUri?: vscode.Uri, extensionPath?: string) {
     // V2.1.2 spec-fix-4: extended language coverage. The original glob
     // only matched JS/TS so any project written in another language
     // produced an empty code map (which then cascaded — req map and
     // combined map showed nothing because they merge against codeMap).
     // Now we scan the common web/backend extensions; for non-TS/JS
     // files we use regex-based import extraction (extractImportsLite).
+    //
+    // V2 language-coverage Session 1: extensionPath is forwarded to
+    // addFileToGraph so the Tree-Sitter dispatcher in ASTParser can
+    // locate its wasm runtime. When extensionPath is omitted (e.g.
+    // direct test calls), Tree-Sitter is bypassed and the regex
+    // parser is used instead — preserves the existing test contract.
     const exts = '{ts,tsx,js,jsx,mjs,cjs,py,go,java,rs,vue,svelte,html,css}';
     const searchPattern = rootUri
         ? new vscode.RelativePattern(rootUri, `**/*.${exts}`)
@@ -337,10 +362,27 @@ export async function buildWorkspaceGraph(rootUri?: vscode.Uri) {
             const content = doc.getText();
             const ext = path.extname(file.fsPath).toLowerCase();
 
-            // TS/JS go through the full AST parser. Everything else
-            // goes through the regex-lite path with empty symbols.
-            if (ext === '.ts' || ext === '.tsx' || ext === '.js' || ext === '.jsx' || ext === '.mjs' || ext === '.cjs') {
-                await addFileToGraph(file.fsPath, content);
+            // TS/JS always go through the full AST parser (regex
+            // works fine for them; Tree-Sitter is even better when
+            // the experimental flag is on).
+            //
+            // Python is conditional: only worth routing through
+            // addFileToGraph when Tree-Sitter is available. The
+            // regex parser is TS-grammar-specific — running it over
+            // Python source returns junk (Python's `class Foo:`
+            // happens to match, but `def foo()` and Python imports
+            // don't match TS regexes at all). When the flag is off,
+            // .py files fall through to the regex-lite import path
+            // below — same behavior as before V2 language session 2.
+            const usesTreeSitter = isTreeSitterEnabled();
+            const treeSitterEligible = usesTreeSitter && ext === '.py';
+            if (
+                ext === '.ts' || ext === '.tsx' ||
+                ext === '.js' || ext === '.jsx' ||
+                ext === '.mjs' || ext === '.cjs' ||
+                treeSitterEligible
+            ) {
+                await addFileToGraph(file.fsPath, content, extensionPath);
             } else {
                 const imports = extractImportsLite(file.fsPath, content);
                 workspaceGraph.set(file.fsPath, {
@@ -443,4 +485,4 @@ export function getSmartASTContext(query: string, opts: SmartContextOptions = {}
     return filtered.slice(0, topN).map(c =>
         `[Score: ${c.score}] 📍 ${c.filepath} (${c.reasons.join(', ')})\nExports: ${c.node.exports.join(', ')}\nClasses: ${c.node.classes.join(', ')}\nFunctions: ${c.node.functions.join(', ')}`
     ).join('\n\n');
-}
+}   

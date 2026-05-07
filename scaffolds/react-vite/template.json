@@ -1,0 +1,6 @@
+{
+  "id": "react-vite",
+  "displayName": "React + Vite + TypeScript",
+  "description": "React 18 + Vite + TypeScript app. Strict mode, hot reload, working counter component with state, sample API-fetch hook with loading/error states, and a vitest test suite using @testing-library/react.",
+  "stackTags": ["react", "vite", "typescript", "frontend", "spa"]
+}

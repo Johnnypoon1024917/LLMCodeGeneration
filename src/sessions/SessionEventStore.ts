@@ -89,6 +89,11 @@ const RECORDABLE_EVENT_TYPES = new Set<string>([
     // V2.2 cross-task analysis.
     'crossTaskRegression',
 
+    // V2.2.3 verifier attempts with structured failures. Recorded so
+    // post-reload replay reconstructs the "things I tried" panel
+    // without needing the host to re-emit during reload.
+    'verifierAttempt',
+
     // Status text shown in status bar — useful for replay context.
     'statusUpdate',
 ]);

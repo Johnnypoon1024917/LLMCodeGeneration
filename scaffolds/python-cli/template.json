@@ -1,0 +1,6 @@
+{
+  "id": "python-cli",
+  "displayName": "Python CLI",
+  "description": "Python command-line tool using Click. Subcommand routing, type-validated args, structured exit codes, and a working pytest suite. Python 3.10+.",
+  "stackTags": ["python", "cli", "command-line", "click", "tool"]
+}

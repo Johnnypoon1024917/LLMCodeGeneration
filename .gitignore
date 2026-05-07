@@ -1,9 +1,33 @@
-out
-dist
-node_modules
-.vscode-test/
-*.vsix
+# Dependencies
+node_modules/
 
-# Audit logs contain potentially sensitive data (prompts, file contents,
-# user identities). Never commit. The audit module writes here.
-.nexus/audit/
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+.vscode-test/
+.history/
+
+# OS
+.DS_Store
+Thumbs.db

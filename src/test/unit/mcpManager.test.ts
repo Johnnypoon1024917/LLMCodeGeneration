@@ -70,7 +70,12 @@ function captureWatchers(): CapturedWatcher[] {
 /** Set the next readFile call's response. Multiple consecutive sets
  *  replace earlier ones — this is "what does THE NEXT read return". */
 function setConfigContent(content: string | null): void {
-    const fs = vscode.workspace.fs as { readFile: jest.Mock };
+    // Cast through `unknown` because the real FileSystem type carries
+    // many methods we don't mock — TS rightly refuses the direct cast.
+    // The vscode mock at src/test/unit/__mocks__/vscode.ts replaces
+    // workspace.fs.readFile with a jest.Mock, so this cast is safe at
+    // runtime even though TS can't see across the moduleNameMapper.
+    const fs = vscode.workspace.fs as unknown as { readFile: jest.Mock };
     if (content === null) {
         // Simulate "file does not exist" — readFile rejects.
         fs.readFile.mockRejectedValueOnce(new Error('ENOENT'));

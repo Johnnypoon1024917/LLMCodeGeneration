@@ -17,12 +17,16 @@ import {
 import type { AuditRecord } from '../../audit/types';
 
 function mkRecord(overrides: Partial<AuditRecord> & Pick<AuditRecord, 'kind' | 'sessionId'>): AuditRecord {
+    // Note: sessionId and kind are NOT set explicitly here even though
+    // they're required AuditRecord fields. The Pick<> in the parameter
+    // type guarantees they're present in `overrides`, and the spread
+    // below populates them. Listing them here would be redundant — TS
+    // 5.x correctly flags `sessionId: x, ...overrides` as a spread that
+    // always overwrites.
     return {
         id: `r-${Math.random().toString(36).slice(2, 10)}`,
         timestamp: '2026-05-04T00:00:00.000Z',
         actor: 'tester@host',
-        sessionId: overrides.sessionId,
-        kind: overrides.kind,
         summary: `mock ${overrides.kind}`,
         payload: {},
         prevHash: 'mock-prev-hash',

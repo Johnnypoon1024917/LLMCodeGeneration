@@ -57,7 +57,11 @@ describe('Tree-Sitter parser — language detection', () => {
     it('returns null for unsupported extensions', () => {
         expect(detectLanguage('readme.md')).toBeNull();
         expect(detectLanguage('config.json')).toBeNull();
-        expect(detectLanguage('script.py')).toBeNull();
+        // Python WAS in this list before V2 language session 2.
+        // It's now supported — see the dedicated Python detection
+        // suite below if/when the user authors Python tests.
+        expect(detectLanguage('source.go')).toBeNull();
+        expect(detectLanguage('Main.java')).toBeNull();
     });
 });
 

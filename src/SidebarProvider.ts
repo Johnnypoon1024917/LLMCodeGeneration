@@ -959,7 +959,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders) {
                         const rootUri = workspaceFolders[0]!.uri;
-                        buildWorkspaceGraph(rootUri).catch(e => log.error("CodeGraph init failed:", e));
+                        buildWorkspaceGraph(rootUri, this._extensionUri.fsPath).catch(e => log.error("CodeGraph init failed:", e));
 
                         const specs = this.specs();
                         if (specs) {
@@ -1031,7 +1031,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
                         // Force build if empty
                         if (!rawCodeGraph || rawCodeGraph === '{}') {
-                            await buildWorkspaceGraph(rootUri);
+                            await buildWorkspaceGraph(rootUri, this._extensionUri.fsPath);
                             rawCodeGraph = getGraphJSON();
                         }
 
@@ -2989,6 +2989,43 @@ Now make the file edits required to resolve this. Generate a concrete plan with 
                                                 type: 'taskRetry',
                                                 taskId,
                                                 attempt,
+                                            });
+                                        },
+                                        // V2.2.3 — surface "things I tried"
+                                        // in the UI. The Coordinator already
+                                        // tracks structured VerifierFailure[]
+                                        // through its retry loop and fires
+                                        // this callback once per attempt
+                                        // (after we know whether the next
+                                        // attempt healed it). We forward to
+                                        // the webview so the per-task region
+                                        // can render an attempts panel
+                                        // distinct from the inline streamed
+                                        // critique prose.
+                                        //
+                                        // selfHealed=true → the NEXT attempt
+                                        //   passed; render this attempt as
+                                        //   "tried, recovered" (amber).
+                                        // selfHealed=false → final failure
+                                        //   (max retries exhausted); render
+                                        //   as "final failure" (red).
+                                        //
+                                        // Telemetry observers (fixture harness)
+                                        // are NOT replaced — they keep getting
+                                        // their own callback. This wiring is
+                                        // additive: the Coordinator's
+                                        // verifierFailureCallback is a single
+                                        // function reference, but realAgent.ts
+                                        // builds its own runTask invocation
+                                        // separately so they don't compete.
+                                        verifierFailureCallback: (event) => {
+                                            this._view?.webview.postMessage({
+                                                type: 'verifierAttempt',
+                                                task: data.task,
+                                                attempt: event.attempt,
+                                                selfHealed: event.selfHealed,
+                                                critique: event.critique,
+                                                failures: event.failures,
                                             });
                                         },
                                     });

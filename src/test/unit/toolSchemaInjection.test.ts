@@ -89,13 +89,16 @@ describe('renderToolSchemasAsSystemPrompt', () => {
     });
 
     test('drops malformed tool entries silently', () => {
+        // The `as ToolDefinition[]` cast is the type-narrowing — we
+        // deliberately feed in malformed entries to exercise the
+        // defensive runtime behavior. Per-element @ts-expect-error
+        // directives would be redundant (and TS 5.x correctly flags
+        // them as unused since the cast already silences the per-
+        // element type errors).
         const tools = [
             writeFileTool,
-            // @ts-expect-error — testing defensive runtime behavior
             { type: 'function', function: { name: 123 } },  // bad name type
-            // @ts-expect-error
             null,
-            // @ts-expect-error
             { type: 'wrong-type', function: { name: 'foo', description: 'bar' } },
         ] as ToolDefinition[];
         const out = renderToolSchemasAsSystemPrompt(tools);

@@ -70,7 +70,7 @@ import { log } from '../logger';
 import type { ExtractedSymbols } from './astParser';
 
 /** Source language hint. Drives which wasm grammar is loaded. */
-export type SupportedLanguage = 'typescript' | 'tsx';
+export type SupportedLanguage = 'typescript' | 'tsx' | 'python';
 
 /**
  * Internal: cached language objects. First call to `getLanguage`
@@ -108,9 +108,27 @@ async function getLanguage(extensionPath: string, lang: SupportedLanguage): Prom
     if (cached) { return cached; }
 
     cached = (async () => {
-        const wasmPath = lang === 'tsx'
-            ? path.join(extensionPath, 'node_modules', 'tree-sitter-typescript', 'tree-sitter-tsx.wasm')
-            : path.join(extensionPath, 'node_modules', 'tree-sitter-typescript', 'tree-sitter-typescript.wasm');
+        // TS / TSX live as npm packages in node_modules; Python is
+        // vendored directly into the repo at parser/ because there's
+        // no equivalent npm package that ships only the wasm.
+        let wasmPath: string;
+        switch (lang) {
+            case 'tsx':
+                wasmPath = path.join(extensionPath, 'node_modules', 'tree-sitter-typescript', 'tree-sitter-tsx.wasm');
+                break;
+            case 'typescript':
+                wasmPath = path.join(extensionPath, 'node_modules', 'tree-sitter-typescript', 'tree-sitter-typescript.wasm');
+                break;
+            case 'python':
+                wasmPath = path.join(extensionPath, 'parser', 'tree-sitter-python.wasm');
+                break;
+            default: {
+                // Exhaustiveness check — TS will error here if a new
+                // SupportedLanguage variant is added without a wasm path.
+                const _exhaustive: never = lang;
+                throw new Error(`No wasm path configured for language: ${String(_exhaustive)}`);
+            }
+        }
         // Language.load accepts either a path string (browser) or
         // raw bytes (Node). In the extension host we read bytes
         // directly — more reliable than letting Emscripten guess
@@ -133,6 +151,7 @@ export function detectLanguage(filename: string): SupportedLanguage | null {
     if (ext === '.tsx') { return 'tsx'; }
     if (ext === '.js') { return 'typescript'; }    // JS is a TS subset for symbol purposes
     if (ext === '.jsx') { return 'tsx'; }
+    if (ext === '.py') { return 'python'; }
     return null;
 }
 
@@ -180,7 +199,24 @@ export async function extractSymbolsAsync(
             variables: []
         };
 
-        walk(tree.rootNode, source, result);
+        // Per-language walker dispatch. Each grammar exposes
+        // different node-type names so the walkers can't be merged
+        // without bloating the switch with no-op cases for inactive
+        // languages. Adding a new language = add a walker function +
+        // a case here.
+        switch (lang) {
+            case 'typescript':
+            case 'tsx':
+                walkTypeScript(tree.rootNode, source, result);
+                break;
+            case 'python':
+                walkPython(tree.rootNode, source, result);
+                break;
+            default: {
+                const _exhaustive: never = lang;
+                throw new Error(`No walker configured for language: ${String(_exhaustive)}`);
+            }
+        }
 
         // Deduplicate string arrays. Tree-Sitter visits each node
         // once but multi-name extractions (e.g. `import { a, b }`)
@@ -205,9 +241,11 @@ export async function extractSymbolsAsync(
 }
 
 /**
- * Recursive AST walker. Tree-Sitter exposes a tree we walk by
- * `node.namedChildren`. Each node has a `type` (string) we match
- * against the language's documented node-type names.
+ * Recursive AST walker for TypeScript / TSX / JavaScript / JSX.
+ *
+ * Tree-Sitter exposes a tree we walk by `node.namedChildren`. Each
+ * node has a `type` (string) we match against the language's
+ * documented node-type names.
  *
  * The TypeScript grammar's relevant node types (a small subset
  * captured from `node-types.json`):
@@ -224,9 +262,13 @@ export async function extractSymbolsAsync(
  *   - lexical_declaration    — `const`, `let` blocks
  *   - variable_declaration   — `var` blocks
  *   - call_expression        — for `import()` dynamic imports
+ *
+ * Python and other languages have their own walkers because their
+ * grammars use different node-type names (e.g. Python's
+ * `function_definition` vs TypeScript's `function_declaration`).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function walk(node: any, source: string, out: ExtractedSymbols): void {
+function walkTypeScript(node: any, source: string, out: ExtractedSymbols): void {
     if (!node) { return; }
 
     switch (node.type) {
@@ -270,7 +312,7 @@ function walk(node: any, source: string, out: ExtractedSymbols): void {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     for (const child of (node.namedChildren ?? []) as any[]) {
-        walk(child, source, out);
+        walkTypeScript(child, source, out);
     }
 }
 
@@ -443,6 +485,245 @@ function handleDynamicImport(node: any, source: string, out: ExtractedSymbols): 
             break;
         }
     }
+}
+
+/* ────────────────────────────────────────────────────────────────
+ * Python walker
+ *
+ * Python's grammar uses different node-type names from the JS/TS
+ * grammar. Most notably:
+ *   - `function_definition`        — `def foo():`
+ *   - `class_definition`           — `class Foo:`
+ *   - `import_statement`           — `import os` / `import os, sys`
+ *                                    (note: same name as TS, but
+ *                                    different child structure —
+ *                                    it has dotted_name children, no
+ *                                    `from` clause)
+ *   - `import_from_statement`      — `from os import path` /
+ *                                    `from os import path as p`
+ *   - `decorated_definition`       — wraps function/class with
+ *                                    decorators; we recurse into it
+ *
+ * Python has no syntactic concept of "exports". The conventions are
+ * (a) `__all__` list, (b) public = doesn't start with `_`. For
+ * symbol-graph purposes, treating top-level function/class
+ * declarations as the module's public API is the right
+ * approximation — that's what other Python code would import.
+ *
+ * Python also has no equivalent to TS interfaces (`Protocol` from
+ * typing is the closest, but it's just a class). We leave
+ * `interfaces: []`.
+ *
+ * What this Python walker handles:
+ *   - Top-level function and class definitions → functions, classes,
+ *     and exports (since "top-level public def" ≈ "exported")
+ *   - Methods inside classes → functions (matching TS walker)
+ *   - `import` statements → imports + importedNames (as the local
+ *     binding, e.g. `import os.path as p` → 'p')
+ *   - `from` imports → imports (the source module) + importedNames
+ *     (each imported name)
+ *   - Top-level assignments (`x = 1` at module scope) → variables
+ *
+ * What this Python walker does NOT handle (deferred):
+ *   - `__all__` parsing — would refine exports[] but the
+ *     "top-level def is exported" approximation is good enough
+ *     for symbol-graph context scoring.
+ *   - Conditional imports (inside try/except). Tree-Sitter sees
+ *     them as nested but we still capture them — acceptable.
+ *   - Star imports (`from os import *`) — captured as the module
+ *     path with no names. Good enough.
+ * ────────────────────────────────────────────────────────────────
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function walkPython(node: any, source: string, out: ExtractedSymbols, depth: number = 0): void {
+    if (!node) { return; }
+
+    switch (node.type) {
+        case 'function_definition':
+            captureNameOf(node, source, out.functions);
+            // Top-level def → public API. Methods inside classes
+            // are at depth ≥ 2 (module → class → function); only
+            // the depth-1 functions count as exports.
+            if (depth === 1) {
+                const nameNode = node.childForFieldName?.('name');
+                if (nameNode) {
+                    const name = sliceSource(source, nameNode);
+                    // Underscore-prefixed = convention for private,
+                    // not an export. Dunder methods (__init__ etc.)
+                    // would be fine but they're never at top level.
+                    if (name && !name.startsWith('_')) {
+                        out.exports.push(name);
+                    }
+                }
+            }
+            break;
+        case 'class_definition':
+            captureNameOf(node, source, out.classes);
+            if (depth === 1) {
+                const nameNode = node.childForFieldName?.('name');
+                if (nameNode) {
+                    const name = sliceSource(source, nameNode);
+                    if (name && !name.startsWith('_')) {
+                        out.exports.push(name);
+                    }
+                }
+            }
+            break;
+        case 'import_statement':
+            handlePythonImport(node, source, out);
+            break;
+        case 'import_from_statement':
+            handlePythonFromImport(node, source, out);
+            break;
+        case 'assignment':
+            // Top-level assignments only — nested ones would pollute
+            // variables[] with locals from inside functions.
+            if (depth === 1) {
+                handlePythonAssignment(node, source, out);
+            }
+            break;
+        case 'decorated_definition':
+            // Decorators wrap the underlying definition. Walk into
+            // the child to capture the wrapped class/function. The
+            // child IS at the same logical depth (a decorated
+            // top-level def is still top-level), so don't increment.
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            for (const child of (node.namedChildren ?? []) as any[]) {
+                walkPython(child, source, out, depth);
+            }
+            return;  // Don't double-recurse below
+    }
+
+    // Increment depth when entering a definition body so methods
+    // and nested classes don't get tagged as top-level exports.
+    const childDepth = (node.type === 'function_definition' || node.type === 'class_definition')
+        ? depth + 1
+        : (node.type === 'module' ? 1 : depth);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const child of (node.namedChildren ?? []) as any[]) {
+        walkPython(child, source, out, childDepth);
+    }
+}
+
+/** Handle `import os` / `import os.path as p` / `import os, sys`. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function handlePythonImport(node: any, source: string, out: ExtractedSymbols): void {
+    // Children of `import_statement` are `dotted_name` or
+    // `aliased_import` (when `as` is present).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const child of (node.namedChildren ?? []) as any[]) {
+        let modulePath: string;
+        let localName: string;
+
+        if (child.type === 'dotted_name') {
+            // `import os` → modulePath = 'os', localName = 'os'
+            // `import os.path` → modulePath = 'os.path', localName = 'os' (the bound name)
+            modulePath = sliceSource(source, child);
+            // Python binds the FIRST segment of dotted imports:
+            // `import os.path` makes `os` the local binding, and
+            // `os.path` accessible through it. For symbol-graph
+            // purposes, the local binding is what matters.
+            const firstSegment = modulePath.split('.')[0];
+            localName = firstSegment ?? modulePath;
+        } else if (child.type === 'aliased_import') {
+            // `import os.path as p`
+            const nameNode = child.childForFieldName?.('name');
+            const aliasNode = child.childForFieldName?.('alias');
+            if (!nameNode || !aliasNode) { continue; }
+            modulePath = sliceSource(source, nameNode);
+            localName = sliceSource(source, aliasNode);
+        } else {
+            continue;
+        }
+
+        if (!modulePath) { continue; }
+        if (!out.imports.includes(modulePath)) {
+            out.imports.push(modulePath);
+        }
+        const list = out.importedNames[modulePath] ?? [];
+        if (localName) {
+            list.push(localName);
+        }
+        out.importedNames[modulePath] = list;
+    }
+}
+
+/** Handle `from os import path` / `from os import path as p` /
+ *  `from os import (path, sep)` / `from os import *`. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function handlePythonFromImport(node: any, source: string, out: ExtractedSymbols): void {
+    // The module name is at `module_name` field. The imported
+    // names are the remaining named children (dotted_name or
+    // aliased_import). A `wildcard_import` child means `import *`.
+    const moduleField = node.childForFieldName?.('module_name');
+    if (!moduleField) { return; }
+    const modulePath = sliceSource(source, moduleField);
+    if (!modulePath) { return; }
+
+    if (!out.imports.includes(modulePath)) {
+        out.imports.push(modulePath);
+    }
+    const list = out.importedNames[modulePath] ?? [];
+
+    // `name` field is a list when there are multiple imported
+    // identifiers, but Tree-Sitter exposes them as repeated named
+    // children. Walk them all.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const child of (node.namedChildren ?? []) as any[]) {
+        if (child === moduleField) { continue; }  // skip the module
+        if (child.type === 'wildcard_import') {
+            // `from m import *` — register the module but no specific
+            // names. Consumers fall back to module-level analysis.
+            continue;
+        }
+        if (child.type === 'dotted_name') {
+            const name = sliceSource(source, child);
+            if (name) { list.push(name); }
+        } else if (child.type === 'aliased_import') {
+            // `from m import x as y` — record the local binding (y)
+            const aliasNode = child.childForFieldName?.('alias');
+            if (aliasNode) {
+                const localName = sliceSource(source, aliasNode);
+                if (localName) { list.push(localName); }
+            }
+        }
+    }
+    out.importedNames[modulePath] = list;
+}
+
+/** Handle top-level assignments like `x = 1` or `x, y = ...`. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function handlePythonAssignment(node: any, source: string, out: ExtractedSymbols): void {
+    // `assignment` has `left` and `right` fields. Left can be:
+    //   - identifier:      `x = 1`
+    //   - pattern_list:    `x, y = ...` (tuple unpacking)
+    //   - tuple_pattern:   `(x, y) = ...`
+    //   - list_pattern:    `[x, y] = ...`
+    //   - subscript / attribute (e.g. `obj.x = 1`) — skip these,
+    //     they're not new bindings, they're mutation
+    const leftNode = node.childForFieldName?.('left');
+    if (!leftNode) { return; }
+    collectPythonAssignmentTargets(leftNode, source, out.variables);
+}
+
+/** Walk a Python assignment LHS pattern and collect identifier names. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function collectPythonAssignmentTargets(node: any, source: string, into: string[]): void {
+    if (!node) { return; }
+    if (node.type === 'identifier') {
+        const name = sliceSource(source, node);
+        if (name) { into.push(name); }
+        return;
+    }
+    if (node.type === 'pattern_list' || node.type === 'tuple_pattern' || node.type === 'list_pattern') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const child of (node.namedChildren ?? []) as any[]) {
+            collectPythonAssignmentTargets(child, source, into);
+        }
+        return;
+    }
+    // subscript / attribute / call — these are mutations of an
+    // existing binding, not new bindings. Skip.
 }
 
 /** Extract source text for a node by its byte offsets. */
